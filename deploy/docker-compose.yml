@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  # 1. Local Read-Only Database
+  mysql:
+    image: mysql:8.0
+    container_name: zhiku-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASS}
+      MYSQL_DATABASE: zhiku_db
+    ports:
+      - "3308:3306"
+    volumes:
+      - ./db_data:/var/lib/mysql
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # 2. Backend API (FastAPI)
+  api:
+    build: ./backend
+    container_name: zhiku-api
+    restart: unless-stopped
+    depends_on:
+      - mysql
+    environment:
+      - DB_HOST=mysql
+      - DB_USER=root
+      - DB_PASS=${MYSQL_ROOT_PASS}
+      - DB_NAME=zhiku_db
+      - SOURCE_DB_HOST=${SOURCE_DB_HOST}
+      - SOURCE_DB_PORT=${SOURCE_DB_PORT}
+      - SOURCE_DB_USER=${SOURCE_DB_USER}
+      - SOURCE_DB_PASS=${SOURCE_DB_PASS}
+      - MAX_DEVICE_LOGS=${MAX_DEVICE_LOGS}
+      - INLINE_LOG_LIMIT=${INLINE_LOG_LIMIT}
+      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS}
+      - CACHE_DIR=/app/cache
+      - OIL_THERMAL_DATA_DIR=/app/data
+      - AUTH_SECRET=${AUTH_SECRET}
+      - SESSION_TTL_SECONDS=${SESSION_TTL_SECONDS}
+      - ZHIKU_USERS=${ZHIKU_USERS}
+    ports:
+      - "8086:8000"
+    volumes:
+      - ./api_cache:/app/cache
+      - ./data:/app/data:ro
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+
+  # 3. Frontend (Nginx)
+  web:
+    image: nginx:alpine
+    container_name: zhiku-web
+    restart: unless-stopped
+    volumes:
+      - ./frontend:/usr/share/nginx/html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8085:80"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 128M

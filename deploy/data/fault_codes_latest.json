@@ -1,0 +1,1477 @@
+{
+  "source_file": "故障码清单-定位问题看表V3.0.xlsx",
+  "source_sheet": "故障码清单V5.0-屏蔽",
+  "generated_at": "2026-05-14",
+  "records": [
+    {
+      "module": "转锅模块",
+      "error_code": "10101",
+      "err_code": "SZG01",
+      "meaning": "转锅模块命令参数错误",
+      "err_message": "转锅参数错误",
+      "remark": "记录日志",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "10106",
+      "err_code": "SZG02",
+      "meaning": "转锅模块组件忙",
+      "err_message": "转锅指令频繁",
+      "remark": "未执行完毕又收到新指令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "10109",
+      "err_code": "SZG03",
+      "meaning": "转锅模块未知命令",
+      "err_message": "转锅参数未知",
+      "remark": "指令未在定义范围内",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "1010B",
+      "err_code": "HZG04",
+      "meaning": "转锅模块硬件操作失败",
+      "err_message": "转锅驱动器故障",
+      "remark": "下位机与对应部件掉线\n1、检查驱动器电源指示灯是否亮\n2、若灯亮，检查通讯线连接是否正常。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "10120",
+      "err_code": "HZG05",
+      "meaning": "转锅模块电机移动到位置出错",
+      "err_message": "转锅故障",
+      "remark": "搅拌尺未转到指定位置\n1、堵转或是驱动器报错，报错详见HZG11",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "10121",
+      "err_code": "HZG06",
+      "meaning": "转锅模块电机找零出错",
+      "err_message": "转锅复位失败",
+      "remark": "情形之一：转锅传感器没装",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "10122",
+      "err_code": "HZG07",
+      "meaning": "转锅模块电机执行前必须先找零位(复位)",
+      "err_message": "转锅复位失败",
+      "remark": "情形之一：转锅传感器没装",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "10127",
+      "err_code": "HZG08",
+      "meaning": "转锅模块电机没有产生期望的运动",
+      "err_message": "转锅故障",
+      "remark": "预留",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "10128",
+      "err_code": "HZG09",
+      "meaning": "转锅模块电机超出运动限制",
+      "err_message": "转锅故障",
+      "remark": "预留",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "10143",
+      "err_code": "HZG10",
+      "meaning": "线圈加热控制模块在工作中",
+      "err_message": "加热不转锅",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "1010F",
+      "err_code": "HZG11",
+      "meaning": "转锅模块外接设备故障",
+      "err_message": "转锅电机故障",
+      "remark": "电机故障（电机自带的故障信息）\n搜索故障日志关键字：roll read error",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "10134",
+      "err_code": "HZG12",
+      "meaning": "和驱动器的通讯出现异常",
+      "err_message": "转锅驱动器通讯丢失",
+      "remark": "1、主控板与驱动器无法通讯，请检查主板与驱动器连接线的485通讯线。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "转锅模块",
+      "error_code": "101FF",
+      "err_code": "SZG99",
+      "meaning": "转锅模块命令超时",
+      "err_message": "转锅超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "10201",
+      "err_code": "SQG01",
+      "meaning": "倾锅模块命令参数错误",
+      "err_message": "倾锅参数错误",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "10206",
+      "err_code": "SQG02",
+      "meaning": "倾锅模块组件忙",
+      "err_message": "倾锅指令频繁",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "10209",
+      "err_code": "SQG03",
+      "meaning": "倾锅模块未知命令",
+      "err_message": "倾锅参数未知",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "1020B",
+      "err_code": "HQG04",
+      "meaning": "倾锅模块硬件操作失败",
+      "err_message": "倾锅驱动器故障",
+      "remark": "下位机与对应部件掉线\n1、检查驱动器电源指示灯是否亮\n2、若灯亮，检查通讯线连接是否正常。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "10220",
+      "err_code": "HQG05",
+      "meaning": "倾锅模块电机移动到位置出错",
+      "err_message": "倾锅故障",
+      "remark": "倾锅没有走到指定位置\n1、堵转或是驱动器报错，报错详见HQG10",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "10221",
+      "err_code": "HQG06",
+      "meaning": "倾锅模块电机找零出错",
+      "err_message": "倾锅复位失败",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "10222",
+      "err_code": "HQG07",
+      "meaning": "倾锅模块电机执行前必须先找零位(复位)",
+      "err_message": "倾锅复位失败",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "10227",
+      "err_code": "HQG08",
+      "meaning": "倾锅模块电机没有产生期望的运动",
+      "err_message": "倾锅故障",
+      "remark": "驱动器或电磁刹车故障：\n1、进入工程界面，“锅设置”，找到“长按解锁”，此时用手移动锅位，如果用力能移动说明机械没有卡住电磁刹车正常。若不能移动，可能是驱动器故障，拆开盖子查看驱动器指示灯，对照右图定位错误。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "10228",
+      "err_code": "HQG09",
+      "meaning": "倾锅模块电机超出运动限制",
+      "err_message": "倾锅故障",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "1020F",
+      "err_code": "HQG10",
+      "meaning": "倾锅模块外接设备故障",
+      "err_message": "倾锅电机故障",
+      "remark": "电机故障（电机自带的故障信息）\n搜索故障日志关键字：lean read error",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "10234",
+      "err_code": "HQG11",
+      "meaning": "和驱动器的通讯出现异常",
+      "err_message": "倾锅驱动器通讯丢失",
+      "remark": "1、主控板与驱动器无法通讯，请检查主板与驱动器连接线的485通讯线。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "倾锅模块",
+      "error_code": "102FF",
+      "err_code": "SQG99",
+      "meaning": "倾锅模块命令超时，请重试",
+      "err_message": "倾锅超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "测温模块",
+      "error_code": "10309",
+      "err_code": "SCW01",
+      "meaning": "红外测温模块未知命令",
+      "err_message": "红外测温参数未知",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "测温模块",
+      "error_code": "10330",
+      "err_code": "HCW02",
+      "meaning": "红外测温模块通信错误",
+      "err_message": "红外测温失败",
+      "remark": "多次检测，下位机与红外传感器通讯失败",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "测温模块",
+      "error_code": "10331",
+      "err_code": "HCW03",
+      "meaning": "红外测温模块通信CRC错误",
+      "err_message": "红外测温失败",
+      "remark": "多次检测，下位机与红外传感器通讯校验失败",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "测温模块",
+      "error_code": "10332",
+      "err_code": "HCW04",
+      "meaning": "红外测温模块通信超时",
+      "err_message": "红外测温失败",
+      "remark": "多次检测，下位机与红外传感器通讯超时\n1、检查红外测温传感器线路或更换传感器",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "测温模块",
+      "error_code": "103FF",
+      "err_code": "SCW99",
+      "meaning": "红外测温超时",
+      "err_message": "红外测温模块超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "通风风扇模块",
+      "error_code": "10C09",
+      "err_code": "STFFS01",
+      "meaning": "通风风扇模块未知命令",
+      "err_message": "通风风扇参数未知",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "通风风扇模块",
+      "error_code": "10C0C",
+      "err_code": "HTFFS02",
+      "meaning": "通风风扇模块硬件驱动器错误",
+      "err_message": "通风风扇故障",
+      "remark": "预留",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "通风风扇模块",
+      "error_code": "10C24",
+      "err_code": "STFFS03",
+      "meaning": "通风风扇模块电机忙",
+      "err_message": "通风风扇指令频繁",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "通风风扇模块",
+      "error_code": "10CFF",
+      "err_code": "STFFS99",
+      "meaning": "通风风扇模块超时",
+      "err_message": "通风风扇命令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热风扇模块",
+      "error_code": "10606",
+      "err_code": "SJRFS01",
+      "meaning": "加热盘风扇模块组件忙",
+      "err_message": "加热风扇指令频繁",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热风扇模块",
+      "error_code": "10609",
+      "err_code": "SJRFS02",
+      "meaning": "加热盘风扇模块未知命令",
+      "err_message": "加热风扇参数未知",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热风扇模块",
+      "error_code": "1060C",
+      "err_code": "HJRFS03",
+      "meaning": "加热盘风扇模块硬件驱动器错误",
+      "err_message": "加热风扇不转",
+      "remark": "可能情况：\n1、风扇转依然报错，可能是检测线路问题也可能是风扇问题一直输出故障。检查线路或更换风扇。\n2、风扇转依然报错，可能风扇控制线路有问题。检查线路或更换风扇。",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热风扇模块",
+      "error_code": "106FF",
+      "err_code": "SJRFS99",
+      "meaning": "加热盘风扇模块超时",
+      "err_message": "加热风扇指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "10809",
+      "err_code": "SJR01",
+      "meaning": "线圈加热控制模块未知命令",
+      "err_message": "线圈加热控制参数未知",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "1080B",
+      "err_code": "HJR02",
+      "meaning": "线圈加热控制模块硬件操作失败",
+      "err_message": "加热器故障",
+      "remark": "1、主控板与机芯无法通讯，请检查机芯连接线。\n若是1.4版本的电路板需要机芯工5V的电源，请检查机芯5V电源是否连接。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "10841",
+      "err_code": "HJR03",
+      "meaning": "线圈加热控制模块温度超下限",
+      "err_message": "加热器不加热",
+      "remark": "不加热",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "10843",
+      "err_code": "HJR04",
+      "meaning": "线圈加热控制模块在工作中，但检测到锅没旋转",
+      "err_message": "加热不转锅",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "1080F",
+      "err_code": "HJR05",
+      "meaning": "线圈加热控制外接设备故障",
+      "err_message": "（机芯自带的故障信息）",
+      "remark": "<main_board.log>搜索主控日志关键字\nheat state error\n错误查询如右图对应",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "10840",
+      "err_code": "HJR06",
+      "meaning": "线圈加热控制模块温度超上限",
+      "err_message": "加热故障",
+      "remark": "预留",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "10842",
+      "err_code": "HJR07",
+      "meaning": "线圈加热控制模块锅停转，但应用层仍然在加热",
+      "err_message": "加热故障",
+      "remark": "预留",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "10834",
+      "err_code": "HJR08",
+      "meaning": "和机芯的通讯出现异常",
+      "err_message": "机芯通讯丢失",
+      "remark": "1、主控板与机芯无法通讯，请检查机芯连接线。\n若是1.4版本的电路板需要机芯工5V的电源，请检查机芯5V电源是否连接。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "1080F",
+      "err_code": "HJRG09",
+      "meaning": "外部设备故障",
+      "err_message": "加热故障",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "10844",
+      "err_code": "HJRG10",
+      "meaning": "线盘温度超上限",
+      "err_message": "线盘温度超上限",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "10845",
+      "err_code": "HJRG11",
+      "meaning": "机芯温度超上限",
+      "err_message": "机芯温度超上限",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "加热模块",
+      "error_code": "108FF",
+      "err_code": "SJR99",
+      "meaning": "线圈加热控制指令超时",
+      "err_message": "线圈加热控制指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料门模块",
+      "error_code": "20701",
+      "err_code": "SGLM01",
+      "meaning": "干料门模块命令参数错误",
+      "err_message": "干料门参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料门模块",
+      "error_code": "20707",
+      "err_code": "SGLM02",
+      "meaning": "干料门模块资源被锁",
+      "err_message": "干料门指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料门模块",
+      "error_code": "20709",
+      "err_code": "SGLM03",
+      "meaning": "干料门模块未知命令",
+      "err_message": "干料门参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料门模块",
+      "error_code": "2070B",
+      "err_code": "HGLM04",
+      "meaning": "干料门模块硬件操作失败",
+      "err_message": "干料门故障",
+      "remark": "没有投料直接下来\n1、干料门已打开，开门传感器故障，检查开门传感器。\n2、干料门没有打开，电机故障，检查电机线路，检查否卡住。\n正常投料后报错\n1、干料门已关闭，关门传感器故障，检查关门传感器。\n2、干料门没有关闭，电机故障，检查电机线路或是否卡住。",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料门模块",
+      "error_code": "20733",
+      "err_code": "HGLM05",
+      "meaning": "干料门模块无应答",
+      "err_message": "干料板掉线",
+      "remark": "即为干料板掉线，主控无法和干料板通讯。\n1、可能是线路松动，检查干料与主控的连接线是否松动，或更换连接线。\n2、程序没有运行，看运行只是等是否闪烁，若没有运行线刷程序尝试或更换电路板。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料门模块",
+      "error_code": "207FF",
+      "err_code": "SGLM99",
+      "meaning": "干料门模块命令超时",
+      "err_message": "干料板指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "(淀粉)搅拌模块",
+      "error_code": "10906",
+      "err_code": "SJB01",
+      "meaning": "水淀粉搅拌模块组件忙",
+      "err_message": "水淀粉搅拌指令频繁",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "(淀粉)搅拌模块",
+      "error_code": "10909",
+      "err_code": "SJB02",
+      "meaning": "水淀粉搅拌模块未知命令",
+      "err_message": "水淀粉搅拌参数未知",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "(淀粉)搅拌模块",
+      "error_code": "1090C",
+      "err_code": "HJB03",
+      "meaning": "水淀粉搅拌模块硬件驱动器错误",
+      "err_message": "水淀粉搅拌故障",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "(淀粉)搅拌模块",
+      "error_code": "1090F",
+      "err_code": "HJB04",
+      "meaning": "水淀粉搅拌模块外部设备故障",
+      "err_message": "水淀粉搅拌故障",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "(淀粉)搅拌模块",
+      "error_code": "10927",
+      "err_code": "HJB05",
+      "meaning": "水淀粉搅拌堵转故障",
+      "err_message": "水淀粉搅拌故障",
+      "remark": "1、电机转，可能霍尔信号有问题。检查线路或更换电机。\n2、电机不转，线路或电机损坏。检查线路或更换电机。",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "(淀粉)搅拌模块",
+      "error_code": "109FF",
+      "err_code": "SJB99",
+      "meaning": "水淀粉搅拌模块超时",
+      "err_message": "水淀粉搅拌指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料1(1)模块",
+      "error_code": "30101",
+      "err_code": "SL0101",
+      "meaning": "液料1模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料1(1)模块",
+      "error_code": "30107",
+      "err_code": "SL0102",
+      "meaning": "液料1模块资源被锁",
+      "err_message": "[XX]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料1(1)模块",
+      "error_code": "30109",
+      "err_code": "SL0103",
+      "meaning": "液料1模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料1(1)模块",
+      "error_code": "30133",
+      "err_code": "HL0104",
+      "meaning": "液料1模块连接不上",
+      "err_message": "[XX]模块异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料1(1)模块",
+      "error_code": "301FF",
+      "err_code": "SL0199",
+      "meaning": "液料1模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料2(2)模块",
+      "error_code": "30201",
+      "err_code": "SL0201",
+      "meaning": "液料2模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料2(2)模块",
+      "error_code": "30209",
+      "err_code": "SL0203",
+      "meaning": "液料2模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料2(2)模块",
+      "error_code": "30233",
+      "err_code": "HL0204",
+      "meaning": "液料2模块连接不上",
+      "err_message": "[XX]模块异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料2(2)模块",
+      "error_code": "302FF",
+      "err_code": "SL0299",
+      "meaning": "液料2模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料3(3)模块",
+      "error_code": "30301",
+      "err_code": "SL0301",
+      "meaning": "液料3模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料3(3)模块",
+      "error_code": "30307",
+      "err_code": "SL0302",
+      "meaning": "液料3模块资源被锁",
+      "err_message": "[XX]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料3(3)模块",
+      "error_code": "30309",
+      "err_code": "SL0303",
+      "meaning": "液料3模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料3(3)模块",
+      "error_code": "30333",
+      "err_code": "HL0304",
+      "meaning": "液料3模块连接不上",
+      "err_message": "[XX]模块异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料3(3)模块",
+      "error_code": "303FF",
+      "err_code": "SL0399",
+      "meaning": "液料3模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料4(4)模块",
+      "error_code": "30401",
+      "err_code": "SL0401",
+      "meaning": "液料4模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料4(4)模块",
+      "error_code": "30407",
+      "err_code": "SL0402",
+      "meaning": "液料4模块资源被锁",
+      "err_message": "[XX]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料4(4)模块",
+      "error_code": "30409",
+      "err_code": "SL0403",
+      "meaning": "液料4模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料4(4)模块",
+      "error_code": "30433",
+      "err_code": "HL0404",
+      "meaning": "液料4模块连接不上",
+      "err_message": "[XX]模块异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料4(4)模块",
+      "error_code": "304FF",
+      "err_code": "SL0499",
+      "meaning": "液料4模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料5(5)模块",
+      "error_code": "30501",
+      "err_code": "SL0501",
+      "meaning": "液料5模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料5(5)模块",
+      "error_code": "30507",
+      "err_code": "SL0502",
+      "meaning": "液料5模块资源被锁",
+      "err_message": "[XX]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料5(5)模块",
+      "error_code": "30509",
+      "err_code": "SL0503",
+      "meaning": "液料5模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料5(5)模块",
+      "error_code": "30533",
+      "err_code": "HL0504",
+      "meaning": "液料5模块连接不上",
+      "err_message": "[XX]模块异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料5(5)模块",
+      "error_code": "305FF",
+      "err_code": "SL0599",
+      "meaning": "液料5模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料6(6)模块",
+      "error_code": "30601",
+      "err_code": "SL0601",
+      "meaning": "液料6模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料6(6)模块",
+      "error_code": "30607",
+      "err_code": "SL0602",
+      "meaning": "液料6模块资源被锁",
+      "err_message": "[XX]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料6(6)模块",
+      "error_code": "30609",
+      "err_code": "SL0603",
+      "meaning": "液料6模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料6(6)模块",
+      "error_code": "30633",
+      "err_code": "HL0604",
+      "meaning": "液料6模块连接不上",
+      "err_message": "[XX]模块异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料6(6)模块",
+      "error_code": "306FF",
+      "err_code": "SL0699",
+      "meaning": "液料6模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料7(7)模块",
+      "error_code": "30701",
+      "err_code": "SL0701",
+      "meaning": "液料7模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料7(7)模块",
+      "error_code": "30707",
+      "err_code": "SL0702",
+      "meaning": "液料7模块资源被锁",
+      "err_message": "[XX]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料7(7)模块",
+      "error_code": "30709",
+      "err_code": "SL0703",
+      "meaning": "液料7模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料7(7)模块",
+      "error_code": "30733",
+      "err_code": "HL0704",
+      "meaning": "液料7模块连接不上",
+      "err_message": "[XX]模块异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料7(7)模块",
+      "error_code": "307FF",
+      "err_code": "SL0799",
+      "meaning": "液料7模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料蚝油(8)模块",
+      "error_code": "30901",
+      "err_code": "SL0801",
+      "meaning": "蚝油模块命令参数错误",
+      "err_message": "[蚝油]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料蚝油(8)模块",
+      "error_code": "30907",
+      "err_code": "SL0802",
+      "meaning": "蚝油模块资源被锁",
+      "err_message": "[蚝油]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料蚝油(8)模块",
+      "error_code": "30909",
+      "err_code": "SL0803",
+      "meaning": "蚝油模块未知命令",
+      "err_message": "[蚝油]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料蚝油(8)模块",
+      "error_code": "3090C",
+      "err_code": "HL0804",
+      "meaning": "蚝油模块硬件驱动器错误",
+      "err_message": "[蚝油]投料故障",
+      "remark": "硬件驱动器错误（过流）。新板子无，旧板子只有蚝油",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料蚝油(8)模块",
+      "error_code": "30933",
+      "err_code": "HL0805",
+      "meaning": "蚝油模块连接不上",
+      "err_message": "[蚝油]模块异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "液料蚝油(8)模块",
+      "error_code": "309FF",
+      "err_code": "SL0899",
+      "meaning": "蚝油模块命令超时",
+      "err_message": "[蚝油]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "食用油(09)模块",
+      "error_code": "10409",
+      "err_code": "SL0901",
+      "meaning": "食用油模块未知命令",
+      "err_message": "[食用油]参数未知",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "食用油(09)模块",
+      "error_code": "1040C",
+      "err_code": "HL0902",
+      "meaning": "食用油模块硬件驱动器错误",
+      "err_message": "[食用油]投料故障",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "食用油(09)模块",
+      "error_code": "10424",
+      "err_code": "SL0903",
+      "meaning": "食用油模块电机忙",
+      "err_message": "[食用油]指令频繁",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "食用油(09)模块",
+      "error_code": "10433",
+      "err_code": "HL0904",
+      "meaning": "食用油模块连接不上",
+      "err_message": "[食用油]模块异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "食用油(09)模块",
+      "error_code": "104FF",
+      "err_code": "SL0999",
+      "meaning": "食用油模块命令超时",
+      "err_message": "[食用油]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "纯净水(10)模块",
+      "error_code": "10706",
+      "err_code": "SL1001",
+      "meaning": "纯净水模块组件忙",
+      "err_message": "[水]指令频繁",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "纯净水(10)模块",
+      "error_code": "10709",
+      "err_code": "SL1002",
+      "meaning": "纯净水模块未知命令",
+      "err_message": "[水]参数未知",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "纯净水(10)模块",
+      "error_code": "10733",
+      "err_code": "HL1004",
+      "meaning": "纯净水模块连接不上",
+      "err_message": "[水]模块异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "纯净水(10)模块",
+      "error_code": "107FF",
+      "err_code": "SL1099",
+      "meaning": "纯净水模块命令超时",
+      "err_message": "[水]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "淀粉(11)模块",
+      "error_code": "10A06",
+      "err_code": "SL1101",
+      "meaning": "水淀粉模块组件忙",
+      "err_message": "[水淀粉]指令频繁",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "淀粉(11)模块",
+      "error_code": "10A09",
+      "err_code": "SL1102",
+      "meaning": "水淀粉模块未知命令",
+      "err_message": "[水淀粉]参数未知",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "淀粉(11)模块",
+      "error_code": "10A0C",
+      "err_code": "HL1103",
+      "meaning": "水淀粉模块硬件驱动器错误",
+      "err_message": "[水淀粉]投料故障",
+      "remark": "",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "淀粉(11)模块",
+      "error_code": "10A33",
+      "err_code": "HL1104",
+      "meaning": "水淀粉模块连接不上",
+      "err_message": "[水淀粉]模块异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "淀粉(11)模块",
+      "error_code": "10A99",
+      "err_code": "SL1199",
+      "meaning": "水淀粉模块命令超时",
+      "err_message": "[水淀粉]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料1(1)模块",
+      "error_code": "20101",
+      "err_code": "SP0101",
+      "meaning": "干料1模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料1(1)模块",
+      "error_code": "20107",
+      "err_code": "SP0102",
+      "meaning": "干料1模块资源被锁",
+      "err_message": "[XX]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料1(1)模块",
+      "error_code": "20109",
+      "err_code": "SP0103",
+      "meaning": "干料1模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料1(1)模块",
+      "error_code": "20127",
+      "err_code": "HP0104",
+      "meaning": "干料1模块电机没有产生期望的运动",
+      "err_message": "[XX]堵转",
+      "remark": "堵转",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料1(1)模块",
+      "error_code": "20133",
+      "err_code": "HP0105",
+      "meaning": "干料1模块连接不上",
+      "err_message": "干料板掉线",
+      "remark": "堵转\n1、电机转一会停或来回正反转（触发堵转脱困），霍尔检测信号中断。检查线路或更换电机。\n2、电机不转，可能电机卡住、线路断开、电机损坏。检查是否被卡住，检查线路或更换电机\n注意：干料v5.3.1和v5.3.2，由于校准数据异常可能会报堵转（这个v5.3.6修复了），但这个bug电机不会触发堵转脱困，也就是没有来回正反转。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料1(1)模块",
+      "error_code": "201FF",
+      "err_code": "SP0199",
+      "meaning": "干料1模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "2、电机不转，可能电机卡住、线路断开、电机损坏。检查是否被卡住，检查线路或更换电机",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料2(2)模块",
+      "error_code": "20201",
+      "err_code": "SP0201",
+      "meaning": "干料2模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "注意：干料v5.3.1和v5.3.2，由于校准数据异常可能会报堵转（这个v5.3.6修复了），但这个bug电机不会触发堵转脱困，也就是没有来回正反转。",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料2(2)模块",
+      "error_code": "20207",
+      "err_code": "SP0202",
+      "meaning": "干料2模块资源被锁",
+      "err_message": "[XX]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料2(2)模块",
+      "error_code": "20209",
+      "err_code": "SP0203",
+      "meaning": "干料2模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料2(2)模块",
+      "error_code": "20227",
+      "err_code": "HP0204",
+      "meaning": "干料2模块电机没有产生期望的运动",
+      "err_message": "[XX]堵转",
+      "remark": "堵转\n1、电机转一会停或来回正反转（触发堵转脱困），霍尔检测信号中断。检查线路或更换电机。\n2、电机不转，可能电机卡住、线路断开、电机损坏。检查是否被卡住，检查线路或更换电机\n注意：干料v5.3.1和v5.3.2，由于校准数据异常可能会报堵转（这个v5.3.6修复了），但这个bug电机不会触发堵转脱困，也就是没有来回正反转。",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料2(2)模块",
+      "error_code": "20233",
+      "err_code": "HP0205",
+      "meaning": "干料2模块连接不上",
+      "err_message": "干料板掉线",
+      "remark": "即为干料板掉线，主控无法和干料板通讯。\n1、可能是线路松动，检查干料与主控的连接线是否松动，或更换连接线。\n2、程序没有运行，看运行只是等是否闪烁，若没有运行线刷程序尝试或更换电路板。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料2(2)模块",
+      "error_code": "202FF",
+      "err_code": "SP0299",
+      "meaning": "干料2模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料3(3)模块",
+      "error_code": "20301",
+      "err_code": "SP0301",
+      "meaning": "干料3模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料3(3)模块",
+      "error_code": "20307",
+      "err_code": "SP0302",
+      "meaning": "干料3模块资源被锁",
+      "err_message": "[XX]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料3(3)模块",
+      "error_code": "20309",
+      "err_code": "SP0303",
+      "meaning": "干料3模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料3(3)模块",
+      "error_code": "20327",
+      "err_code": "HP0304",
+      "meaning": "干料3模块电机没有产生期望的运动",
+      "err_message": "[XX]堵转",
+      "remark": "堵转\n1、电机转一会停或来回正反转（触发堵转脱困），霍尔检测信号中断。检查线路或更换电机。\n2、电机不转，可能电机卡住、线路断开、电机损坏。检查是否被卡住，检查线路或更换电机\n注意：干料v5.3.1和v5.3.2，由于校准数据异常可能会报堵转（这个v5.3.6修复了），但这个bug电机不会触发堵转脱困，也就是没有来回正反转。",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料3(3)模块",
+      "error_code": "20333",
+      "err_code": "HP0305",
+      "meaning": "干料3模块连接不上",
+      "err_message": "干料板掉线",
+      "remark": "即为干料板掉线，主控无法和干料板通讯。\n1、可能是线路松动，检查干料与主控的连接线是否松动，或更换连接线。\n2、程序没有运行，看运行只是等是否闪烁，若没有运行线刷程序尝试或更换电路板。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料3(3)模块",
+      "error_code": "203FF",
+      "err_code": "SP0399",
+      "meaning": "干料3模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料4(4)模块",
+      "error_code": "20401",
+      "err_code": "SP0401",
+      "meaning": "干料4模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料4(4)模块",
+      "error_code": "20407",
+      "err_code": "SP0402",
+      "meaning": "干料4模块资源被锁",
+      "err_message": "[XX]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料4(4)模块",
+      "error_code": "20409",
+      "err_code": "SP0403",
+      "meaning": "干料4模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料4(4)模块",
+      "error_code": "20427",
+      "err_code": "HP0404",
+      "meaning": "干料4模块电机没有产生期望的运动",
+      "err_message": "[XX]堵转",
+      "remark": "堵转\n1、电机转一会停或来回正反转（触发堵转脱困），霍尔检测信号中断。检查线路或更换电机。\n2、电机不转，可能电机卡住、线路断开、电机损坏。检查是否被卡住，检查线路或更换电机\n注意：干料v5.3.1和v5.3.2，由于校准数据异常可能会报堵转（这个v5.3.6修复了），但这个bug电机不会触发堵转脱困，也就是没有来回正反转。",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料4(4)模块",
+      "error_code": "20433",
+      "err_code": "HP0405",
+      "meaning": "干料4模块连接不上",
+      "err_message": "干料板掉线",
+      "remark": "即为干料板掉线，主控无法和干料板通讯。\n1、可能是线路松动，检查干料与主控的连接线是否松动，或更换连接线。\n2、程序没有运行，看运行只是等是否闪烁，若没有运行线刷程序尝试或更换电路板。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料4(4)模块",
+      "error_code": "204FF",
+      "err_code": "SP0499",
+      "meaning": "干料4模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料5(5)模块",
+      "error_code": "20501",
+      "err_code": "SP0501",
+      "meaning": "干料5模块命令参数错误",
+      "err_message": "[XX]参数错误",
+      "remark": "传参传错了",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料5(5)模块",
+      "error_code": "20507",
+      "err_code": "SP0502",
+      "meaning": "干料5模块资源被锁",
+      "err_message": "[XX]指令频繁",
+      "remark": "正在工作还未结束又发了新的执行命令",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料5(5)模块",
+      "error_code": "20509",
+      "err_code": "SP0503",
+      "meaning": "干料5模块未知命令",
+      "err_message": "[XX]参数未知",
+      "remark": "控制命令错误",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料5(5)模块",
+      "error_code": "20527",
+      "err_code": "HP0504",
+      "meaning": "干料5模块电机没有产生期望的运动",
+      "err_message": "[XX]堵转",
+      "remark": "堵转\n1、电机转一会停或来回正反转（触发堵转脱困），霍尔检测信号中断。检查线路或更换电机。\n2、电机不转，可能电机卡住、线路断开、电机损坏。检查是否被卡住，检查线路或更换电机\n注意：干料v5.3.1和v5.3.2，由于校准数据异常可能会报堵转（这个v5.3.6修复了），但这个bug电机不会触发堵转脱困，也就是没有来回正反转。",
+      "priority": "二级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料5(5)模块",
+      "error_code": "20533",
+      "err_code": "HP0505",
+      "meaning": "干料5模块连接不上",
+      "err_message": "干料板掉线",
+      "remark": "即为干料板掉线，主控无法和干料板通讯。\n1、可能是线路松动，检查干料与主控的连接线是否松动，或更换连接线。\n2、程序没有运行，看运行只是等是否闪烁，若没有运行线刷程序尝试或更换电路板。",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "干料5(5)模块",
+      "error_code": "205FF",
+      "err_code": "SP0599",
+      "meaning": "干料5模块命令超时",
+      "err_message": "[XX]指令超时",
+      "remark": "",
+      "priority": "三级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    },
+    {
+      "module": "上下位机通讯模块",
+      "error_code": "80806",
+      "err_code": "HTX0886",
+      "meaning": "上下位机断线",
+      "err_message": "通讯异常",
+      "remark": "",
+      "priority": "一级故障",
+      "source_sheet": "故障码清单V5.0-屏蔽"
+    }
+  ]
+}
