@@ -2,6 +2,30 @@
 
 ## 2026-06-06
 
+### GitHub 自动化接入
+- 操作人/会话：Codex。
+- 目标：验证 `git@github.com:gaogoying-sudo/zhiku.git` 是否可用，并接入免费 GitHub Actions 机械检查，减少后续 token 消耗。
+- GitHub 连通性：
+  - 本机 SSH 认证成功。
+  - `origin` 已指向 `git@github.com:gaogoying-sudo/zhiku.git`。
+  - 已安全快进合并远端提交 `1490edd docs: add browser development protocol`。
+- 新增：
+  - `.github/workflows/ci.yml`
+  - `docs/GITHUB_AUTOMATION.md`
+- 提交与推送：
+  - commit：`a87ffd1 chore: add automation and github ci`
+  - push：`main -> origin/main`
+- GitHub Actions 验证：
+  - Workflow：`Zhiku CI`
+  - 运行结果：completed / success
+  - 链接：`https://github.com/gaogoying-sudo/zhiku/actions/runs/27027603916`
+- 当前策略：
+  - GitHub 先只做免费 CI 检查，不做云端自动部署。
+  - 云端部署继续由本机 `make release` 完成，避免把 SSH/数据库密钥放到 GitHub。
+- 遗留问题：
+  - 如后续要 GitHub 一键部署，建议先配置 SSH key 方式的 GitHub Secrets，不建议直接放服务器密码。
+- 解除锁定：GitHub 自动化。
+
 ### 本地自动化建设
 - 操作人/会话：Codex。
 - 目标：降低后续功能开发中的重复 token 消耗，把检查、部署、冒烟和状态查看固化为标准命令。
