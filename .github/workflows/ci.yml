@@ -1,0 +1,56 @@
+name: Zhiku CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: Syntax and package guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Backend syntax check
+        run: python -m py_compile deploy/backend/main.py
+
+      - name: Frontend inline JavaScript syntax check
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          text = Path('deploy/frontend/index.html').read_text()
+          start = text.index('<script>') + len('<script>')
+          end = text.rindex('</script>')
+          Path('/tmp/zhiku-inline.js').write_text(text[start:end])
+          PY
+          node --check /tmp/zhiku-inline.js
+
+      - name: Frontend entry sync check
+        run: |
+          if [ -f deploy/frontend/app.html ]; then
+            cmp -s deploy/frontend/index.html deploy/frontend/app.html
+          else
+            echo "deploy/frontend/app.html is not tracked yet; skip sync check."
+          fi
+
+      - name: Sensitive file guard
+        run: |
+          test ! -f deploy/.env
+          test ! -f handover/01-SECRETS-AND-ACCOUNTS.md
+          test ! -d deploy/api_cache
+          test ! -d deploy/db_data
