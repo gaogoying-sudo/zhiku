@@ -94,6 +94,34 @@ make progress
 
 会向 `docs/progress.md` 追加固定格式模板。完成部署后必须补齐内容。
 
+## 本地小模型委托
+
+本机 Ollama 可承担低风险机械总结。默认使用 `qwen2.5:3b`：
+
+```bash
+make delegate-check
+make delegate-smoke SMOKE_KEYWORD=功率诊断 SMOKE_SN=0105222506020185
+make delegate-status
+```
+
+或直接调用：
+
+```bash
+python3 scripts/local_agent_delegate.py --mode run --command check --task "本地检查并总结"
+```
+
+如需更强模型：
+
+```bash
+LOCAL_AGENT_MODEL=qwen3:14b make delegate-smoke SMOKE_KEYWORD=功率诊断
+```
+
+限制：
+
+- 本地小模型只总结和执行 allowlist 命令。
+- 默认不允许部署；部署/发布必须显式 `--allow-deploy`。
+- Codex 仍负责最终验收和安全判断。
+
 ## 给便宜 Agent 的边界
 
 允许做：

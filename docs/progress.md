@@ -2,6 +2,29 @@
 
 ## 2026-06-06
 
+### 本地小模型委托技能
+- 操作人/会话：Codex。
+- 目标：把低风险机械工作外包给本机 Ollama 小模型，进一步降低 Codex token 消耗。
+- 本机模型发现：
+  - Ollama 可用：`http://127.0.0.1:11434`
+  - 可用模型：`qwen2.5:3b`、`qwen25-3b:latest`、`qwen3:14b`
+- 新增：
+  - `scripts/local_agent_delegate.py`
+  - Codex Skill：`/Users/kaf/.codex/skills/zhiku-local-delegate/SKILL.md`
+  - Make targets：`delegate-check`、`delegate-smoke`、`delegate-status`
+- 安全边界：
+  - 默认只允许本地小模型执行 `check`、`smoke`、`status`。
+  - `deploy/release` 必须显式 `--allow-deploy`。
+  - 本地模型只做输出总结和失败初筛，不能自由改核心代码。
+  - Codex 仍负责架构、核心修改、安全和最终验收。
+- 验证结果：
+  - `make delegate-check` 通过，本地模型正确总结 `make check` 输出。
+  - `make delegate-smoke SMOKE_KEYWORD=功率诊断 SMOKE_SN=0105222506020185` 通过，本地模型正确总结线上冒烟结果。
+- 后续使用原则：
+  - Codex 在执行机械检查/冒烟/状态查看前，优先考虑调用本地委托脚本。
+  - 失败输出先由本地模型压缩摘要，再由 Codex 处理真正需要判断的部分。
+- 解除锁定：本地小模型委托。
+
 ### GitHub 自动化接入
 - 操作人/会话：Codex。
 - 目标：验证 `git@github.com:gaogoying-sudo/zhiku.git` 是否可用，并接入免费 GitHub Actions 机械检查，减少后续 token 消耗。

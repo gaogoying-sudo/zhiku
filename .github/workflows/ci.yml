@@ -28,6 +28,9 @@ jobs:
       - name: Backend syntax check
         run: python -m py_compile deploy/backend/main.py
 
+      - name: Automation scripts syntax check
+        run: python -m py_compile scripts/*.py
+
       - name: Frontend inline JavaScript syntax check
         run: |
           python - <<'PY'

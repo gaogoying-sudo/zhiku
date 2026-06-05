@@ -42,6 +42,7 @@
 - `scripts/deploy_cloud.py` — 云端上传与容器重建
 - `scripts/smoke_cloud.py` — 线上页面、登录和轻量设备匹配冒烟
 - `scripts/cloud_status.py` — 云端容器状态和 API 日志查看，自动脱敏 token
+- `scripts/local_agent_delegate.py` — 调用本机 Ollama 小模型执行/总结低风险机械任务
 
 ## 输出
 - `output/` — 所有查询结果文件

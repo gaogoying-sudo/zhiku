@@ -22,3 +22,12 @@ status:
 
 progress:
 	scripts/progress_note.sh
+
+delegate-check:
+	python3 scripts/local_agent_delegate.py --mode run --command check --task "本地检查并总结"
+
+delegate-smoke:
+	python3 scripts/local_agent_delegate.py --mode run --command smoke --smoke-keyword "$(SMOKE_KEYWORD)" $(if $(SMOKE_SN),--smoke-sn "$(SMOKE_SN)",) --task "线上冒烟并总结"
+
+delegate-status:
+	python3 scripts/local_agent_delegate.py --mode run --command status --task "云端状态并总结"
