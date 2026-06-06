@@ -176,6 +176,25 @@ make status
 - 是否已部署。
 - 线上验证方式。
 
+## 8.1 ChatGPT 协作反馈闭环
+
+当需求来自 ChatGPT 的 GitHub PR，或本轮工作用于验证 ChatGPT → GitHub PR → Codex 复核/部署流程时，Codex 收尾必须额外输出一段“可转发给 ChatGPT 的反馈”。
+
+这段反馈至少包含：
+
+- PR 链接和分支。
+- Codex 是否接受 ChatGPT 初版方案。
+- Codex 做了哪些修补。
+- 哪些内容真正节省了 Codex 的分析成本。
+- 哪些内容导致 Codex 额外返工。
+- 下轮 ChatGPT 必须怎么交付，尤其包括：
+  - 优先直接改主代码，不用运行时补丁或 Nginx 注入绕过主入口。
+  - 前端改 `deploy/frontend/index.html` 时必须同步 `deploy/frontend/app.html`，或明确交给 Codex 运行 `make check`。
+  - 如果不能运行检查，必须明确写“未运行 make check / 未部署 / 未验证”。
+  - 不接触 `.env`、真实账号密码、数据库明文和部署凭证。
+
+固定模板见 `docs/CODEX_HANDOFF_TEMPLATE.md` 的“Codex 复核后给 ChatGPT 的反馈模板”。
+
 ## 9. Codex 与 agy 分工建议
 
 为了减少互相覆盖：
