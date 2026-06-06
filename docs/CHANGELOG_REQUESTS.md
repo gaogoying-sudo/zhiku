@@ -16,8 +16,8 @@
 
 ### 改动范围
 
-- 前端：新增 `deploy/frontend/power-diagnosis-recipe-filter.js`，通过 Vue 初始化前补丁方式扩展 `功率诊断` 的筛选状态、筛选计算和模板控件。
-- Nginx：更新 `deploy/frontend/nginx.conf`，在 HTML 返回时注入新增前端补丁脚本。
+- 前端：由 Codex 复核后合并进 `deploy/frontend/index.html` 和 `deploy/frontend/app.html`，直接扩展 `功率诊断` 的筛选状态、筛选计算和模板控件。
+- Nginx：不采用 `sub_filter` 注入方案，保留稳定的静态文件返回和 no-cache 配置。
 - 文档：新增本记录。
 
 ### 不做事项
@@ -42,10 +42,9 @@
 
 ### 风险点
 
-- 这是为了最小化本轮改动而采用的前端补丁方案，没有直接改动大型单文件 `deploy/frontend/index.html` / `deploy/frontend/app.html`。
-- 如果后续 Codex 认为应严格落实“index.html 与 app.html 同步修改”，建议把本补丁合并回两个 HTML 文件，并移除 Nginx `sub_filter` 注入方式。
-- 该方案依赖 Nginx `sub_filter` 模块；Codex 部署前应确认线上 Nginx 镜像支持该指令。
+- ChatGPT 初版使用独立 JS 补丁 + Nginx `sub_filter` 注入，Codex 复核后认为该方案对线上镜像能力有额外依赖，不够稳。
+- 最终已移除独立补丁文件和 `sub_filter` 注入，改为直接维护主前端入口，避免本地/线上表现不一致。
 
 ### 后续待办
 
-- 若本轮 PR 验证通过，可在下一轮把该筛选正式合并进 `index.html` 与 `app.html` 模板和 Vue data/computed/methods，减少注入式补丁。
+- 后续类似小功能仍可由 ChatGPT 发 PR，但涉及生产前端入口时，Codex 复核阶段优先合入主 HTML，避免运行时补丁。

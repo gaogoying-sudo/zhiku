@@ -1969,15 +1969,22 @@
 	                    <div class="card-header">单次烹饪功率曲线</div>
 	                    <div class="card-body">
 	                        <div class="row g-2 align-items-end mb-3">
-	                            <div class="col-xl-4 col-md-6">
+	                            <div class="col-xl-3 col-md-6">
 	                                <label class="filter-label">步骤/食材关键词</label>
 	                                <input class="form-control form-control-sm" v-model="powerDiagnosisFilters.keyword" placeholder="例如 鸡腿丁 / 色拉油 / 锅设置">
+	                            </div>
+	                            <div class="col-xl-3 col-md-6">
+	                                <label class="filter-label">人工选择菜谱</label>
+	                                <select class="form-select form-select-sm" v-model="powerDiagnosisFilters.recipeKey" @change="ensurePowerDiagnosisCookVisible">
+	                                    <option value="">全部菜谱</option>
+	                                    <option v-for="r in powerDiagnosisRecipeOptions" :key="r.key" :value="r.key">{{ r.name }}（{{ r.count }}次）</option>
+	                                </select>
 	                            </div>
 	                            <div class="col-xl-3 col-md-6">
 	                                <label class="filter-label">实际能量不低于（{{ energyUnitLabel }}）</label>
 	                                <input type="number" step="0.001" class="form-control form-control-sm" v-model.number="powerDiagnosisFilters.minEnergy" placeholder="例如 0.05">
 	                            </div>
-	                            <div class="col-xl-5 col-md-12">
+	                            <div class="col-xl-3 col-md-12">
 	                                <div class="filter-label">能量单位</div>
 	                                <div class="d-flex gap-2 align-items-center flex-wrap">
 	                                    <span class="segmented-control">
@@ -2636,6 +2643,7 @@
                 powerDiagnosisFilters: {
                     keyword: '',
                     minEnergy: '',
+                    recipeKey: '',
                 },
                 powerEnergyUnit: 'kwh',
                 powerChartHover: null,
@@ -3104,10 +3112,23 @@
 		            },
 		            filteredPowerDiagnosisCooks() {
 		                const minEnergy = this.normalizedPowerMinEnergyKwh;
+		                const recipeKey = String(this.powerDiagnosisFilters.recipeKey || '');
 		                return this.cookTemperatureCooks.filter(item => {
+		                    if (recipeKey && this.cookTemperatureRecipeKey(item) !== recipeKey) return false;
 		                    const actual = Number(item.summary.actual_energy_kwh || 0);
 		                    return !minEnergy || actual >= minEnergy;
 		                });
+		            },
+		            powerDiagnosisRecipeOptions() {
+		                const map = new Map();
+		                this.cookTemperatureCooks.forEach(item => {
+		                    const key = this.cookTemperatureRecipeKey(item);
+		                    const name = item?.cook?.recipe_name || item?.cook?.recipe_id || '未命名菜谱';
+		                    const current = map.get(key) || { key, name, count: 0 };
+		                    current.count += 1;
+		                    map.set(key, current);
+		                });
+		                return Array.from(map.values()).sort((a, b) => b.count - a.count || String(a.name).localeCompare(String(b.name), 'zh-Hans-CN'));
 		            },
 		            normalizedPowerMinEnergyKwh() {
 		                const raw = Number(this.powerDiagnosisFilters.minEnergy || 0);
@@ -3553,6 +3574,7 @@
 	                    this.cookTemperature = payload;
 	                    this.structuredTemperature.lastLoadedDay = this.structuredTemperature.date;
 	                    this.cookTemperatureFilters = { recipeKeys: [], minMaxTemp: '' };
+	                    this.powerDiagnosisFilters.recipeKey = '';
 	                    const rows = this.cookTemperatureCooks;
 	                    if (rows.length) this.selectCookTemperature(rows[Math.max(0, rows.length - 1)], Math.max(0, rows.length - 1));
 	                } catch (e) {
@@ -4245,6 +4267,18 @@
                     if (!found) this.selectCookTemperature(rows[0], 0);
                 });
             },
+            ensurePowerDiagnosisCookVisible() {
+                this.$nextTick(() => {
+                    const rows = this.filteredPowerDiagnosisCooks;
+                    if (!rows.length) {
+                        this.selectedCookTemperatureKey = '';
+                        this.selectedCookTemperatureIndex = 0;
+                        return;
+                    }
+                    const found = rows.some((item, idx) => this.cookTemperatureKey(item, idx) === this.selectedCookTemperatureKey);
+                    if (!found) this.selectCookTemperature(rows[0], 0);
+                });
+            },
             tempEventPotLabel(event) {
                 if (!event) return '-';
                 if (event.pot_temp !== undefined && event.pot_temp !== null) return `${event.pot_temp}℃`;
@@ -4579,6 +4613,7 @@
                     }
                     this.cookTemperature = this.mergeCookTemperatureResults(results, failures);
                     this.cookTemperatureFilters = { recipeKeys: [], minMaxTemp: '' };
+                    this.powerDiagnosisFilters.recipeKey = '';
                     const rows = this.cookTemperatureCooks;
                     const lastIndex = Math.max(0, rows.length - 1);
                     if (rows.length) this.selectCookTemperature(rows[lastIndex], lastIndex);

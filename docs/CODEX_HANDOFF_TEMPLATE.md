@@ -80,16 +80,17 @@ PR：https://github.com/gaogoying-sudo/zhiku/pull/1
 - 选择 `全部菜谱` 后恢复原列表。
 
 改动文件：
-- deploy/frontend/power-diagnosis-recipe-filter.js
+- deploy/frontend/index.html
+- deploy/frontend/app.html
 - deploy/frontend/nginx.conf
 - docs/CHANGELOG_REQUESTS.md
 - docs/CODEX_HANDOFF_TEMPLATE.md
 
 请 Codex 重点复核：
-1. 当前线上 Nginx 镜像是否支持 `sub_filter` 指令。
-2. `power-diagnosis-recipe-filter.js` 是否能在 Vue `createApp(...)` 前完成模板注入和 computed 覆盖。
-3. 是否接受本轮“独立 JS 补丁 + Nginx 注入”的轻量方案。
-4. 如果不接受，请把补丁逻辑合并回 `deploy/frontend/index.html` 和 `deploy/frontend/app.html`，并移除 `nginx.conf` 的 `sub_filter` 注入。
+1. 筛选条件是否直接合入 `deploy/frontend/index.html` 和 `deploy/frontend/app.html`。
+2. 切换菜谱后，当前选中的作业是否会自动落到筛选结果内。
+3. `make check` 是否完成 HTML 同步、Python 编译、前端脚本语法校验和敏感文件防护。
+4. 部署后线上页面是否没有旧缓存或白屏。
 
 请 Codex 执行：
 1. 拉取 PR #1 分支 `feature/power-diagnosis-recipe-filter`。
@@ -111,8 +112,8 @@ PR：https://github.com/gaogoying-sudo/zhiku/pull/1
 5. 选择 `全部菜谱` 后恢复原列表。
 
 风险点：
-- 本轮没有直接修改 `deploy/frontend/index.html` 和 `deploy/frontend/app.html`，而是用独立 JS 补丁和 Nginx `sub_filter` 注入。
-- 该方案依赖 Nginx `sub_filter`；如果线上镜像不支持，应改成直接同步修改两个 HTML 文件。
+- ChatGPT 初版采用独立 JS 补丁和 Nginx `sub_filter` 注入，Codex 复核后不接受该轻量方案。
+- 最终已把逻辑合并回 `deploy/frontend/index.html` 和 `deploy/frontend/app.html`，并移除 `sub_filter` 注入，降低线上运行风险。
 - 当前 ChatGPT 环境未能执行本地 `make check`，也未运行 Docker/Nginx 容器。
 
 本轮未做：
