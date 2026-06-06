@@ -13,6 +13,7 @@ config/db_config.env
 config/*.env
 
 output/
+dist/
 handover/
 
 docs/010*/

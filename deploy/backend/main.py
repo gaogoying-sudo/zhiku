@@ -11,7 +11,9 @@ import re
 import zipfile
 import urllib.request
 import statistics
+import gc
 import uuid
+from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -75,6 +77,15 @@ LOG_ANALYSIS_VERSION = 2
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 AUDIT_DB_PATH = CACHE_DIR / 'zhiku_audit.sqlite3'
 AUDIT_LOCK = threading.Lock()
+ANALYTICS_DB_READY = False
+ANALYTICS_DB_LOCK = threading.Lock()
+AUTO_PARSE_WORKER_STARTED = False
+AUTO_PARSE_WORKER_LOCK = threading.Lock()
+AUTO_PARSE_ENABLED = os.getenv('AUTO_PARSE_ENABLED', '1') == '1'
+AUTO_PARSE_INTERVAL_SECONDS = int(os.getenv('AUTO_PARSE_INTERVAL_SECONDS', '90'))
+AUTO_PARSE_MAX_PACKAGES_PER_CYCLE = int(os.getenv('AUTO_PARSE_MAX_PACKAGES_PER_CYCLE', '2'))
+STRUCTURED_DAY_DETAIL_LIMIT = int(os.getenv('STRUCTURED_DAY_DETAIL_LIMIT', '20'))
+AUTO_PARSE_STALE_MINUTES = int(os.getenv('AUTO_PARSE_STALE_MINUTES', '12'))
 
 LOG_KIND_DEFS = {
     'oildrum_board': {
@@ -574,6 +585,192 @@ def fetch_all(query, args=None, source=False, database=None):
 def fetch_one(query, args=None, source=False, database=None):
     rows = fetch_all(query, args, source=source, database=database)
     return rows[0] if rows else None
+
+def execute_local(query, args=None):
+    ensure_analytics_db()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(query, args)
+        conn.commit()
+    finally:
+        conn.close()
+
+def executemany_local(query, rows):
+    if not rows:
+        return
+    ensure_analytics_db()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(query, rows)
+        conn.commit()
+    finally:
+        conn.close()
+
+def init_analytics_db():
+    global ANALYTICS_DB_READY
+    with ANALYTICS_DB_LOCK:
+        if ANALYTICS_DB_READY:
+            return True
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS watched_devices (
+                        sn VARCHAR(64) PRIMARY KEY,
+                        status VARCHAR(32) NOT NULL DEFAULT 'active',
+                        priority INT NOT NULL DEFAULT 50,
+                        first_seen_at DATETIME NOT NULL,
+                        last_seen_at DATETIME NOT NULL,
+                        last_sync_at DATETIME NULL,
+                        last_parse_at DATETIME NULL,
+                        last_error TEXT NULL,
+                        created_by VARCHAR(64) NULL,
+                        updated_at DATETIME NOT NULL,
+                        INDEX idx_watched_status_priority(status, priority, last_seen_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS device_log_packages (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NOT NULL,
+                        file_name VARCHAR(255) NULL,
+                        file_size_mb DECIMAL(12,3) NULL,
+                        file_size_label VARCHAR(32) NULL,
+                        remote_url_hash CHAR(64) NULL,
+                        log_time_hint DATETIME NULL,
+                        remote_create_time DATETIME NULL,
+                        remote_update_time DATETIME NULL,
+                        cos_deleted TINYINT NOT NULL DEFAULT 0,
+                        download_status VARCHAR(32) NOT NULL DEFAULT 'remote_available',
+                        parse_status VARCHAR(32) NOT NULL DEFAULT 'not_started',
+                        storage_status VARCHAR(32) NOT NULL DEFAULT 'not_stored',
+                        ui_status VARCHAR(32) NOT NULL DEFAULT '可下载',
+                        parse_version INT NOT NULL DEFAULT 0,
+                        log_start_time DATETIME NULL,
+                        log_end_time DATETIME NULL,
+                        cook_count INT NOT NULL DEFAULT 0,
+                        sample_count INT NOT NULL DEFAULT 0,
+                        error_message TEXT NULL,
+                        parse_attempts INT NOT NULL DEFAULT 0,
+                        last_attempt_at DATETIME NULL,
+                        parsed_at DATETIME NULL,
+                        stored_at DATETIME NULL,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_log_package(sn, source_file_id),
+                        INDEX idx_log_sn_time(sn, remote_create_time),
+                        INDEX idx_log_status(parse_status, storage_status),
+                        INDEX idx_log_coverage(sn, log_start_time, log_end_time)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cook_jobs (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NOT NULL,
+                        machine_log_id BIGINT NULL,
+                        recipe_id BIGINT NULL,
+                        recipe_name VARCHAR(255) NULL,
+                        cook_start_time DATETIME NULL,
+                        cook_end_time DATETIME NULL,
+                        duration_seconds INT NULL,
+                        max_pot_temp DECIMAL(8,2) NULL,
+                        avg_pot_temp DECIMAL(8,2) NULL,
+                        sample_count INT NOT NULL DEFAULT 0,
+                        step_count INT NOT NULL DEFAULT 0,
+                        android_action_count INT NOT NULL DEFAULT 0,
+                        payload_json LONGTEXT NULL,
+                        parse_version INT NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_cook_job(sn, source_file_id, machine_log_id),
+                        INDEX idx_cook_sn_time(sn, cook_start_time),
+                        INDEX idx_cook_recipe(recipe_id, recipe_name),
+                        INDEX idx_cook_temp(max_pot_temp)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cook_temperature_samples (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        cook_job_id BIGINT NOT NULL,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NOT NULL,
+                        sample_time DATETIME NULL,
+                        offset_seconds INT NULL,
+                        source VARCHAR(64) NULL,
+                        pot_temp DECIMAL(8,2) NULL,
+                        filtered_temp DECIMAL(8,2) NULL,
+                        infrared_temp DECIMAL(8,2) NULL,
+                        output_temp DECIMAL(8,2) NULL,
+                        core_temp DECIMAL(8,2) NULL,
+                        coil_temp DECIMAL(8,2) NULL,
+                        raw_value VARCHAR(120) NULL,
+                        is_peak TINYINT NOT NULL DEFAULT 0,
+                        created_at DATETIME NOT NULL,
+                        INDEX idx_temp_cook(cook_job_id, offset_seconds),
+                        INDEX idx_temp_sn_time(sn, sample_time),
+                        INDEX idx_temp_peak(sn, is_peak, pot_temp)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cook_action_events (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        cook_job_id BIGINT NOT NULL,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NOT NULL,
+                        event_time DATETIME NULL,
+                        offset_seconds INT NULL,
+                        event_type VARCHAR(64) NULL,
+                        event_label VARCHAR(120) NULL,
+                        raw_log_excerpt TEXT NULL,
+                        command_power_kw DECIMAL(10,3) NULL,
+                        actual_power_kw DECIMAL(10,3) NULL,
+                        core_temp DECIMAL(8,2) NULL,
+                        coil_temp DECIMAL(8,2) NULL,
+                        output_temp DECIMAL(8,2) NULL,
+                        created_at DATETIME NOT NULL,
+                        INDEX idx_action_cook(cook_job_id, offset_seconds),
+                        INDEX idx_action_sn_time(sn, event_time),
+                        INDEX idx_action_type(event_type, event_label)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS cook_power_events (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        cook_job_id BIGINT NOT NULL,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NOT NULL,
+                        event_time DATETIME NULL,
+                        offset_seconds INT NULL,
+                        command_power_kw DECIMAL(10,3) NULL,
+                        actual_power_kw DECIMAL(10,3) NULL,
+                        command_power_w DECIMAL(12,2) NULL,
+                        actual_power_w DECIMAL(12,2) NULL,
+                        raw_value VARCHAR(120) NULL,
+                        created_at DATETIME NOT NULL,
+                        INDEX idx_power_cook(cook_job_id, offset_seconds),
+                        INDEX idx_power_sn_time(sn, event_time)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+            conn.commit()
+            ANALYTICS_DB_READY = True
+            return True
+        finally:
+            conn.close()
+
+def ensure_analytics_db():
+    global ANALYTICS_DB_READY
+    if ANALYTICS_DB_READY:
+        return True
+    try:
+        return init_analytics_db()
+    except Exception as exc:
+        ANALYTICS_DB_READY = False
+        print(f"analytics db init failed: {exc}")
+        return False
 
 def candidate_sns(sn):
     raw = sn.strip()
@@ -1089,13 +1286,178 @@ def build_device_version_stats(version='', keyword='', limit=500, force_refresh=
     return result
 
 def get_device_log_files(sn):
-    return fetch_all(
+    rows = fetch_all(
         "SELECT id, sn, file_length, file_name, pic AS url, type, create_time, update_time, cos_deleted "
         "FROM machine_ftp WHERE sn = %s ORDER BY create_time DESC LIMIT 300",
         (sn,),
         source=True,
         database='btyc',
     )
+    for row in rows:
+        row['file_size_label'] = format_bytes(row.get('file_length'))
+        row['downloadable'] = bool(row.get('url')) and not bool(row.get('cos_deleted'))
+        row['log_time_hint'] = infer_log_time_from_filename(row.get('file_name'))
+    upsert_log_package_index(sn, rows)
+    attach_log_package_statuses(sn, rows)
+    return rows
+
+def parse_mb_value(value):
+    try:
+        n = float(str(value or '').strip() or 0)
+        return round(n, 3) if n >= 0 else None
+    except Exception:
+        return None
+
+def to_mysql_dt(value):
+    if value is None or value == '':
+        return None
+    if isinstance(value, datetime):
+        return value.replace(microsecond=0)
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19].replace('T', ' '), "%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+    return None
+
+def analytics_ui_status(download_status, parse_status, storage_status):
+    if storage_status == 'stored':
+        return '已入库'
+    if parse_status == 'parsed':
+        return '已解析'
+    if parse_status == 'parsing':
+        return '解析中'
+    if parse_status == 'queued':
+        return '排队中'
+    if parse_status == 'no_production_match':
+        return '无生产记录'
+    if parse_status in ('parse_failed', 'no_temperature_data'):
+        return '解析失败'
+    if download_status == 'downloaded':
+        return '已下载'
+    if download_status in ('download_failed', 'remote_deleted'):
+        return '不可下载'
+    return '可下载'
+
+def upsert_log_package_index(sn, rows):
+    if not rows or not ensure_analytics_db():
+        return
+    now = datetime.now().replace(microsecond=0)
+    payload = []
+    for row in rows:
+        file_id = row.get('id')
+        if not file_id:
+            continue
+        cos_deleted = 1 if row.get('cos_deleted') else 0
+        url_hash = hashlib.sha256(str(row.get('url') or '').encode('utf-8')).hexdigest() if row.get('url') else None
+        download_status = 'remote_deleted' if cos_deleted else ('remote_available' if row.get('url') else 'download_failed')
+        payload.append((
+            sn, int(file_id), row.get('file_name'), parse_mb_value(row.get('file_length')), row.get('file_size_label'),
+            url_hash, to_mysql_dt(row.get('log_time_hint')), to_mysql_dt(row.get('create_time')),
+            to_mysql_dt(row.get('update_time')), cos_deleted, download_status,
+            analytics_ui_status(download_status, 'not_started', 'not_stored'), now, now,
+        ))
+    executemany_local(
+        """
+        INSERT INTO device_log_packages(
+            sn, source_file_id, file_name, file_size_mb, file_size_label, remote_url_hash,
+            log_time_hint, remote_create_time, remote_update_time, cos_deleted,
+            download_status, ui_status, created_at, updated_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        ON DUPLICATE KEY UPDATE
+            file_name = VALUES(file_name),
+            file_size_mb = VALUES(file_size_mb),
+            file_size_label = VALUES(file_size_label),
+            remote_url_hash = VALUES(remote_url_hash),
+            log_time_hint = VALUES(log_time_hint),
+            remote_create_time = VALUES(remote_create_time),
+            remote_update_time = VALUES(remote_update_time),
+            cos_deleted = VALUES(cos_deleted),
+            download_status = CASE
+                WHEN storage_status = 'stored' THEN download_status
+                WHEN parse_status IN ('parsed', 'parsing', 'queued') THEN download_status
+                ELSE VALUES(download_status)
+            END,
+            ui_status = CASE
+                WHEN storage_status = 'stored' THEN '已入库'
+                WHEN parse_status = 'parsed' THEN '已解析'
+                WHEN parse_status = 'parsing' THEN '解析中'
+                WHEN parse_status = 'queued' THEN '排队中'
+                WHEN parse_status = 'no_production_match' THEN '无生产记录'
+                WHEN parse_status IN ('parse_failed', 'no_temperature_data') THEN '解析失败'
+                WHEN VALUES(download_status) = 'remote_deleted' THEN '不可下载'
+                ELSE VALUES(ui_status)
+            END,
+            updated_at = VALUES(updated_at)
+        """,
+        payload,
+    )
+
+def attach_log_package_statuses(sn, rows):
+    if not rows or not ensure_analytics_db():
+        for row in rows:
+            row['analytics_status'] = '可下载' if row.get('downloadable') else '不可下载'
+        return
+    ids = [int(row['id']) for row in rows if row.get('id')]
+    if not ids:
+        return
+    placeholders = ','.join(['%s'] * len(ids))
+    status_rows = fetch_all(
+        f"""
+        SELECT source_file_id, download_status, parse_status, storage_status, ui_status,
+               parse_version, log_start_time, log_end_time, cook_count, sample_count,
+               error_message, parse_attempts, last_attempt_at, parsed_at, stored_at
+        FROM device_log_packages
+        WHERE sn = %s AND source_file_id IN ({placeholders})
+        """,
+        tuple([sn] + ids),
+    )
+    status_map = {int(row['source_file_id']): row for row in status_rows}
+    for row in rows:
+        status = status_map.get(int(row.get('id') or 0), {})
+        row['analytics_status'] = status.get('ui_status') or ('可下载' if row.get('downloadable') else '不可下载')
+        row['download_status'] = status.get('download_status') or ('remote_available' if row.get('downloadable') else 'remote_deleted')
+        row['parse_status'] = status.get('parse_status') or 'not_started'
+        row['storage_status'] = status.get('storage_status') or 'not_stored'
+        row['structured_cook_count'] = int(status.get('cook_count') or 0)
+        row['structured_sample_count'] = int(status.get('sample_count') or 0)
+        row['structured_error'] = status.get('error_message')
+        row['structured_coverage_start'] = status.get('log_start_time')
+        row['structured_coverage_end'] = status.get('log_end_time')
+        row['structured_parsed_at'] = status.get('parsed_at')
+        row['structured_stored_at'] = status.get('stored_at')
+
+def format_bytes(value):
+    raw_text = str(value or '').strip()
+    try:
+        size = float(raw_text or 0)
+    except (TypeError, ValueError):
+        return '-'
+    if size <= 0:
+        return '-'
+    # machine_ftp.file_length is stored as an MB-like decimal string in this source DB
+    # for current log packages, e.g. "3.67" means roughly 3.67 MB.
+    if '.' in raw_text and size < 1024:
+        return f"{size:.1f}MB"
+    units = ['B', 'KB', 'MB', 'GB']
+    unit = 0
+    while size >= 1024 and unit < len(units) - 1:
+        size /= 1024
+        unit += 1
+    if unit == 0:
+        return f"{int(size)}{units[unit]}"
+    return f"{size:.1f}{units[unit]}"
+
+def infer_log_time_from_filename(file_name):
+    text = str(file_name or '')
+    match = re.search(r'log_(\d{4})_(\d{2})_(\d{2})-(\d{2})_(\d{2})_(\d{2})', text)
+    if not match:
+        return ''
+    y, mo, d, h, mi, s = match.groups()
+    return f"{y}-{mo}-{d} {h}:{mi}:{s}"
 
 def parse_log_ts(line):
     patterns = [
@@ -1137,6 +1499,547 @@ def save_cached_log_analysis(file_id, payload):
     path = log_analysis_cache_path(file_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, default=str))
+
+COOK_TEMPERATURE_CACHE_VERSION = 9
+COOK_TEMPERATURE_CACHE_TTL_SECONDS = int(os.getenv('COOK_TEMPERATURE_CACHE_TTL_SECONDS', str(24 * 3600)))
+
+def cook_temperature_cache_path(sn, file_id):
+    digest = hashlib.md5(f"{sn}:{int(file_id)}:v{COOK_TEMPERATURE_CACHE_VERSION}".encode('utf-8')).hexdigest()
+    return CACHE_DIR / 'cook_temperature' / f'{digest}.json'
+
+def read_cached_cook_temperature(sn, file_id):
+    path = cook_temperature_cache_path(sn, file_id)
+    if not path.exists():
+        return None
+    try:
+        wrapper = json.loads(path.read_text())
+        if wrapper.get('analysis_version') != COOK_TEMPERATURE_CACHE_VERSION:
+            return None
+        created_at = float(wrapper.get('created_at') or 0)
+        now = time.time()
+        if created_at <= 0 or now - created_at > COOK_TEMPERATURE_CACHE_TTL_SECONDS:
+            return None
+        payload = wrapper.get('payload') or {}
+        payload['cache'] = {
+            'hit': True,
+            'disk': True,
+            'created_at': created_at,
+            'ttl_seconds': int(COOK_TEMPERATURE_CACHE_TTL_SECONDS - (now - created_at)),
+            'cache_key': path.stem,
+        }
+        return payload
+    except Exception:
+        path.unlink(missing_ok=True)
+        return None
+
+def save_cached_cook_temperature(sn, file_id, payload, created_at=None):
+    path = cook_temperature_cache_path(sn, file_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    serializable = dict(payload)
+    serializable.pop('cache', None)
+    created_at = created_at or time.time()
+    with path.open('w', encoding='utf-8') as fp:
+        json.dump({
+            'analysis_version': COOK_TEMPERATURE_CACHE_VERSION,
+            'created_at': created_at,
+            'ttl_seconds': COOK_TEMPERATURE_CACHE_TTL_SECONDS,
+            'payload': serializable,
+        }, fp, ensure_ascii=False, default=str)
+    return path.stem
+
+def mark_log_package_status(sn, file_id, download_status=None, parse_status=None, storage_status=None, error_message=None, result=None):
+    if not ensure_analytics_db():
+        return
+    now = datetime.now().replace(microsecond=0)
+    if result:
+        coverage = result.get('coverage') or {}
+        download_status = download_status or 'downloaded'
+        parse_status = parse_status or 'parsed'
+        storage_status = storage_status or 'stored'
+        args = (
+            download_status,
+            parse_status,
+            storage_status,
+            analytics_ui_status(download_status, parse_status, storage_status),
+            COOK_TEMPERATURE_CACHE_VERSION,
+            to_mysql_dt(coverage.get('start')),
+            to_mysql_dt(coverage.get('end')),
+            int(result.get('cook_count') or 0),
+            int(coverage.get('sample_count') or 0),
+            error_message,
+            now if parse_status in ('parsed', 'parse_failed', 'no_production_match', 'no_temperature_data') else None,
+            now if storage_status == 'stored' else None,
+            now,
+            sn,
+            int(file_id),
+        )
+        execute_local(
+            """
+            UPDATE device_log_packages
+            SET download_status=%s, parse_status=%s, storage_status=%s, ui_status=%s,
+                parse_version=%s, log_start_time=%s, log_end_time=%s, cook_count=%s,
+                sample_count=%s, error_message=%s,
+                parsed_at=COALESCE(%s, parsed_at), stored_at=COALESCE(%s, stored_at),
+                last_attempt_at=%s, parse_attempts=parse_attempts+1, updated_at=%s
+            WHERE sn=%s AND source_file_id=%s
+            """,
+            args[:-2] + (now,) + args[-2:],
+        )
+        return
+    existing = fetch_one(
+        "SELECT download_status, parse_status, storage_status FROM device_log_packages WHERE sn=%s AND source_file_id=%s",
+        (sn, int(file_id)),
+    ) if ensure_analytics_db() else None
+    next_download = download_status or (existing or {}).get('download_status') or 'remote_available'
+    next_parse = parse_status or (existing or {}).get('parse_status') or 'not_started'
+    next_storage = storage_status or (existing or {}).get('storage_status') or 'not_stored'
+    execute_local(
+        """
+        UPDATE device_log_packages
+        SET download_status=%s, parse_status=%s, storage_status=%s, ui_status=%s,
+            error_message=%s, last_attempt_at=%s, parse_attempts=parse_attempts+1,
+            updated_at=%s
+        WHERE sn=%s AND source_file_id=%s
+        """,
+        (
+            next_download, next_parse, next_storage,
+            analytics_ui_status(next_download, next_parse, next_storage),
+            error_message, now, now, sn, int(file_id),
+        ),
+    )
+
+def read_cook_temperature_from_db(sn, file_id):
+    if not ensure_analytics_db():
+        return None
+    package = fetch_one(
+        """
+        SELECT source_file_id, file_name, file_size_mb, remote_create_time, log_start_time, log_end_time,
+               cook_count, sample_count, parse_version, parsed_at, stored_at
+        FROM device_log_packages
+        WHERE sn=%s AND source_file_id=%s AND storage_status='stored'
+        """,
+        (sn, int(file_id)),
+    )
+    if not package or int(package.get('parse_version') or 0) != COOK_TEMPERATURE_CACHE_VERSION:
+        return None
+    job_rows = fetch_all(
+        """
+        SELECT payload_json FROM cook_jobs
+        WHERE sn=%s AND source_file_id=%s
+        ORDER BY cook_start_time ASC, id ASC
+        """,
+        (sn, int(file_id)),
+    )
+    cooks = []
+    for row in job_rows:
+        try:
+            cooks.append(json.loads(row.get('payload_json') or '{}'))
+        except Exception:
+            continue
+    if not cooks:
+        return None
+    selected = cooks[-1]
+    created_at = time.mktime((package.get('stored_at') or datetime.now()).timetuple()) if package.get('stored_at') else time.time()
+    return {
+        'sn': sn,
+        'file': {
+            'id': int(file_id),
+            'file_name': package.get('file_name'),
+            'create_time': package.get('remote_create_time'),
+            'file_length': package.get('file_size_mb'),
+        },
+        'coverage': {
+            'start': package.get('log_start_time'),
+            'end': package.get('log_end_time'),
+            'sample_count': int(package.get('sample_count') or 0),
+            'android_sample_count': None,
+            'temperature_log_sample_count': None,
+            'android_file_count': None,
+            'temperature_file_count': None,
+            'android_files': [],
+            'temperature_files': [],
+            'temperature_unit': '来自本地结构化库：android 日志功率=指令/实际输出功率，温度=机芯/线盘/输出温度；temperature*.log=滤波/红外/输出温度。',
+            'newer_production_not_covered': False,
+            'latest_production_time': None,
+            'source_summary': [],
+        },
+        'cook_count': len(cooks),
+        'cooks': cooks,
+        'cook': selected.get('cook') or {},
+        'summary': selected.get('summary') or {},
+        'steps': selected.get('steps') or [],
+        'main_board_actions': selected.get('main_board_actions') or [],
+        'series': selected.get('series') or [],
+        'cache': {
+            'hit': True,
+            'database': True,
+            'created_at': created_at,
+            'ttl_seconds': COOK_TEMPERATURE_CACHE_TTL_SECONDS,
+            'cache_key': f'db:{sn}:{file_id}',
+        },
+    }
+
+def persist_cook_temperature_result(result):
+    if not result or not ensure_analytics_db():
+        return False
+    sn = result.get('sn')
+    file_id = int((result.get('file') or {}).get('id') or 0)
+    if not sn or not file_id:
+        return False
+    now = datetime.now().replace(microsecond=0)
+    existing = fetch_all("SELECT id FROM cook_jobs WHERE sn=%s AND source_file_id=%s", (sn, file_id))
+    existing_ids = [int(row['id']) for row in existing]
+    if existing_ids:
+        placeholders = ','.join(['%s'] * len(existing_ids))
+        execute_local(f"DELETE FROM cook_temperature_samples WHERE cook_job_id IN ({placeholders})", tuple(existing_ids))
+        execute_local(f"DELETE FROM cook_power_events WHERE cook_job_id IN ({placeholders})", tuple(existing_ids))
+        execute_local(f"DELETE FROM cook_action_events WHERE cook_job_id IN ({placeholders})", tuple(existing_ids))
+        execute_local(f"DELETE FROM cook_jobs WHERE id IN ({placeholders})", tuple(existing_ids))
+
+    for item in result.get('cooks') or []:
+        cook = item.get('cook') or {}
+        summary = item.get('summary') or {}
+        execute_local(
+            """
+            INSERT INTO cook_jobs(
+                sn, source_file_id, machine_log_id, recipe_id, recipe_name, cook_start_time, cook_end_time,
+                duration_seconds, max_pot_temp, avg_pot_temp, sample_count, step_count,
+                android_action_count, payload_json, parse_version, created_at, updated_at
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                sn, file_id, cook.get('id'), cook.get('recipe_id'), cook.get('recipe_name'),
+                to_mysql_dt(cook.get('start_time')), to_mysql_dt(cook.get('end_time_calc') or cook.get('create_time')),
+                int(cook.get('duration_seconds') or 0), summary.get('max_temp'), summary.get('avg_temp'),
+                int(summary.get('sample_count') or 0), len(item.get('steps') or []),
+                len(item.get('android_actions') or []), json.dumps(item, ensure_ascii=False, default=str),
+                COOK_TEMPERATURE_CACHE_VERSION, now, now,
+            ),
+        )
+        job = fetch_one(
+            "SELECT id FROM cook_jobs WHERE sn=%s AND source_file_id=%s AND machine_log_id <=> %s ORDER BY id DESC LIMIT 1",
+            (sn, file_id, cook.get('id')),
+        )
+        if not job:
+            continue
+        job_id = int(job['id'])
+        samples = []
+        peak_temp = summary.get('max_temp')
+        for sample in item.get('temperature_samples') or []:
+            pot = sample.get('pot_temp')
+            samples.append((
+                job_id, sn, file_id, to_mysql_dt(sample.get('time')), sample.get('offset_seconds'), sample.get('source'),
+                pot, sample.get('filtered_temp'), sample.get('infrared_temp'), sample.get('output_temp'),
+                sample.get('core_temp'), sample.get('coil_temp'), sample.get('raw'), 1 if peak_temp is not None and pot == peak_temp else 0, now,
+            ))
+        executemany_local(
+            """
+            INSERT INTO cook_temperature_samples(
+                cook_job_id, sn, source_file_id, sample_time, offset_seconds, source, pot_temp,
+                filtered_temp, infrared_temp, output_temp, core_temp, coil_temp, raw_value, is_peak, created_at
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            samples,
+        )
+        actions = []
+        powers = []
+        for action in item.get('android_actions') or []:
+            temp = action.get('temperature') or {}
+            power = action.get('power') or {}
+            actions.append((
+                job_id, sn, file_id, to_mysql_dt(action.get('time')), action.get('offset_seconds'),
+                action.get('kind'), action.get('label'), action.get('raw'),
+                power.get('command_power_kw'), power.get('actual_power_kw'),
+                temp.get('core_temp'), temp.get('coil_temp'), temp.get('output_temp'), now,
+            ))
+            if power:
+                powers.append((
+                    job_id, sn, file_id, to_mysql_dt(action.get('time')), action.get('offset_seconds'),
+                    power.get('command_power_kw'), power.get('actual_power_kw'),
+                    power.get('command_power_w'), power.get('actual_power_w'), power.get('raw'), now,
+                ))
+        executemany_local(
+            """
+            INSERT INTO cook_action_events(
+                cook_job_id, sn, source_file_id, event_time, offset_seconds, event_type, event_label,
+                raw_log_excerpt, command_power_kw, actual_power_kw, core_temp, coil_temp, output_temp, created_at
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            actions,
+        )
+        executemany_local(
+            """
+            INSERT INTO cook_power_events(
+                cook_job_id, sn, source_file_id, event_time, offset_seconds, command_power_kw,
+                actual_power_kw, command_power_w, actual_power_w, raw_value, created_at
+            ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            powers,
+        )
+    mark_log_package_status(sn, file_id, result=result)
+    return True
+
+def mark_device_watched(sn, username='system', priority=50):
+    if not sn or not ensure_analytics_db():
+        return
+    now = datetime.now().replace(microsecond=0)
+    execute_local(
+        """
+        INSERT INTO watched_devices(sn, status, priority, first_seen_at, last_seen_at, created_by, updated_at)
+        VALUES (%s, 'active', %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            status = CASE WHEN status = 'paused' THEN status ELSE 'active' END,
+            priority = LEAST(priority, VALUES(priority)),
+            last_seen_at = VALUES(last_seen_at),
+            created_by = COALESCE(created_by, VALUES(created_by)),
+            updated_at = VALUES(updated_at)
+        """,
+        (sn, int(priority or 50), now, now, username, now),
+    )
+
+def device_structured_summary(sn):
+    if not ensure_analytics_db():
+        return {'enabled': False}
+    package = fetch_one(
+        """
+        SELECT
+            COUNT(*) AS total_packages,
+            SUM(storage_status='stored') AS stored_packages,
+            SUM(parse_status IN ('queued','parsing')) AS running_packages,
+            SUM(parse_status IN ('parse_failed','no_temperature_data','no_production_match')) AS failed_packages,
+            MIN(log_start_time) AS coverage_start,
+            MAX(log_end_time) AS coverage_end,
+            MAX(parsed_at) AS last_parsed_at,
+            MAX(stored_at) AS last_stored_at,
+            MAX(last_attempt_at) AS last_attempt_at
+        FROM device_log_packages
+        WHERE sn=%s
+        """,
+        (sn,),
+    ) or {}
+    watched = fetch_one("SELECT status, priority, last_seen_at, last_sync_at, last_parse_at, last_error FROM watched_devices WHERE sn=%s", (sn,))
+    recent_errors = fetch_all(
+        """
+        SELECT source_file_id, file_name, ui_status, error_message, last_attempt_at
+        FROM device_log_packages
+        WHERE sn=%s AND parse_status IN ('parse_failed','no_temperature_data','no_production_match')
+        ORDER BY last_attempt_at DESC
+        LIMIT 6
+        """,
+        (sn,),
+    )
+    total = int(package.get('total_packages') or 0)
+    stored = int(package.get('stored_packages') or 0)
+    return {
+        'enabled': True,
+        'watched': bool(watched),
+        'watch_status': (watched or {}).get('status'),
+        'total_packages': total,
+        'stored_packages': stored,
+        'running_packages': int(package.get('running_packages') or 0),
+        'failed_packages': int(package.get('failed_packages') or 0),
+        'coverage_start': package.get('coverage_start'),
+        'coverage_end': package.get('coverage_end'),
+        'last_parsed_at': package.get('last_parsed_at'),
+        'last_stored_at': package.get('last_stored_at'),
+        'last_attempt_at': package.get('last_attempt_at'),
+        'completion_rate': round(stored * 100 / total, 1) if total else 0,
+        'recent_errors': recent_errors,
+    }
+
+def structured_cook_temperature_by_day(sn, day, limit=300):
+    if not ensure_analytics_db():
+        raise HTTPException(status_code=503, detail="本地结构化库尚未就绪")
+    try:
+        start = datetime.strptime(day, "%Y-%m-%d")
+    except Exception:
+        raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD")
+    end = start + timedelta(days=1)
+    safe_limit = max(1, min(int(limit or 300), 1000))
+    rows = fetch_all(
+        """
+        SELECT id, source_file_id, machine_log_id, recipe_id, recipe_name, cook_start_time,
+               cook_end_time, duration_seconds, max_pot_temp, avg_pot_temp, sample_count,
+               step_count, android_action_count
+        FROM cook_jobs
+        WHERE sn=%s AND cook_start_time >= %s AND cook_start_time < %s
+        ORDER BY cook_start_time ASC
+        LIMIT %s
+        """,
+        (sn, start, end, safe_limit),
+    )
+    include_details = len(rows) <= STRUCTURED_DAY_DETAIL_LIMIT
+    payload_map = {}
+    if include_details and rows:
+        ids = [int(row['id']) for row in rows if row.get('id')]
+        placeholders = ','.join(['%s'] * len(ids))
+        payload_rows = fetch_all(
+            f"SELECT id, payload_json FROM cook_jobs WHERE id IN ({placeholders})",
+            tuple(ids),
+        )
+        payload_map = {int(row['id']): row.get('payload_json') for row in payload_rows}
+    cooks = []
+    for row in rows:
+        payload = None
+        if include_details:
+            try:
+                payload = json.loads(payload_map.get(int(row.get('id') or 0)) or '{}')
+            except Exception:
+                payload = None
+        if payload:
+            cooks.append(payload)
+        else:
+            cooks.append({
+                'cook': {
+                    'id': row.get('machine_log_id'),
+                    'recipe_id': row.get('recipe_id'),
+                    'recipe_name': row.get('recipe_name'),
+                    'start_time': row.get('cook_start_time'),
+                    'end_time_calc': row.get('cook_end_time'),
+                    'duration_seconds': row.get('duration_seconds'),
+                },
+                'summary': {
+                    'max_temp': row.get('max_pot_temp'),
+                    'avg_temp': row.get('avg_pot_temp'),
+                    'sample_count': row.get('sample_count'),
+                },
+                'steps': [],
+                'android_actions': [],
+                'main_board_actions': [],
+                'temperature_samples': [],
+                'detail_loaded': False,
+            })
+    temp_stats = fetch_one(
+        """
+        SELECT COUNT(*) AS sample_count, MAX(pot_temp) AS max_temp, AVG(pot_temp) AS avg_temp
+        FROM cook_temperature_samples
+        WHERE sn=%s AND sample_time >= %s AND sample_time < %s
+        """,
+        (sn, start, end),
+    ) or {}
+    package_rows = fetch_all(
+        """
+        SELECT source_file_id, file_name, ui_status, parse_status, storage_status, log_start_time, log_end_time, error_message
+        FROM device_log_packages
+        WHERE sn=%s AND (
+            (log_start_time >= %s AND log_start_time < %s) OR
+            (log_end_time >= %s AND log_end_time < %s)
+        )
+        ORDER BY COALESCE(log_start_time, remote_create_time) ASC
+        """,
+        (sn, start, end, start, end),
+    )
+    primary_file = package_rows[-1] if package_rows else {}
+    selected = cooks[-1] if cooks else {}
+    return {
+        'sn': sn,
+        'day': day,
+        'source': 'structured_db',
+        'file': {
+            'id': primary_file.get('source_file_id'),
+            'file_name': primary_file.get('file_name') or f'{day} 结构化作业库',
+            'ui_status': primary_file.get('ui_status'),
+        },
+        'cook_count': len(cooks),
+        'cooks': cooks,
+        'cook': selected.get('cook') or {},
+        'summary': selected.get('summary') or {},
+        'steps': selected.get('steps') or [],
+        'main_board_actions': selected.get('main_board_actions') or [],
+        'coverage': {
+            'start': start,
+            'end': end - timedelta(seconds=1),
+            'sample_count': int(temp_stats.get('sample_count') or 0),
+            'temperature_unit': '来自本地结构化库，按日期聚合读取。',
+            'newer_production_not_covered': False,
+            'source_summary': [],
+            'packages': package_rows,
+        },
+        'cache': {
+            'hit': True,
+            'database': True,
+            'created_at': time.time(),
+            'ttl_seconds': COOK_TEMPERATURE_CACHE_TTL_SECONDS,
+            'cache_key': f'day:{sn}:{day}',
+        },
+        'summary_day': {
+            'max_temp': temp_stats.get('max_temp'),
+            'avg_temp': round(float(temp_stats.get('avg_temp') or 0), 1) if temp_stats.get('avg_temp') is not None else None,
+            'sample_count': int(temp_stats.get('sample_count') or 0),
+            'package_count': len(package_rows),
+            'detail_included': include_details,
+            'detail_limit': STRUCTURED_DAY_DETAIL_LIMIT,
+        },
+    }
+
+def queue_recent_log_packages_for_device(sn, limit=3):
+    if not ensure_analytics_db():
+        return 0
+    recover_stale_parsing_packages(sn)
+    rows = fetch_all(
+        """
+        SELECT source_file_id
+        FROM device_log_packages
+        WHERE sn=%s
+          AND download_status='remote_available'
+          AND storage_status != 'stored'
+          AND parse_status IN ('not_started','parse_failed','no_temperature_data')
+          AND file_size_mb > 0
+          AND file_size_mb <= 50
+        ORDER BY COALESCE(remote_create_time, log_time_hint) DESC
+        LIMIT %s
+        """,
+        (sn, max(1, min(int(limit or 3), 10))),
+    )
+    now = datetime.now().replace(microsecond=0)
+    for row in rows:
+        execute_local(
+            """
+            UPDATE device_log_packages
+            SET parse_status='queued', ui_status='排队中', updated_at=%s
+            WHERE sn=%s AND source_file_id=%s AND storage_status!='stored'
+            """,
+            (now, sn, int(row['source_file_id'])),
+        )
+    return len(rows)
+
+def recover_stale_parsing_packages(sn=None):
+    if not ensure_analytics_db():
+        return 0
+    args = [AUTO_PARSE_STALE_MINUTES, AUTO_PARSE_STALE_MINUTES]
+    sn_sql = ''
+    if sn:
+        sn_sql = 'AND sn=%s'
+        args.append(sn)
+    now = datetime.now().replace(microsecond=0)
+    execute_local(
+        f"""
+        UPDATE device_log_packages
+        SET parse_status='parse_failed',
+            ui_status='解析失败',
+            error_message=COALESCE(error_message, '解析任务中断或超时，已自动释放；可重新排队或手动解析。'),
+            updated_at=%s
+        WHERE parse_status='parsing'
+          AND storage_status!='stored'
+          AND (
+              (last_attempt_at IS NOT NULL AND TIMESTAMPDIFF(MINUTE, last_attempt_at, NOW()) >= %s)
+              OR TIMESTAMPDIFF(MINUTE, updated_at, NOW()) >= %s
+          )
+          {sn_sql}
+        """,
+        tuple([now] + args),
+    )
+    row = fetch_one(
+        f"""
+        SELECT COUNT(*) AS c
+        FROM device_log_packages
+        WHERE parse_status='parse_failed'
+          AND error_message LIKE '解析任务中断或超时%%'
+          {sn_sql}
+        """,
+        (sn,) if sn else (),
+    )
+    return int((row or {}).get('c') or 0)
 
 def download_log_zip(url):
     limit = MAX_LOG_ANALYSIS_DOWNLOAD_MB * 1024 * 1024
@@ -1544,6 +2447,7 @@ def analyze_temperature_text(text):
 def parse_temperature_series(text, max_points=600000):
     temp_re = re.compile(r'^\[(\d{4}-\d{2}-\d{2})_(\d{2}:\d{2}:\d{2})\]\s+(-?\d+)_(-?\d+)_(-?\d+)')
     series = []
+    seen_seconds = set()
     for line in text.splitlines():
         match = temp_re.search(line.strip())
         if not match:
@@ -1551,22 +2455,41 @@ def parse_temperature_series(text, max_points=600000):
         ts = parse_log_ts(line)
         if not ts:
             continue
+        second_key = int(ts.timestamp())
+        if second_key in seen_seconds:
+            continue
+        seen_seconds.add(second_key)
         raw = [int(match.group(i)) for i in (3, 4, 5)]
         series.append({
             'ts': ts,
             'time': ts.isoformat(sep=' '),
-            'temp_1': round(raw[0] / 10, 1),
-            'temp_2': round(raw[1] / 10, 1),
-            'temp_3': round(raw[2] / 10, 1),
+            'temp_1': raw[0],
+            'temp_2': raw[1],
+            'temp_3': raw[2],
+            'filtered_temp': raw[0],
+            'infrared_temp': raw[1],
+            'output_temp': raw[2],
+            'pot_temp': raw[2],
             'raw': '_'.join(str(x) for x in raw),
+            'source': 'temperature.log 温度字段：滤波温度/红外实际温度/输出温度，单位℃',
         })
         if len(series) >= max_points:
             break
     return series
 
+def is_android_log_name(name):
+    base = (name or '').lower()
+    return base.startswith('android') and base.endswith('.log')
+
+def is_temperature_log_name(name):
+    base = (name or '').lower()
+    return base.startswith('temperature') and base.endswith('.log')
+
 def parse_android_pot_temperature_series(text, max_points=300000):
     temp_re = re.compile(r'温度:_?(-?\d+)_(-?\d+)_(-?\d+)')
+    power_re = re.compile(r'功率:\s*(-?\d+(?:\.\d+)?)_(-?\d+(?:\.\d+)?)')
     series = []
+    seen_seconds = set()
     for line in text.splitlines():
         match = temp_re.search(line)
         if not match:
@@ -1574,16 +2497,34 @@ def parse_android_pot_temperature_series(text, max_points=300000):
         ts = parse_log_ts(line)
         if not ts:
             continue
-        aux_1, aux_2, pot = [int(match.group(i)) for i in (1, 2, 3)]
-        series.append({
+        second_key = int(ts.timestamp())
+        if second_key in seen_seconds:
+            continue
+        seen_seconds.add(second_key)
+        core, coil, output = [int(match.group(i)) for i in (1, 2, 3)]
+        row = {
             'ts': ts,
             'time': ts.isoformat(sep=' '),
-            'pot_temp': pot,
-            'aux_temp_1': aux_1,
-            'aux_temp_2': aux_2,
-            'raw': f"{aux_1}_{aux_2}_{pot}",
-            'source': 'android_app 温度字段，第3位按锅体温度展示',
-        })
+            'pot_temp': output,
+            'core_temp': core,
+            'coil_temp': coil,
+            'output_temp': output,
+            'aux_temp_1': core,
+            'aux_temp_2': coil,
+            'raw': f"{core}_{coil}_{output}",
+            'source': 'android_app 温度字段：机芯温度/线盘温度/测量输出温度，单位℃',
+        }
+        power_match = power_re.search(line)
+        if power_match:
+            command_w = float(power_match.group(1))
+            actual_w = float(power_match.group(2))
+            row.update({
+                'command_power_w': command_w,
+                'actual_power_w': actual_w,
+                'command_power_kw': round(command_w / 1000, 2),
+                'actual_power_kw': round(actual_w / 1000, 2),
+            })
+        series.append(row)
         if len(series) >= max_points:
             break
     return series
@@ -1601,7 +2542,7 @@ def cached_temperature_series_from_file(file_row):
     if path.exists():
         try:
             payload = json.loads(path.read_text())
-            if payload.get('version') == 1:
+            if payload.get('version') == 3:
                 series = payload.get('series') or []
                 for row in series:
                     row['ts'] = datetime.strptime(row['time'], "%Y-%m-%d %H:%M:%S")
@@ -1628,10 +2569,10 @@ def cached_temperature_series_from_file(file_row):
             if info.is_dir():
                 continue
             base = Path(info.filename).name
-            if base.startswith('android_'):
+            if is_android_log_name(base):
                 temperature_series.extend(parse_android_pot_temperature_series(text_from_zip_member(zf, info, max_bytes=16 * 1024 * 1024)))
-            elif base == 'temperature.log':
-                fallback_temperature_series = parse_temperature_series(text_from_zip_member(zf, info, max_bytes=16 * 1024 * 1024))
+            elif is_temperature_log_name(base):
+                fallback_temperature_series.extend(parse_temperature_series(text_from_zip_member(zf, info, max_bytes=16 * 1024 * 1024)))
     temperature_series.sort(key=lambda row: row['ts'])
     if not temperature_series and fallback_temperature_series:
         temperature_series = fallback_temperature_series
@@ -1639,7 +2580,7 @@ def cached_temperature_series_from_file(file_row):
         return None
 
     payload = {
-        'version': 1,
+        'version': 3,
         'file': {
             'id': file_row.get('id'),
             'file_name': file_row.get('file_name'),
@@ -1650,7 +2591,7 @@ def cached_temperature_series_from_file(file_row):
             'start': temperature_series[0]['ts'].isoformat(sep=' '),
             'end': temperature_series[-1]['ts'].isoformat(sep=' '),
             'sample_count': len(temperature_series),
-            'temperature_unit': 'android_app 温度字段第3位，单位 ℃；无安卓温度时回退 temperature.log 原始值 / 10 ℃',
+            'temperature_unit': 'android_app 温度字段：机芯/线盘/输出温度；temperature*.log 字段：滤波/红外/输出温度，单位℃',
         },
         'series': [{k: v for k, v in row.items() if k != 'ts'} for row in temperature_series],
     }
@@ -1759,12 +2700,138 @@ def parse_main_board_actions(text, start_time, end_time):
             break
     return actions
 
-def nearest_temperature_sample(series, target_time, max_delta_seconds=8):
+def android_action_label(line):
+    text = line.strip()
+    if re.search(r'功率:\s*-?\d+(?:\.\d+)?_-?\d+(?:\.\d+)?', text, re.I):
+        return 'power_sample', '功率/温度采样'
+    checks = [
+        ('cook_start', '烹饪开始', r'烹饪开始'),
+        ('cook_end', '烹饪结束', r'烹饪.*结束'),
+        ('power_set', '功率设置', r'功率设置|功率设置为'),
+        ('power_sample', '功率/温度采样', r'功率:\s*-?\d+(?:\.\d+)?_.*温度:_'),
+        ('temperature', '温控动作', r'开始检测温度|温度阻塞|设置温度上限'),
+        ('roll_start', '转锅指令', r'开始转锅'),
+        ('roll_result', '转锅结果', r'转锅操作_'),
+        ('liquid_start', '液料投放指令', r'开始投液料'),
+        ('liquid_result', '液料投放结果', r'投液料_|消耗液料|设置液料当前容量|液料投料记录'),
+        ('manual_prompt', '人工投料提示', r'手动投放|CNEngine speak|speakPoll|onSpeechComplete'),
+        ('send_msg', '下发指令', r'sendMsg frame='),
+        ('frame_result', '指令回执', r'readResult|read line|findResult'),
+        ('data_collect', '数据采集', r'DataCollectManager'),
+        ('scene', '状态/场景', r'updateRobotScene|add to poll|readResult'),
+        ('warning', '异常/失败', r'失败|error|err|timeout|异常'),
+    ]
+    for kind, label, pattern in checks:
+        if re.search(pattern, text, re.I):
+            return kind, label
+    if any(key in text for key in ['开始', '成功', '设置', '投料', '加热', '温度', '转锅', '语音']):
+        return 'android_action', '安卓动作'
+    return None, None
+
+def parse_android_action_rows(text, max_actions=120000):
+    actions = []
+    temp_re = re.compile(r'温度:_?(-?\d+)_(-?\d+)_(-?\d+)')
+    power_re = re.compile(r'功率:\s*(-?\d+(?:\.\d+)?)_(-?\d+(?:\.\d+)?)')
+    seen_sample_seconds = set()
+    for line in text.splitlines():
+        ts = parse_log_ts(line)
+        if not ts:
+            continue
+        kind, label = android_action_label(line)
+        if not label:
+            continue
+        if kind == 'power_sample':
+            second_key = int(ts.timestamp())
+            if second_key in seen_sample_seconds:
+                continue
+            seen_sample_seconds.add(second_key)
+        temperature = None
+        temp_match = temp_re.search(line)
+        if temp_match:
+            core, coil, output = [int(temp_match.group(i)) for i in (1, 2, 3)]
+            temperature = {
+                'time': ts.isoformat(sep=' '),
+                'pot_temp': output,
+                'core_temp': core,
+                'coil_temp': coil,
+                'output_temp': output,
+                'aux_temp_1': core,
+                'aux_temp_2': coil,
+                'raw': f"{core}_{coil}_{output}",
+                'delta_seconds': 0,
+            }
+        power_payload = None
+        power_match = power_re.search(line)
+        if power_match:
+            command_w = float(power_match.group(1))
+            actual_w = float(power_match.group(2))
+            power_payload = {
+                'command_power_w': command_w,
+                'actual_power_w': actual_w,
+                'command_power_kw': round(command_w / 1000, 2),
+                'actual_power_kw': round(actual_w / 1000, 2),
+                'raw': f"{power_match.group(1)}_{power_match.group(2)}",
+            }
+        actions.append({
+            'ts': ts,
+            'kind': kind,
+            'label': label,
+            'raw': line.strip()[:260],
+            'temperature': temperature,
+            'power': power_payload,
+        })
+        if len(actions) >= max_actions:
+            break
+    actions.sort(key=lambda row: row['ts'])
+    return actions
+
+def time_index(rows):
+    return [row['ts'] for row in (rows or []) if row.get('ts')]
+
+def rows_in_time_window(rows, times, start_time, end_time):
+    if not rows or not start_time or not end_time:
+        return []
+    if not times:
+        return [row for row in rows if start_time <= row.get('ts') <= end_time]
+    left = bisect_left(times, start_time)
+    right = bisect_right(times, end_time)
+    return rows[left:right]
+
+def parse_android_cook_actions(action_rows, start_time, end_time, max_actions=180, action_times=None):
+    actions = []
+    last_offset = None
+    for row in rows_in_time_window(action_rows or [], action_times, start_time, end_time):
+        ts = row.get('ts')
+        if not ts:
+            continue
+        offset = int((ts - start_time).total_seconds())
+        action = {
+            'time': ts.isoformat(sep=' '),
+            'offset_seconds': offset,
+            'delta_from_previous': None if last_offset is None else max(0, offset - last_offset),
+            'kind': row.get('kind'),
+            'label': row.get('label'),
+            'raw': row.get('raw'),
+            'temperature': row.get('temperature'),
+            'power': row.get('power'),
+        }
+        actions.append(action)
+        last_offset = offset
+        if len(actions) >= max_actions:
+            break
+    return actions
+
+def nearest_temperature_sample(series, target_time, max_delta_seconds=8, series_times=None):
     if not series:
         return None
+    candidates = series
+    if series_times:
+        pos = bisect_left(series_times, target_time)
+        indexes = [idx for idx in (pos - 1, pos, pos + 1) if 0 <= idx < len(series)]
+        candidates = [series[idx] for idx in indexes]
     best = None
     best_delta = None
-    for sample in series:
+    for sample in candidates:
         delta = abs((sample['ts'] - target_time).total_seconds())
         if best_delta is None or delta < best_delta:
             best = sample
@@ -1777,6 +2844,32 @@ def nearest_temperature_sample(series, target_time, max_delta_seconds=8):
     payload['delta_seconds'] = round(best_delta, 1)
     return payload
 
+def sample_source_summary(series):
+    groups = {}
+    for row in series or []:
+        source = row.get('source') or 'unknown'
+        item = groups.setdefault(source, {
+            'source': source,
+            'sample_count': 0,
+            'first_time': None,
+            'last_time': None,
+        })
+        item['sample_count'] += 1
+        ts = row.get('ts')
+        if ts:
+            if not item['first_time'] or ts < item['_first_ts']:
+                item['_first_ts'] = ts
+                item['first_time'] = ts.isoformat(sep=' ')
+            if not item['last_time'] or ts > item['_last_ts']:
+                item['_last_ts'] = ts
+                item['last_time'] = ts.isoformat(sep=' ')
+    result = []
+    for item in groups.values():
+        item.pop('_first_ts', None)
+        item.pop('_last_ts', None)
+        result.append(item)
+    return sorted(result, key=lambda x: x['sample_count'], reverse=True)
+
 def recipe_step_action_label(step):
     type_map = {1: '人工投料', 2: '自动投料', 3: '机器控制', 4: '等待/时间', 5: '洗锅', 6: '润锅'}
     try:
@@ -1786,7 +2879,262 @@ def recipe_step_action_label(step):
     commands = str(step.get('commands') or '').strip()
     return commands or type_map.get(type_value, f"步骤{type_value}")
 
-def build_cook_temperature_analysis(sn, file_id=None):
+def get_cook_window(cook_log):
+    duration = int(cook_log.get('duration_seconds') or 0)
+    cook_end = cook_log.get('create_time')
+    cook_start = cook_end - timedelta(seconds=duration) if cook_end and duration else cook_log.get('end_time') or cook_end
+    return cook_start, cook_end, duration
+
+def compact_temperature_samples(series, cook_start, max_points=180):
+    rows = []
+    if not series or not cook_start:
+        return rows
+    stride = max(1, len(series) // max_points)
+    picked = list(series[::stride])
+    max_row = max(
+        (row for row in series if row.get('pot_temp') is not None),
+        key=lambda row: row.get('pot_temp'),
+        default=None,
+    )
+    if max_row and all(row is not max_row for row in picked):
+        picked.append(max_row)
+    picked.sort(key=lambda row: row['ts'])
+    for row in picked:
+        item = {k: v for k, v in row.items() if k != 'ts'}
+        item['offset_seconds'] = int((row['ts'] - cook_start).total_seconds())
+        rows.append(item)
+    return rows
+
+def integrate_power_window(power_rows, start_time, end_time):
+    if not start_time or not end_time or end_time <= start_time:
+        return {
+            'sample_count': 0,
+            'actual_energy_kwh': 0,
+            'command_energy_kwh': 0,
+            'avg_actual_power_kw': None,
+            'avg_command_power_kw': None,
+            'max_actual_power_kw': None,
+            'max_command_power_kw': None,
+        }
+    rows = [
+        row for row in (power_rows or [])
+        if row.get('ts') and row.get('power')
+    ]
+    rows.sort(key=lambda row: row['ts'])
+    window_rows = [row for row in rows if start_time <= row['ts'] <= end_time]
+    previous_row = None
+    for row in rows:
+        if row['ts'] <= start_time:
+            previous_row = row
+        else:
+            break
+    events = [row for row in rows if start_time < row['ts'] < end_time]
+    timeline = []
+    if previous_row:
+        timeline.append({'ts': start_time, 'power': previous_row.get('power') or {}})
+    elif window_rows:
+        first = window_rows[0]
+        if first['ts'] < end_time:
+            timeline.append({'ts': max(first['ts'], start_time), 'power': first.get('power') or {}})
+        events = [row for row in events if row is not first]
+    for row in events:
+        timeline.append({'ts': row['ts'], 'power': row.get('power') or {}})
+    if not timeline:
+        return {
+            'sample_count': len(window_rows),
+            'actual_energy_kwh': 0,
+            'command_energy_kwh': 0,
+            'avg_actual_power_kw': None,
+            'avg_command_power_kw': None,
+            'max_actual_power_kw': None,
+            'max_command_power_kw': None,
+        }
+    actual_energy = 0.0
+    command_energy = 0.0
+    actual_seconds = 0.0
+    command_seconds = 0.0
+    actual_values = []
+    command_values = []
+    for row in window_rows:
+        power = row.get('power') or {}
+        actual = power.get('actual_power_kw')
+        command = power.get('command_power_kw')
+        if actual is not None:
+            actual_values.append(float(actual))
+        if command is not None:
+            command_values.append(float(command))
+    for idx, item in enumerate(timeline):
+        seg_start = max(item['ts'], start_time)
+        seg_end = min(timeline[idx + 1]['ts'] if idx + 1 < len(timeline) else end_time, end_time)
+        dt = (seg_end - seg_start).total_seconds()
+        if dt <= 0 or dt > 3600:
+            continue
+        power = item.get('power') or {}
+        if power.get('actual_power_kw') is not None:
+            actual_energy += float(power.get('actual_power_kw') or 0) * dt / 3600.0
+            actual_seconds += dt
+        if power.get('command_power_kw') is not None:
+            command_energy += float(power.get('command_power_kw') or 0) * dt / 3600.0
+            command_seconds += dt
+    return {
+        'sample_count': len(window_rows),
+        'actual_energy_kwh': round(actual_energy, 5),
+        'command_energy_kwh': round(command_energy, 5),
+        'avg_actual_power_kw': round(actual_energy * 3600.0 / actual_seconds, 3) if actual_seconds else (round(statistics.mean(actual_values), 3) if actual_values else None),
+        'avg_command_power_kw': round(command_energy * 3600.0 / command_seconds, 3) if command_seconds else (round(statistics.mean(command_values), 3) if command_values else None),
+        'max_actual_power_kw': round(max(actual_values), 3) if actual_values else None,
+        'max_command_power_kw': round(max(command_values), 3) if command_values else None,
+    }
+
+def build_power_segments(steps, power_rows, cook_start, duration):
+    if not steps or not cook_start:
+        return []
+    ordered = sorted(steps, key=lambda row: (row.get('offset_seconds') or 0, row.get('step_index') or 0))
+    segments = []
+    for idx, step in enumerate(ordered):
+        start_offset = max(0, int(step.get('offset_seconds') or 0))
+        next_offset = int(ordered[idx + 1].get('offset_seconds') or duration or start_offset) if idx + 1 < len(ordered) else int(duration or start_offset)
+        end_offset = max(start_offset, next_offset)
+        start_time = cook_start + timedelta(seconds=start_offset)
+        end_time = cook_start + timedelta(seconds=end_offset)
+        metrics = integrate_power_window(power_rows, start_time, end_time)
+        command_energy = metrics.get('command_energy_kwh') or 0
+        actual_energy = metrics.get('actual_energy_kwh') or 0
+        segments.append({
+            'step_index': step.get('step_index'),
+            'offset_seconds': start_offset,
+            'end_offset_seconds': end_offset,
+            'duration_seconds': max(0, end_offset - start_offset),
+            'target_time': step.get('target_time'),
+            'type': step.get('type'),
+            'automatic': step.get('automatic'),
+            'commands': step.get('commands'),
+            'design_power_w': step.get('power'),
+            'design_speed': step.get('speed'),
+            'design_position': step.get('position'),
+            **metrics,
+            'follow_rate_percent': round(actual_energy / command_energy * 100, 1) if command_energy else None,
+        })
+    return segments
+
+def build_single_cook_temperature(
+    cook_log,
+    temperature_series,
+    main_board_text,
+    detail_temperature_series=None,
+    android_action_rows=None,
+    temperature_times=None,
+    detail_temperature_times=None,
+    android_action_times=None,
+):
+    cook_start, cook_end, duration = get_cook_window(cook_log)
+    if not cook_start or not cook_end:
+        return None
+    window_start = cook_start - timedelta(seconds=20)
+    window_end = cook_end + timedelta(seconds=20)
+    cook_series = rows_in_time_window(temperature_series, temperature_times, window_start, window_end)
+    detail_series = rows_in_time_window(detail_temperature_series or temperature_series, detail_temperature_times or temperature_times, window_start, window_end)
+    values = [row.get('pot_temp') for row in cook_series if row.get('pot_temp') is not None]
+    if not values:
+        values = [value for row in cook_series for value in (row.get('temp_1'), row.get('temp_2'), row.get('temp_3')) if value is not None]
+
+    steps = []
+    if cook_log.get('recipe_id'):
+        detail = fetch_one(
+            "SELECT recipe_id, cook_time, cook_steps FROM recipe_detail WHERE recipe_id = %s LIMIT 1",
+            (cook_log.get('recipe_id'),),
+            source=True,
+            database='manage_backend',
+        )
+        raw_steps = parse_json_array(detail.get('cook_steps') if detail else None)
+        for index, step in enumerate(raw_steps, start=1):
+            offset = int(float(step.get('time') or 0))
+            target = cook_start + timedelta(seconds=offset)
+            steps.append({
+                'step_index': index,
+                'offset_seconds': offset,
+                'delta_from_previous': None,
+                'target_time': target.isoformat(sep=' '),
+                'type': step.get('type'),
+                'automatic': step.get('automatic'),
+                'power': step.get('power'),
+                'speed': step.get('speed'),
+                'position': step.get('position'),
+                'commands': recipe_step_action_label(step),
+                'temperature': nearest_temperature_sample(temperature_series, target, series_times=temperature_times),
+            })
+    steps.sort(key=lambda row: (row.get('offset_seconds') or 0, row.get('step_index') or 0))
+    last_offset = None
+    for step in steps:
+        offset = int(step.get('offset_seconds') or 0)
+        step['delta_from_previous'] = None if last_offset is None else max(0, offset - last_offset)
+        last_offset = offset
+
+    main_actions = parse_main_board_actions(main_board_text, cook_start, cook_end) if main_board_text else []
+    for action in main_actions[:80]:
+        ts = datetime.strptime(action['time'], "%Y-%m-%d %H:%M:%S")
+        action['temperature'] = nearest_temperature_sample(temperature_series, ts, series_times=temperature_times)
+    main_actions.sort(key=lambda row: (row.get('offset_seconds') or 0, row.get('time') or ''))
+    android_actions = parse_android_cook_actions(android_action_rows or [], cook_start, cook_end, action_times=android_action_times)
+
+    cook_actions_full = rows_in_time_window(android_action_rows or [], android_action_times, cook_start, cook_end)
+    power_samples_full = [row for row in cook_actions_full if row.get('kind') == 'power_sample' and row.get('power')]
+    power_samples_full.sort(key=lambda r: r['ts'])
+    power_metrics = integrate_power_window(power_samples_full, cook_start, cook_end)
+    power_segments = build_power_segments(steps, power_samples_full, cook_start, duration)
+
+    # 降采样功率事件，最多保留 200 个点用于图表绘制
+    max_power_pts = 200
+    power_samples_compact = []
+    if power_samples_full:
+        stride = max(1, len(power_samples_full) // max_power_pts)
+        picked = list(power_samples_full[::stride])
+        if picked[-1] is not power_samples_full[-1]:
+            picked.append(power_samples_full[-1])
+        for row in picked:
+            offset = int((row['ts'] - cook_start).total_seconds())
+            power_samples_compact.append({
+                'offset_seconds': offset,
+                'time': row['ts'].isoformat(sep=' '),
+                'command_power_kw': row['power'].get('command_power_kw'),
+                'actual_power_kw': row['power'].get('actual_power_kw'),
+                'command_power_w': row['power'].get('command_power_w'),
+                'actual_power_w': row['power'].get('actual_power_w'),
+            })
+
+    return {
+        'cook': {
+            **cook_log,
+            'duration_seconds': duration,
+            'start_time': cook_start.isoformat(sep=' ') if cook_start else None,
+            'end_time_calc': cook_end.isoformat(sep=' ') if cook_end else None,
+        },
+        'summary': {
+            'sample_count': len(cook_series),
+            'min_temp': round(min(values), 1) if values else None,
+            'max_temp': round(max(values), 1) if values else None,
+            'avg_temp': round(statistics.mean(values), 1) if values else None,
+            'start_temp': round(values[0], 1) if values else None,
+            'end_temp': round(values[-1], 1) if values else None,
+            'source_summary': sample_source_summary(cook_series),
+            'actual_energy_kwh': round(power_metrics.get('actual_energy_kwh') or 0, 4),
+            'command_energy_kwh': round(power_metrics.get('command_energy_kwh') or 0, 4),
+            'avg_actual_power_kw': power_metrics.get('avg_actual_power_kw'),
+            'avg_command_power_kw': power_metrics.get('avg_command_power_kw'),
+            'max_actual_power_kw': power_metrics.get('max_actual_power_kw'),
+            'max_command_power_kw': power_metrics.get('max_command_power_kw'),
+            'power_sample_count': power_metrics.get('sample_count') or 0,
+        },
+        'steps': steps,
+        'power_segments': power_segments,
+        'android_actions': android_actions,
+        'main_board_actions': main_actions[:80],
+        'temperature_samples': compact_temperature_samples(detail_series, cook_start),
+        'power_samples': power_samples_compact,
+        'series': [],
+    }
+
+def build_cook_temperature_analysis(sn, file_id=None, force_refresh=False):
     real_sn, _ = resolve_sn(sn)
     if file_id:
         file_row = fetch_one(
@@ -1809,31 +3157,73 @@ def build_cook_temperature_analysis(sn, file_id=None):
     if file_row.get('cos_deleted'):
         raise HTTPException(status_code=410, detail="Log file has been deleted from COS")
 
+    selected_file_id = int(file_row.get('id'))
+    if not force_refresh:
+        db_cached = read_cook_temperature_from_db(real_sn, selected_file_id)
+        if db_cached:
+            return db_cached
+        cached = read_cached_cook_temperature(real_sn, selected_file_id)
+        if cached:
+            try:
+                persist_cook_temperature_result(cached)
+            except Exception as exc:
+                print(f"persist cached cook temperature failed: {exc}")
+            return cached
+
+    mark_log_package_status(real_sn, selected_file_id, download_status='downloaded', parse_status='parsing', storage_status='not_stored')
     zip_bytes = download_log_zip(file_row['url'])
     try:
         zf = zipfile.ZipFile(BytesIO(zip_bytes))
     except zipfile.BadZipFile:
+        mark_log_package_status(real_sn, selected_file_id, download_status='downloaded', parse_status='parse_failed', storage_status='not_stored', error_message='Downloaded log file is not a valid zip')
         raise HTTPException(status_code=400, detail="Downloaded log file is not a valid zip")
 
-    temperature_series = []
+    android_temperature_series = []
     fallback_temperature_series = []
     main_board_text = ''
+    android_action_text_parts = []
+    parsed_android_files = []
+    parsed_temperature_files = []
+    max_total_temperature_points = 220000
     with zf:
         for info in zf.infolist():
             if info.is_dir():
                 continue
             base = Path(info.filename).name
-            if base.startswith('android_'):
-                temperature_series.extend(parse_android_pot_temperature_series(text_from_zip_member(zf, info, max_bytes=16 * 1024 * 1024)))
-            elif base == 'temperature.log':
-                fallback_temperature_series = parse_temperature_series(text_from_zip_member(zf, info, max_bytes=16 * 1024 * 1024))
+            if is_android_log_name(base):
+                android_text = text_from_zip_member(zf, info, max_bytes=8 * 1024 * 1024)
+                parsed_android_files.append(base)
+                android_action_text_parts.append(android_text)
+                if len(android_temperature_series) < max_total_temperature_points:
+                    remaining = max_total_temperature_points - len(android_temperature_series)
+                    android_temperature_series.extend(parse_android_pot_temperature_series(
+                        android_text,
+                        max_points=remaining,
+                    ))
+            elif is_temperature_log_name(base):
+                parsed_temperature_files.append(base)
+                fallback_temperature_series.extend(parse_temperature_series(
+                    text_from_zip_member(zf, info, max_bytes=8 * 1024 * 1024),
+                    max_points=max_total_temperature_points,
+                ))
             elif base == 'main_board.log':
-                main_board_text = text_from_zip_member(zf, info, max_bytes=16 * 1024 * 1024)
+                main_board_text = text_from_zip_member(zf, info, max_bytes=10 * 1024 * 1024)
+    android_temperature_series.sort(key=lambda row: row['ts'])
+    fallback_temperature_series.sort(key=lambda row: row['ts'])
+    # Prefer android business log pot temperature for summary/step alignment when present.
+    # Use temperature.log as the detail stream when available because it is often denser.
+    temperature_series = android_temperature_series or fallback_temperature_series
+    detail_temperature_series = fallback_temperature_series or temperature_series
+    android_action_rows = parse_android_action_rows('\n'.join(android_action_text_parts))
     temperature_series.sort(key=lambda row: row['ts'])
-    if not temperature_series and fallback_temperature_series:
-        temperature_series = fallback_temperature_series
+    detail_temperature_series.sort(key=lambda row: row['ts'])
+    android_action_rows.sort(key=lambda row: row['ts'])
     if not temperature_series:
+        mark_log_package_status(real_sn, selected_file_id, download_status='downloaded', parse_status='no_temperature_data', storage_status='not_stored', error_message='No usable temperature samples found')
         raise HTTPException(status_code=404, detail="No usable temperature samples found")
+    temperature_times = time_index(temperature_series)
+    detail_temperature_times = time_index(detail_temperature_series)
+    android_action_times = time_index(android_action_rows)
 
     coverage_start = temperature_series[0]['ts']
     coverage_end = temperature_series[-1]['ts']
@@ -1844,67 +3234,46 @@ def build_cook_temperature_analysis(sn, file_id=None):
         source=True,
         database='btyc',
     )
-    cook_log = fetch_one(
+    cook_logs = fetch_all(
         "SELECT id, recipe_id, recipe_name, time AS duration_seconds, create_time, end_time, whether, manual "
         "FROM sop_machinelog WHERE sn = %s AND recipe_id IS NOT NULL AND recipe_id != 0 "
-        "AND whether = 2 AND create_time BETWEEN %s AND %s ORDER BY create_time DESC LIMIT 1",
+        "AND create_time BETWEEN %s AND %s ORDER BY create_time ASC LIMIT 140",
         (real_sn, coverage_start, coverage_end),
         source=True,
         database='btyc',
     )
-    if not cook_log:
-        cook_log = fetch_one(
-            "SELECT id, recipe_id, recipe_name, time AS duration_seconds, create_time, end_time, whether, manual "
-            "FROM sop_machinelog WHERE sn = %s AND create_time BETWEEN %s AND %s ORDER BY create_time DESC LIMIT 1",
-            (real_sn, coverage_start, coverage_end),
-            source=True,
-            database='btyc',
+    if not cook_logs:
+        no_match_detail = (
+            "日志覆盖时间内没有匹配到生产记录："
+            f"{coverage_start.isoformat(sep=' ')} ~ {coverage_end.isoformat(sep=' ')}"
         )
-    if not cook_log:
-        raise HTTPException(status_code=404, detail="No production record found in selected log coverage")
-
-    duration = int(cook_log.get('duration_seconds') or 0)
-    cook_end = cook_log.get('create_time')
-    cook_start = cook_end - timedelta(seconds=duration) if cook_end and duration else cook_log.get('end_time') or cook_end
-    window_start = cook_start - timedelta(seconds=20)
-    window_end = cook_end + timedelta(seconds=20)
-    cook_series = [row for row in temperature_series if window_start <= row['ts'] <= window_end]
-    values = [row['pot_temp'] for row in cook_series if row.get('pot_temp') is not None]
-    if not values:
-        values = [value for row in cook_series for value in (row.get('temp_1'), row.get('temp_2'), row.get('temp_3')) if value is not None]
-
-    steps = []
-    if cook_log.get('recipe_id'):
-        detail = fetch_one(
-            "SELECT recipe_id, cook_time, cook_steps FROM recipe_detail WHERE recipe_id = %s LIMIT 1",
-            (cook_log.get('recipe_id'),),
-            source=True,
-            database='manage_backend',
+        mark_log_package_status(real_sn, selected_file_id, download_status='downloaded', parse_status='no_production_match', storage_status='not_stored', error_message=no_match_detail)
+        raise HTTPException(
+            status_code=404,
+            detail=no_match_detail,
         )
-        for index, step in enumerate(parse_json_array(detail.get('cook_steps') if detail else None), start=1):
-            offset = int(float(step.get('time') or 0))
-            target = cook_start + timedelta(seconds=offset)
-            steps.append({
-                'step_index': index,
-                'offset_seconds': offset,
-                'target_time': target.isoformat(sep=' '),
-                'type': step.get('type'),
-                'automatic': step.get('automatic'),
-                'power': step.get('power'),
-                'speed': step.get('speed'),
-                'position': step.get('position'),
-                'commands': recipe_step_action_label(step),
-                'temperature': nearest_temperature_sample(temperature_series, target),
-            })
 
-    main_actions = parse_main_board_actions(main_board_text, cook_start, cook_end) if main_board_text else []
-    for action in main_actions[:120]:
-        ts = datetime.strptime(action['time'], "%Y-%m-%d %H:%M:%S")
-        action['temperature'] = nearest_temperature_sample(temperature_series, ts)
+    cooks = []
+    for cook_log in cook_logs:
+        item = build_single_cook_temperature(
+            cook_log,
+            temperature_series,
+            main_board_text,
+            detail_temperature_series,
+            android_action_rows,
+            temperature_times,
+            detail_temperature_times,
+            android_action_times,
+        )
+        if item:
+            cooks.append(item)
+    if not cooks:
+        mark_log_package_status(real_sn, selected_file_id, download_status='downloaded', parse_status='parse_failed', storage_status='not_stored', error_message='No usable production window found in selected log coverage')
+        raise HTTPException(status_code=404, detail="No usable production window found in selected log coverage")
+    selected = cooks[-1]
 
     newer_uncovered = bool(latest_overall and latest_overall.get('create_time') and latest_overall.get('create_time') > coverage_end)
-    stride = max(1, len(cook_series) // 240) if cook_series else 1
-    return {
+    result = {
         'sn': real_sn,
         'file': {
             'id': file_row.get('id'),
@@ -1916,25 +3285,39 @@ def build_cook_temperature_analysis(sn, file_id=None):
             'start': coverage_start.isoformat(sep=' '),
             'end': coverage_end.isoformat(sep=' '),
             'sample_count': len(temperature_series),
-            'temperature_unit': 'android_app 温度字段第3位，单位 ℃；无安卓温度时回退 temperature.log 原始值 / 10 ℃',
+            'android_sample_count': len(android_temperature_series),
+            'temperature_log_sample_count': len(fallback_temperature_series),
+            'android_file_count': len(parsed_android_files),
+            'temperature_file_count': len(parsed_temperature_files),
+            'android_files': parsed_android_files[:20],
+            'temperature_files': parsed_temperature_files[:20],
+            'temperature_unit': '主口径优先取 android 日志：功率=指令/实际输出功率，W 转 kW；温度=机芯/线盘/输出温度。temperature*.log：滤波/红外/输出温度，单位℃，用于更密采样和交叉验证',
             'newer_production_not_covered': newer_uncovered,
             'latest_production_time': latest_overall.get('create_time') if latest_overall else None,
+            'source_summary': sample_source_summary(temperature_series),
         },
-        'cook': {
-            **cook_log,
-            'start_time': cook_start.isoformat(sep=' ') if cook_start else None,
-            'end_time_calc': cook_end.isoformat(sep=' ') if cook_end else None,
-        },
-        'summary': {
-            'sample_count': len(cook_series),
-            'min_temp': round(min(values), 1) if values else None,
-            'max_temp': round(max(values), 1) if values else None,
-            'avg_temp': round(statistics.mean(values), 1) if values else None,
-        },
-        'steps': steps,
-        'main_board_actions': main_actions[:120],
-        'series': [{k: v for k, v in row.items() if k != 'ts'} for row in cook_series[::stride]],
+        'cook_count': len(cooks),
+        'cooks': cooks,
+        # Legacy fields keep older frontend code working while the page migrates to multi-cook.
+        'cook': selected['cook'],
+        'summary': selected['summary'],
+        'steps': selected['steps'],
+        'main_board_actions': selected['main_board_actions'],
+        'series': selected['series'],
     }
+    cache_key = save_cached_cook_temperature(real_sn, selected_file_id, result)
+    try:
+        persist_cook_temperature_result(result)
+    except Exception as exc:
+        mark_log_package_status(real_sn, selected_file_id, download_status='downloaded', parse_status='parsed', storage_status='store_failed', error_message=f'入库失败：{exc}', result=result)
+        print(f"persist cook temperature failed: {exc}")
+    result['cache'] = {
+        'hit': False,
+        'created_at': time.time(),
+        'ttl_seconds': COOK_TEMPERATURE_CACHE_TTL_SECONDS,
+        'cache_key': cache_key,
+    }
+    return result
 
 def count_log_keywords(text, kind):
     definitions = {
@@ -2225,6 +3608,7 @@ def build_device_report(sn: str):
         database='btyc',
     )
     device_logs = get_device_log_files(real_sn)
+    structured_summary = device_structured_summary(real_sn)
 
     recipe_archive = sorted(recipe_archive, key=lambda item: item.get('execution_count', 0), reverse=True)
 
@@ -2250,6 +3634,7 @@ def build_device_report(sn: str):
         "faults": faults,
         "maintenance": maint,
         "device_logs": device_logs,
+        "structured_summary": structured_summary,
     }
 
 def get_cached_report(sn: str, force_refresh: bool = False):
@@ -4021,6 +5406,14 @@ def device_versions(
 def search_device(sn: str, request: Request, refresh: int = 0, authorization: str = Header(None)):
     username = require_auth(authorization=authorization)
     report = get_cached_report(sn, force_refresh=bool(refresh))
+    try:
+        mark_device_watched(report['stats']['sn'], username=username, priority=30)
+        queued = queue_recent_log_packages_for_device(report['stats']['sn'], limit=2)
+        if queued:
+            kick_auto_parse_once()
+            report['structured_summary'] = device_structured_summary(report['stats']['sn'])
+    except Exception as exc:
+        print(f"watch device failed: {exc}")
     log_event(
         username,
         'search_refresh' if refresh else 'search',
@@ -4054,12 +5447,15 @@ def search_device_month(sn: str, month: str, request: Request, authorization: st
     return detail
 
 @app.get("/api/cook-temperature/{sn}")
-def cook_temperature(sn: str, request: Request, file_id: int = Query(None), authorization: str = Header(None)):
+def cook_temperature(sn: str, request: Request, file_id: int = Query(None), refresh: int = Query(0), authorization: str = Header(None)):
     username = require_auth(authorization=authorization)
-    result = build_cook_temperature_analysis(sn, file_id=file_id)
+    real_sn, _ = resolve_sn(sn)
+    mark_device_watched(real_sn, username=username, priority=20)
+    result = build_cook_temperature_analysis(sn, file_id=file_id, force_refresh=bool(refresh) and is_admin(username))
+    gc.collect()
     log_event(
         username,
-        'cook_temperature',
+        'cook_temperature_refresh' if refresh else 'cook_temperature',
         request,
         sn=result.get('sn'),
         detail={
@@ -4067,9 +5463,50 @@ def cook_temperature(sn: str, request: Request, file_id: int = Query(None), auth
             'cook_id': result.get('cook', {}).get('id'),
             'recipe_id': result.get('cook', {}).get('recipe_id'),
             'step_count': len(result.get('steps', [])),
+            'cache_hit': bool(result.get('cache', {}).get('hit')),
         },
     )
     return result
+
+@app.get("/api/cook-temperature-structured/{sn}")
+def cook_temperature_structured(sn: str, request: Request, day: str = Query(None), limit: int = Query(300), authorization: str = Header(None)):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    mark_device_watched(real_sn, username=username, priority=25)
+    target_day = day or datetime.now().strftime("%Y-%m-%d")
+    result = structured_cook_temperature_by_day(real_sn, target_day, limit=limit)
+    try:
+        queued = queue_recent_log_packages_for_device(real_sn, limit=2)
+        if queued:
+            kick_auto_parse_once()
+        result['structured_summary'] = device_structured_summary(real_sn)
+    except Exception as exc:
+        print(f"structured read queue wake failed: {exc}")
+    log_event(
+        username,
+        'cook_temperature_structured',
+        request,
+        sn=real_sn,
+        detail={
+            'day': target_day,
+            'cook_count': result.get('cook_count'),
+            'package_count': result.get('summary_day', {}).get('package_count'),
+        },
+    )
+    return result
+
+@app.post("/api/structured/watch/{sn}")
+def watch_structured_device(sn: str, request: Request, authorization: str = Header(None)):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    mark_device_watched(real_sn, username=username, priority=10)
+    logs = get_device_log_files(real_sn)
+    queued = queue_recent_log_packages_for_device(real_sn, limit=3)
+    if queued:
+        kick_auto_parse_once()
+    summary = device_structured_summary(real_sn)
+    log_event(username, 'structured_watch', request, sn=real_sn, detail={'queued': queued, 'log_count': len(logs)})
+    return {'sn': real_sn, 'queued': queued, 'summary': summary}
 
 @app.get("/api/recipe-search")
 def recipe_search(
@@ -4555,6 +5992,85 @@ def admin_oil_thermal(sn: str, request: Request, authorization: str = Header(Non
     payload = json.loads(path.read_text())
     log_event(username, 'admin_oil_thermal_view', request, sn=safe_sn, detail={'source': str(path)})
     return payload
+
+def auto_parse_cycle():
+    if not ensure_analytics_db():
+        return 0
+    recover_stale_parsing_packages()
+    rows = fetch_all(
+        """
+        SELECT p.sn, p.source_file_id, p.file_name
+        FROM device_log_packages p
+        JOIN watched_devices w ON w.sn = p.sn AND w.status = 'active'
+        WHERE p.parse_status = 'queued'
+          AND p.storage_status != 'stored'
+          AND p.download_status = 'remote_available'
+          AND COALESCE(p.file_size_mb, 0) > 0
+          AND COALESCE(p.file_size_mb, 0) <= 50
+        ORDER BY w.priority ASC, w.last_seen_at DESC, COALESCE(p.remote_create_time, p.log_time_hint) DESC
+        LIMIT %s
+        """,
+        (max(1, AUTO_PARSE_MAX_PACKAGES_PER_CYCLE),),
+    )
+    handled = 0
+    for row in rows:
+        sn = row.get('sn')
+        file_id = int(row.get('source_file_id'))
+        try:
+            mark_log_package_status(sn, file_id, parse_status='parsing')
+            build_cook_temperature_analysis(sn, file_id=file_id, force_refresh=False)
+            execute_local(
+                "UPDATE watched_devices SET last_parse_at=%s, last_error=NULL, updated_at=%s WHERE sn=%s",
+                (datetime.now().replace(microsecond=0), datetime.now().replace(microsecond=0), sn),
+            )
+        except HTTPException as exc:
+            reason = str(exc.detail)
+            parse_status = 'no_production_match' if exc.status_code == 404 and '没有匹配到生产记录' in reason else 'parse_failed'
+            mark_log_package_status(sn, file_id, parse_status=parse_status, error_message=reason)
+            execute_local(
+                "UPDATE watched_devices SET last_error=%s, updated_at=%s WHERE sn=%s",
+                (reason[:500], datetime.now().replace(microsecond=0), sn),
+            )
+        except Exception as exc:
+            reason = f"自动解析失败：{exc}"
+            mark_log_package_status(sn, file_id, parse_status='parse_failed', error_message=reason)
+            execute_local(
+                "UPDATE watched_devices SET last_error=%s, updated_at=%s WHERE sn=%s",
+                (reason[:500], datetime.now().replace(microsecond=0), sn),
+            )
+        handled += 1
+        gc.collect()
+    return handled
+
+def auto_parse_worker():
+    time.sleep(8)
+    while AUTO_PARSE_ENABLED:
+        try:
+            auto_parse_cycle()
+        except Exception as exc:
+            print(f"auto parse worker cycle failed: {exc}")
+        time.sleep(max(60, AUTO_PARSE_INTERVAL_SECONDS))
+
+def kick_auto_parse_once():
+    if not AUTO_PARSE_ENABLED:
+        return
+    def run_once():
+        try:
+            auto_parse_cycle()
+        except Exception as exc:
+            print(f"auto parse kick failed: {exc}")
+    threading.Thread(target=run_once, name="zhiku-auto-parse-kick", daemon=True).start()
+
+@app.on_event("startup")
+def startup_tasks():
+    global AUTO_PARSE_WORKER_STARTED
+    ensure_analytics_db()
+    if AUTO_PARSE_ENABLED:
+        with AUTO_PARSE_WORKER_LOCK:
+            if not AUTO_PARSE_WORKER_STARTED:
+                thread = threading.Thread(target=auto_parse_worker, name="zhiku-auto-parse", daemon=True)
+                thread.start()
+                AUTO_PARSE_WORKER_STARTED = True
 
 if __name__ == "__main__":
     import uvicorn
