@@ -766,9 +766,9 @@ def init_analytics_db():
                         source_category_2 VARCHAR(128) NULL,
                         ingredient_type VARCHAR(32) NULL,
                         automatic VARCHAR(32) NULL,
-                        specific_heat_kj_kg_c DECIMAL(8,3) NOT NULL DEFAULT 3.500,
-                        water_fraction DECIMAL(5,3) NOT NULL DEFAULT 0.500,
-                        oil_fraction DECIMAL(5,3) NOT NULL DEFAULT 0.000,
+                        specific_heat_kj_kg_c DECIMAL(8,3) NULL,
+                        water_fraction DECIMAL(5,3) NULL,
+                        oil_fraction DECIMAL(5,3) NULL,
                         boiling_c DECIMAL(8,2) NULL,
                         smoke_point_c DECIMAL(8,2) NULL,
                         flash_point_c DECIMAL(8,2) NULL,
@@ -789,6 +789,15 @@ def init_analytics_db():
                         INDEX idx_ingredient_usage(recipe_usage_count)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
+                for stmt in [
+                    "ALTER TABLE ingredient_thermal_properties MODIFY specific_heat_kj_kg_c DECIMAL(8,3) NULL",
+                    "ALTER TABLE ingredient_thermal_properties MODIFY water_fraction DECIMAL(5,3) NULL",
+                    "ALTER TABLE ingredient_thermal_properties MODIFY oil_fraction DECIMAL(5,3) NULL",
+                ]:
+                    try:
+                        cur.execute(stmt)
+                    except Exception:
+                        pass
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS ingredient_thermal_sync_runs (
                         id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -4618,33 +4627,74 @@ def normalized_amount(value, unit):
     return None
 
 THERMAL_RULES = [
-    {'category': '油脂', 'keywords': ['油', '猪油', '牛油', '鸡油', '色拉油', '菜籽油', '花生油', '大豆油', '香油', '葱油', '花椒油', '辣椒油'], 'specific_heat': 2.0, 'water_fraction': 0.0, 'oil_fraction': 1.0, 'smoke_point_c': 210, 'flash_point_c': 315, 'autoignition_c': 370, 'hazard_class': '可燃油脂', 'confidence': '中'},
-    {'category': '水/汤汁', 'keywords': ['水', '清水', '饮用水', '高汤', '汤', '汤汁', '汤底', '水淀粉', '淀粉水', '生粉水'], 'specific_heat': 4.0, 'water_fraction': 0.9, 'oil_fraction': 0.0, 'boiling_c': 100, 'hazard_class': '低风险含水液体', 'confidence': '中'},
-    {'category': '液体调料', 'keywords': ['酱油', '生抽', '老抽', '醋', '料酒', '黄酒', '蚝油', '酱汁', '汁', '液', '奶', '乳'], 'specific_heat': 3.7, 'water_fraction': 0.75, 'oil_fraction': 0.02, 'boiling_c': 100, 'hazard_class': '含水挥发液体', 'confidence': '低'},
-    {'category': '肉蛋类', 'keywords': ['鸡', '牛', '猪', '肉', '鱼', '虾', '蛋', '鸭', '羊', '肥肠', '腊肠'], 'specific_heat': 3.2, 'water_fraction': 0.62, 'oil_fraction': 0.1, 'hazard_class': '含水可焦化食材', 'confidence': '中'},
-    {'category': '蔬菜类', 'keywords': ['菜', '椒', '葱', '姜', '蒜', '笋', '土豆', '萝卜', '豆角', '洋葱', '菌', '菇', '茄', '瓜'], 'specific_heat': 3.7, 'water_fraction': 0.82, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '中'},
-    {'category': '干货/香辛料', 'keywords': ['干辣椒', '花椒', '麻椒', '胡椒', '八角', '桂皮', '香叶', '孜然', '芝麻', '辣椒粉'], 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.08, 'autoignition_c': 260, 'hazard_class': '可燃干货', 'confidence': '低'},
-    {'category': '调料', 'keywords': ['盐', '糖', '鸡精', '味精', '粉', '淀粉', '生粉', '面粉', '豆瓣酱', '辣酱', '酱'], 'specific_heat': 2.0, 'water_fraction': 0.1, 'oil_fraction': 0.0, 'hazard_class': '调味料/需复核', 'confidence': '低'},
+    {'category': '自定义/待确认', 'keywords': ['自定义', '未知', '测试', '默认', '其他', '手动捞出'], 'specific_heat': None, 'water_fraction': None, 'oil_fraction': None, 'hazard_class': '待人工归类', 'confidence': '低'},
+    {'category': '水/汤汁', 'keywords': ['水', '清水', '饮用水', '开水', '冷水', '热水', '冰水', '高汤', '汤', '汤汁', '汤底', 'water', '水淀粉', '淀粉水', '生粉水'], 'specific_heat': 4.0, 'water_fraction': 0.9, 'oil_fraction': 0.0, 'boiling_c': 100, 'hazard_class': '低风险含水液体', 'confidence': '中'},
+    {'category': '液体调料', 'keywords': ['酱油', '醬油', 'soy sauce', '生抽', '老抽', '醋', '米醋', '陈醋', '香醋', '料酒', '黄酒', '米酒', '白酒', '啤酒', '蚝油', '蠔油', '耗油', '素蠔油', '鱼露', '豉油', '东古', '美极', '一品鲜', '酱汁', '调味汁', '鲜味汁', '辣鲜露', '蒸鱼豉油', 'white sauce', 'squid sauce', 'sweet and sour sauce', '다크소스', '汁', '液'], 'specific_heat': 3.7, 'water_fraction': 0.75, 'oil_fraction': 0.02, 'boiling_c': 100, 'hazard_class': '含水液体调料', 'confidence': '低'},
+    {'category': '酱料/发酵调料', 'keywords': ['豆瓣酱', '辣酱', '甜面酱', '黄豆酱', '柱侯酱', '海鲜酱', '芝麻酱', '沙茶酱', '酱料', '酱包', '豆豉', '豆䜴', '黑豆豉', 'black bean', 'black beans', '磨豉酱', '剁椒', '泡椒', '鲜椒酱', '脆椒酱', '淳牌酱', '干锅酱', '酱椒酱', 'pasta sauce', '小炒料', '鲜上鲜', '复合', '湖洋', '底料'], 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.08, 'hazard_class': '复合调料/需复核', 'confidence': '低'},
+    {'category': '油脂', 'keywords': ['oil', 'aliejus', '猪油', '牛油', '鸡油', '鸭油', '黄油', 'butter', '色拉油', '沙拉油', '菜籽油', '花生油', '大豆油', '玉米油', '调和油', '混合油', '植物油', '食用油', '香油', '麻油', '芝麻油', '葱油', '花椒油', '辣椒油', '油辣子', '红油', '明油', '料油', '熟油', '油脂', '油桶'], 'exclude_keywords': ['酱油', '醬油', 'soy sauce', '蚝油', '蠔油', '耗油', '豉油'], 'specific_heat': 2.0, 'water_fraction': 0.0, 'oil_fraction': 1.0, 'smoke_point_c': None, 'flash_point_c': None, 'autoignition_c': None, 'hazard_class': '可燃油脂/温度待校准', 'confidence': '低'},
+    {'category': '香辛料/干货', 'keywords': ['干辣椒', '辣椒干', '干椒', '辣椒粉', '辣椒面', '刀口辣椒', '胡椒', '胡椒粉', 'black pepper', '花椒', '麻椒', '藤椒', '八角', '八角粉', '桂皮', '香叶', '孜然', '孜然粉', '芝麻', '白芝麻', '黑芝麻', '花生米', '十三香', '五香粉', '咖喱粉', '香料', '丁香', '草果', '白芷', '山奈', '良姜', '陈皮', '香茅', '甘草', '沙姜', '肉蔻'], 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.08, 'hazard_class': '可燃干货/燃点待测', 'confidence': '低'},
+    {'category': '鲜椒/蔬菜', 'keywords': ['小米辣', '小米椒', '美人椒', '野山椒', '子天椒', '指天椒', '贡椒', '黄贡椒', '软皮椒', '二荆条', '土辣椒', '手锤红辣椒', '塌辣子', '辣椒', '辣椒片', '辣椒圈', '辣椒段', '辣椒碎', '青椒', '红椒', '尖椒', '线椒', '螺丝椒', '杭椒', 'capsicum', 'mix pepper', 'chili sliced', 'pepper', '菜', '葱', '䓤', '蔥', '姜', '薑', '蒜', '마늘', 'garlic', '笋', '土豆', '萝卜', '罗卜', '豆角', '缸豆', '豇豆', '四季豆', '扁豆', '豆芽', 'bean sprouts', '洋葱', '洋蔥', 'onion', 'courgettes', '茄', '瓜', '芹', '韭', 'leek', '蒜苗', '蒜苔', '莲藕', '藕', '茭白', '花菜', '西蓝花', '包菜', 'cabbage', '白菜', '香菜', '西红柿', '番茄', '玉米粒', 'carrot', 'mixed vege', '藠头', '芥兰', '九层塔', '金不换', '果蔬粒', 'pineapple', '菠萝', '芋头', '甜豆', '兰豆', '红苕尖'], 'specific_heat': 3.7, 'water_fraction': 0.82, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '中'},
+    {'category': '菌菇类', 'keywords': ['菌', '菇', '蘑菇', '香菇', '平菇', '杏鲍菇', '金针菇', '木耳', '银耳'], 'specific_heat': 3.6, 'water_fraction': 0.85, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '中'},
+    {'category': '肉类', 'keywords': ['鸡', 'chicken', '牛', 'beef', '猪', 'pork', '羊', '鸭', '鹅', '肉', '里脊', '排骨', '肥肠', '肥膘', '油渣', '叉烧', '腊肠', '香肠', '火腿', '午餐肉'], 'specific_heat': 3.2, 'water_fraction': 0.62, 'oil_fraction': 0.1, 'hazard_class': '含水可焦化食材', 'confidence': '中'},
+    {'category': '水产类', 'keywords': ['鱼', '虾', 'prawn', '蟹', '贝', '蛤', '鱿鱼', 'squid', '墨鱼', '海参', '鲍鱼', '牛蛙'], 'specific_heat': 3.4, 'water_fraction': 0.72, 'oil_fraction': 0.04, 'hazard_class': '含水可焦化食材', 'confidence': '中'},
+    {'category': '主食/淀粉食材', 'keywords': ['米饭', 'rice', '杂粮饭', '米粉', '河粉', '面条', 'noodles', 'yellow noodle', 'hokkien noodles', 'fettucine', 'fettuccine', 'pasta', '面片', '面疙瘩', '年糕', '粉皮', '粉丝', '粉条', '米线', '饼', '馍', '面筋'], 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.02, 'hazard_class': '淀粉类/可焦化', 'confidence': '低'},
+    {'category': '蛋奶豆制品', 'keywords': ['egg', 'eggs', '蛋', '鸡蛋', '鸭蛋', 'cheese', '奶', 'cream', 'crème', '乳', '豆腐', '豆皮', '腐竹', '香干', '豆干', '千张', '青豆', '杂豆'], 'specific_heat': 3.3, 'water_fraction': 0.68, 'oil_fraction': 0.06, 'hazard_class': '含水可焦化食材', 'confidence': '中'},
+    {'category': '粉类/增稠', 'keywords': ['starch powder', 'cheese powder', '淀粉', '生粉', '面粉', '玉米粉', '土豆粉', '红薯粉', '粉料', '裹粉', '浆粉'], 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.0, 'hazard_class': '粉类/需复核', 'confidence': '低'},
+    {'category': '糖类', 'keywords': ['sugar', '糖', '白糖', '冰糖', '红糖', '砂糖', '二砂', '麦芽糖', '蜂蜜'], 'specific_heat': 1.3, 'water_fraction': 0.02, 'oil_fraction': 0.0, 'hazard_class': '糖类/可焦化', 'confidence': '低'},
+    {'category': '盐味精/基础调味', 'keywords': ['salt', 'msg', 'baking soda', '鹽', '盐', '味精', '鸡精', '鸡粉', '味粉', '调味粉', '增味剂'], 'specific_heat': 0.9, 'water_fraction': 0.02, 'oil_fraction': 0.0, 'hazard_class': '无机/低燃烧风险', 'confidence': '低'},
 ]
 
+SOURCE_CATEGORY_RULES = {
+    ('3', '1'): {'category': '鲜椒/蔬菜', 'specific_heat': 3.7, 'water_fraction': 0.82, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('3', '2'): {'category': '菌菇类', 'specific_heat': 3.6, 'water_fraction': 0.85, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('3', '23'): {'category': '鲜椒/蔬菜', 'specific_heat': 3.7, 'water_fraction': 0.82, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('4', '46'): {'category': '油脂', 'specific_heat': 2.0, 'water_fraction': 0.0, 'oil_fraction': 1.0, 'hazard_class': '可燃油脂/温度待校准', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('4', '47'): {'category': '油脂', 'specific_heat': 2.0, 'water_fraction': 0.0, 'oil_fraction': 1.0, 'hazard_class': '可燃油脂/温度待校准', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '33'): {'category': '液体调料', 'specific_heat': 3.7, 'water_fraction': 0.75, 'oil_fraction': 0.02, 'boiling_c': 100, 'hazard_class': '含水液体调料', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '40'): {'category': '酱料/发酵调料', 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.08, 'hazard_class': '复合调料/需复核', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '42'): {'category': '酱料/发酵调料', 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.08, 'hazard_class': '复合调料/需复核', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '43'): {'category': '香辛料/干货', 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.08, 'hazard_class': '可燃干货/燃点待测', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '44'): {'category': '液体调料', 'specific_heat': 3.7, 'water_fraction': 0.75, 'oil_fraction': 0.02, 'boiling_c': 100, 'hazard_class': '含水液体调料', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '45'): {'category': '糖类', 'specific_heat': 1.3, 'water_fraction': 0.02, 'oil_fraction': 0.0, 'hazard_class': '糖类/可焦化', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '48'): {'category': '粉类/增稠', 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.0, 'hazard_class': '粉类/需复核', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('8', '44'): {'category': '盐味精/基础调味', 'specific_heat': 0.9, 'water_fraction': 0.02, 'oil_fraction': 0.0, 'hazard_class': '无机/低燃烧风险', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('1', '22'): {'category': '主食/淀粉食材', 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.02, 'hazard_class': '淀粉类/可焦化', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('10', '5'): {'category': '香辛料/干货', 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.08, 'hazard_class': '可燃干货/燃点待测', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('10', '27'): {'category': '酱料/发酵调料', 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.08, 'hazard_class': '复合调料/需复核', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('10', '29'): {'category': '鲜椒/蔬菜', 'specific_heat': 3.7, 'water_fraction': 0.82, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('2', '14'): {'category': '蛋奶豆制品', 'specific_heat': 3.3, 'water_fraction': 0.68, 'oil_fraction': 0.06, 'hazard_class': '含水可焦化食材', 'confidence': '低', 'source_note': '源库分类编码推断'},
+}
+
 def infer_thermal_property(name='', category_1='', category_2='', ingredient_type=None):
-    text = ' '.join(str(x or '') for x in [name, category_1, category_2])
+    text = ' '.join(str(x or '') for x in [name, category_1, category_2]).lower()
     if str(ingredient_type or '') == '3':
         text = f"{text} 液"
     for rule in THERMAL_RULES:
-        if any(keyword and keyword in text for keyword in rule['keywords']):
+        if any(keyword and keyword.lower() in text for keyword in rule.get('exclude_keywords', [])):
+            continue
+        if any(keyword and keyword.lower() in text for keyword in rule['keywords']):
             result = dict(rule)
+            result.pop('keywords', None)
+            result.pop('exclude_keywords', None)
             result.setdefault('boiling_c', None)
             result.setdefault('smoke_point_c', None)
             result.setdefault('flash_point_c', None)
             result.setdefault('autoignition_c', None)
             result['source_note'] = '源库分类+名称关键词推断'
             return result
+    code_rule = SOURCE_CATEGORY_RULES.get((str(category_1 or ''), str(category_2 or '')))
+    if code_rule:
+        result = dict(code_rule)
+        result.setdefault('boiling_c', None)
+        result.setdefault('smoke_point_c', None)
+        result.setdefault('flash_point_c', None)
+        result.setdefault('autoignition_c', None)
+        return result
     return {
         'category': '未分类',
-        'specific_heat': 3.5,
-        'water_fraction': 0.5,
-        'oil_fraction': 0.0,
+        'specific_heat': None,
+        'water_fraction': None,
+        'oil_fraction': None,
         'boiling_c': None,
         'smoke_point_c': None,
         'flash_point_c': None,

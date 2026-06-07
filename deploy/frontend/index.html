@@ -1255,12 +1255,12 @@
 	                                <div class="history-meta">{{ (item.aliases || []).join(' / ') || '-' }}</div>
 	                            </td>
 	                            <td>{{ item.category }}</td>
-	                            <td>{{ item.specific_heat || item.specific_heat_kj_kg_c }}</td>
+	                            <td>{{ item.specific_heat || item.specific_heat_kj_kg_c || '待校准' }}</td>
 	                            <td>{{ thermalKnowledgeEnergyLabel(item, thermalKnowledgeFilters.targetTemp) }}</td>
 	                            <td>{{ thermalFractionLabel(item) }}</td>
-	                            <td>{{ item.smoke_point_c ? `${item.smoke_point_c}℃ 烟点` : (item.boiling_c ? `${item.boiling_c}℃ 沸点` : '-') }}</td>
-	                            <td>{{ item.flash_point_c ? `${item.flash_point_c}℃` : '-' }}</td>
-	                            <td>{{ item.autoignition_c ? `${item.autoignition_c}℃` : '-' }}</td>
+	                            <td>{{ item.smoke_point_c ? `${item.smoke_point_c}℃ 烟点` : (item.boiling_c ? `${item.boiling_c}℃ 沸点` : '待校准') }}</td>
+	                            <td>{{ item.flash_point_c ? `${item.flash_point_c}℃` : '待校准' }}</td>
+	                            <td>{{ item.autoignition_c ? `${item.autoignition_c}℃` : '待校准' }}</td>
 	                            <td><span class="resource-chip" :class="thermalHazardClass(item.hazard_class)">{{ item.hazard_class }}</span></td>
 	                            <td>{{ item.confidence }}<div class="history-meta">{{ item.source || item.source_note }}</div></td>
 	                        </tr>
@@ -3613,9 +3613,9 @@
 		                    return rows.map(row => ({
 		                        ...row,
 		                        name: row.canonical_name || row.name,
-		                        specific_heat: Number(row.specific_heat_kj_kg_c ?? row.specific_heat ?? 0),
-		                        water_fraction: Number(row.water_fraction ?? 0),
-		                        oil_fraction: Number(row.oil_fraction ?? 0),
+		                        specific_heat: row.specific_heat_kj_kg_c ?? row.specific_heat ?? null,
+		                        water_fraction: row.water_fraction ?? null,
+		                        oil_fraction: row.oil_fraction ?? null,
 		                        source: row.source_note || row.source,
 		                    }));
 		                }
@@ -4770,23 +4770,28 @@
                 }[kind] || '其他';
             },
             thermalKnowledgeEnergyKj(item, targetTemp, massG, roomTemp) {
-                const c = this.thermalNumber(item?.specific_heat, 0);
+                const rawC = item?.specific_heat ?? item?.specific_heat_kj_kg_c;
+                if (rawC === null || rawC === undefined || rawC === '') return null;
+                const c = this.thermalNumber(rawC, NaN);
+                if (!Number.isFinite(c) || c <= 0) return null;
                 const massKg = Math.max(0, this.thermalNumber(massG, this.thermalKnowledgeFilters.massG || 100)) / 1000;
                 const delta = Math.max(0, this.thermalNumber(targetTemp, 100) - this.thermalNumber(roomTemp, this.thermalKnowledgeFilters.roomTemp || 25));
                 return massKg * c * delta;
             },
             thermalKnowledgeEnergyLabel(item, targetTemp) {
                 const kj = this.thermalKnowledgeEnergyKj(item, targetTemp, this.thermalKnowledgeFilters.massG, this.thermalKnowledgeFilters.roomTemp);
-                if (!Number.isFinite(kj)) return '-';
+                if (!Number.isFinite(kj)) return '待校准';
                 return this.thermalKjLabel(kj);
             },
             thermalKnowledgeAverageEnergyLabel(targetTemp) {
                 const rows = this.filteredThermalKnowledgeItems.length ? this.filteredThermalKnowledgeItems : this.thermalKnowledgeBase;
-                if (!rows.length) return '-';
-                const avgC = rows.reduce((sum, item) => sum + this.thermalNumber(item.specific_heat, 0), 0) / rows.length;
+                const knownRows = rows.filter(item => Number.isFinite(this.thermalNumber(item.specific_heat ?? item.specific_heat_kj_kg_c, NaN)));
+                if (!knownRows.length) return '待校准';
+                const avgC = knownRows.reduce((sum, item) => sum + this.thermalNumber(item.specific_heat ?? item.specific_heat_kj_kg_c, 0), 0) / knownRows.length;
                 return this.thermalKnowledgeEnergyLabel({ specific_heat: avgC }, targetTemp);
             },
             thermalFractionLabel(item) {
+                if (item?.water_fraction === null && item?.oil_fraction === null) return '待校准';
                 const water = Math.round(this.thermalNumber(item?.water_fraction, 0) * 100);
                 const oil = Math.round(this.thermalNumber(item?.oil_fraction, 0) * 100);
                 return `水 ${water}% / 油 ${oil}%`;
