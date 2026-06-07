@@ -2930,12 +2930,10 @@
         </div>
         </section>
 
-        <!-- ── Safety Overview ─────────────────────────────────────── -->
-        <section v-show="activeTab === 'safetyOverview'">
-            <div class="content-wrap">
+        <div class="content-wrap" v-if="activeTab === 'safetyOverview'">
                 <div v-if="safetyDashboard.overviewLoading" class="text-muted text-center py-4">正在加载安全总览...</div>
                 <div v-if="safetyDashboard.overviewError" class="alert alert-danger">{{ safetyDashboard.overviewError }}</div>
-                <template v-if="safetyDashboard.overview">
+                <template v-if="safetyDashboard.overview && safetyDashboard.overview.summary">
                     <!-- Summary Cards -->
                     <div class="row g-3 mb-3">
                         <div class="col-md-3">
@@ -3063,15 +3061,15 @@
                         </div>
                     </div>
                 </template>
+                <div v-if="safetyDashboard.overview && !safetyDashboard.overview.summary && !safetyDashboard.overviewLoading && !safetyDashboard.overviewError" class="alert alert-warning">
+                    安全总览接口已返回，但数据结构不完整，请刷新或重新运行安全扫描。
+                </div>
                 <div v-if="!safetyDashboard.overview && !safetyDashboard.overviewLoading && !safetyDashboard.overviewError" class="text-center py-5 text-muted">
                     暂无安全数据。请先解析一些日志包，然后点击「运行安全扫描」。
                 </div>
-            </div>
-        </section>
+        </div>
 
-        <!-- ── Safety Alerts ───────────────────────────────────────── -->
-        <section v-show="activeTab === 'safetyAlerts'">
-            <div class="content-wrap">
+        <div class="content-wrap" v-if="activeTab === 'safetyAlerts'">
                 <div class="row g-2 mb-3 align-items-end">
                     <div class="col-md-2">
                         <label class="filter-label">风险等级</label>
@@ -3180,8 +3178,7 @@
                 <div v-if="!safetyDashboard.alerts && !safetyDashboard.alertsLoading && !safetyDashboard.alertsError" class="text-center py-5 text-muted">
                     暂无告警数据。请先运行安全扫描。
                 </div>
-            </div>
-        </section>
+        </div>
 
     </div>
         </main>
@@ -3513,6 +3510,8 @@
 		                    oilThermal: '温控样例',
 		                    emergency: '重点设备',
 		                    admin: '系统审计',
+		                    safetyOverview: '安全总览',
+		                    safetyAlerts: '告警明细',
 		                };
 		                return titles[this.activeTab] || '设备运营工作台';
 		            },
@@ -3527,6 +3526,8 @@
 		                if (this.activeTab === 'thermalModel') return '把单道菜的能量输入、投料吸热、理论锅温和实测偏差放到同一张图里';
 		                if (this.activeTab === 'admin') return '查看账号、缓存、导出和系统使用审计';
 		                if (this.activeTab === 'emergency') return '集中跟踪重点设备的使用跨度和生产情况';
+		                if (this.activeTab === 'safetyOverview') return '全局温度风险分布、高危设备和菜谱排行';
+		                if (this.activeTab === 'safetyAlerts') return '按规则筛选和追溯安全告警';
 		                return '围绕单台设备查看档案、生产、菜谱、日志和诊断结果';
 		            },
             isAdmin() {
@@ -3566,8 +3567,8 @@
 		                if (this.activeTab === 'cookTemperature') return '温度诊断依赖日志包，缺口会提示。';
 		                if (this.activeTab === 'powerDiagnosis') return '功率诊断复用日志解析缓存。';
 		                if (this.activeTab === 'thermalModel') return '第一版是可解释工程近似，真实安全判断仍要结合日志、视频和人工复核。';
-                if (this.activeTab === 'safetyOverview') return '安全总览基于本地已入库的作业数据，建议先同步或解析更多日志包。';
-                if (this.activeTab === 'safetyAlerts') return '告警规则覆盖温度、时序和传感器可信度维度。admin 可触发重新扫描。';
+		                if (this.activeTab === 'safetyOverview') return '安全总览基于本地已入库的作业数据，建议先同步或解析更多日志包。';
+		                if (this.activeTab === 'safetyAlerts') return '告警规则覆盖温度、时序和传感器可信度维度。admin 可触发重新扫描。';
 		                if (this.activeTab === 'home') return '从搜索、历史和常用入口开始。';
 		                return `当前版本：${this.appVersion}`;
 		            },
@@ -4811,7 +4812,7 @@
                 this.thermalKnowledgeFilters.hazard = '';
                 this.loadThermalKnowledge(0);
             },
-            // ── Safety Dashboard Methods ──────────────────────────
+            // ── Safety Dashboard Methods ──
             async loadSafetyOverview() {
                 this.safetyDashboard.overviewLoading = true;
                 this.safetyDashboard.overviewError = '';
@@ -4842,7 +4843,7 @@
                     if (f.dismissed !== '') params.set('dismissed', String(f.dismissed));
                     params.set('limit', '200');
                     params.set('offset', String(Math.max(0, Number(offset || 0))));
-                    const res = await fetch(`/api/safety/alerts?${params.toString()}`, { headers: this.authHeaders() });
+                    const res = await fetch('/api/safety/alerts?' + params.toString(), { headers: this.authHeaders() });
                     if (res.status === 401) { this.logout(); return; }
                     if (!res.ok) {
                         const payload = await res.json().catch(() => ({}));
@@ -4881,7 +4882,7 @@
             async dismissSafetyAlert(alertId) {
                 if (!this.isAdmin) return;
                 try {
-                    const res = await fetch(`/api/safety/alerts/${alertId}/dismiss`, { method: 'POST', headers: this.authHeaders() });
+                    const res = await fetch('/api/safety/alerts/' + alertId + '/dismiss', { method: 'POST', headers: this.authHeaders() });
                     if (!res.ok) {
                         const payload = await res.json().catch(() => ({}));
                         alert('处理失败：' + (payload.detail || '未知错误'));
@@ -4907,6 +4908,7 @@
                 if (level === 'medium') return 'bg-warning text-dark';
                 return 'bg-secondary';
             },
+
 	            async loadAdminStatus() {
 	                if (!this.isAdmin) return;
 	                this.adminLoading = true;
