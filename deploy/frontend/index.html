@@ -4811,6 +4811,102 @@
                 this.thermalKnowledgeFilters.hazard = '';
                 this.loadThermalKnowledge(0);
             },
+            // ── Safety Dashboard Methods ──────────────────────────
+            async loadSafetyOverview() {
+                this.safetyDashboard.overviewLoading = true;
+                this.safetyDashboard.overviewError = '';
+                try {
+                    const res = await fetch('/api/safety/overview', { headers: this.authHeaders() });
+                    if (res.status === 401) { this.logout(); return; }
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        this.safetyDashboard.overviewError = payload.detail || '安全总览加载失败';
+                        return;
+                    }
+                    this.safetyDashboard.overview = await res.json();
+                } catch (e) {
+                    this.safetyDashboard.overviewError = '安全总览加载失败，请稍后重试。';
+                } finally {
+                    this.safetyDashboard.overviewLoading = false;
+                }
+            },
+            async loadSafetyAlerts(offset = 0) {
+                this.safetyDashboard.alertsLoading = true;
+                this.safetyDashboard.alertsError = '';
+                try {
+                    const params = new URLSearchParams();
+                    const f = this.safetyDashboard.alertsFilters;
+                    if (f.riskLevel) params.set('risk_level', f.riskLevel);
+                    if (f.ruleKey) params.set('rule_key', f.ruleKey);
+                    if (f.sn) params.set('sn', f.sn);
+                    if (f.dismissed !== '') params.set('dismissed', String(f.dismissed));
+                    params.set('limit', '200');
+                    params.set('offset', String(Math.max(0, Number(offset || 0))));
+                    const res = await fetch(`/api/safety/alerts?${params.toString()}`, { headers: this.authHeaders() });
+                    if (res.status === 401) { this.logout(); return; }
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        this.safetyDashboard.alertsError = payload.detail || '告警查询失败';
+                        return;
+                    }
+                    this.safetyDashboard.alerts = await res.json();
+                    this.safetyDashboard.alertsPage = Math.floor(offset / 200);
+                } catch (e) {
+                    this.safetyDashboard.alertsError = '告警查询失败，请稍后重试。';
+                } finally {
+                    this.safetyDashboard.alertsLoading = false;
+                }
+            },
+            async triggerSafetyScan() {
+                if (!this.isAdmin) return;
+                this.safetyDashboard.scanLoading = true;
+                this.safetyDashboard.scanResult = null;
+                try {
+                    const res = await fetch('/api/safety/scan', { method: 'POST', headers: this.authHeaders() });
+                    if (res.status === 401) { this.logout(); return; }
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        alert('扫描失败：' + (payload.detail || '未知错误'));
+                        return;
+                    }
+                    this.safetyDashboard.scanResult = await res.json();
+                    await this.loadSafetyOverview();
+                    if (this.safetyDashboard.alerts) await this.loadSafetyAlerts(0);
+                } catch (e) {
+                    alert('扫描失败，请稍后重试。');
+                } finally {
+                    this.safetyDashboard.scanLoading = false;
+                }
+            },
+            async dismissSafetyAlert(alertId) {
+                if (!this.isAdmin) return;
+                try {
+                    const res = await fetch(`/api/safety/alerts/${alertId}/dismiss`, { method: 'POST', headers: this.authHeaders() });
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        alert('处理失败：' + (payload.detail || '未知错误'));
+                        return;
+                    }
+                    await this.loadSafetyAlerts(this.safetyDashboard.alertsPage * 200);
+                    await this.loadSafetyOverview();
+                } catch (e) {
+                    alert('处理失败，请稍后重试。');
+                }
+            },
+            resetSafetyAlertsFilters() {
+                this.safetyDashboard.alertsFilters = { riskLevel: '', ruleKey: '', sn: '', dismissed: '' };
+                this.loadSafetyAlerts(0);
+            },
+            jumpToDeviceFromAlert(alert) {
+                if (!alert || !alert.sn) return;
+                this.snInput = alert.sn;
+                this.search();
+            },
+            safetyRiskBadgeClass(level) {
+                if (level === 'high') return 'bg-danger';
+                if (level === 'medium') return 'bg-warning text-dark';
+                return 'bg-secondary';
+            },
 	            async loadAdminStatus() {
 	                if (!this.isAdmin) return;
 	                this.adminLoading = true;
