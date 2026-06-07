@@ -1184,6 +1184,14 @@
 	                        <label class="filter-label">目标温度 ℃</label>
 	                        <input type="number" class="form-control form-control-sm" v-model.number="thermalKnowledgeFilters.targetTemp">
 	                    </div>
+	                    <div class="col-xl-2 col-md-4">
+	                        <label class="filter-label">能量单位</label>
+	                        <select class="form-select form-select-sm" v-model="powerEnergyUnit">
+	                            <option value="kj">kJ 千焦</option>
+	                            <option value="kwh">kWh 千瓦时</option>
+	                            <option value="kws">kW·s 千瓦秒</option>
+	                        </select>
+	                    </div>
 	                </div>
 	                <div class="history-meta mt-3">
 	                    第一版是工程种子库：比热、烟点、闪点、自燃点用于模型解释和风险筛选，不作为最终安全阈值；后续需要用公司实验、供应商数据和菜谱实测持续校准。
@@ -1855,8 +1863,8 @@
 	                                                        <span><span class="legend-dot" style="background:#12a150"></span>实际输出功率 (右轴, kW)</span>
 	                                                        <span v-if="item.summary && item.summary.actual_energy_kwh !== undefined" class="ms-2 px-2 py-1 bg-light border rounded text-dark">
 	                                                            <strong>能量值：</strong>
-	                                                            实际: <strong>{{ item.summary.actual_energy_kwh }}</strong> kWh /
-	                                                            指令: <strong>{{ item.summary.command_energy_kwh }}</strong> kWh
+	                                                            实际: <strong>{{ energyValueLabel(item.summary.actual_energy_kwh) }}</strong> /
+	                                                            指令: <strong>{{ energyValueLabel(item.summary.command_energy_kwh) }}</strong>
 	                                                            <span v-if="item.summary.actual_energy_kwh && item.summary.command_energy_kwh" class="text-muted">
 	                                                                (跟随率: {{ round2((item.summary.actual_energy_kwh / item.summary.command_energy_kwh) * 100) }}%)
 	                                                            </span>
@@ -2052,7 +2060,7 @@
 	                            </div>
 	                        </div>
 	                    </div>
-	                    <div class="history-meta">安卓日志功率字段按“指令功率/实际输出功率”拆列，W 转 kW；能量按相邻采样时间差积分为 kWh。这里复用温度诊断的日志下载、解压和服务器缓存。</div>
+	                    <div class="history-meta">安卓日志功率字段按“指令功率/实际输出功率”拆列，W 转 kW；能量按相邻采样时间差积分，并按当前选择单位展示。这里复用温度诊断的日志下载、解压和服务器缓存。</div>
 	                    <div v-if="cookTemperatureLoading" class="text-muted mt-2">正在下载并解析日志包...</div>
 	                    <div v-if="cookTemperatureLoading || cookTemperatureProgress.status === 'failed'" class="progress-steps">
 	                        <div v-for="(step, idx) in cookTemperatureProgress.steps" :key="`power-${step.name}`" class="progress-step" :class="{active: cookTemperatureProgress.status === 'running' && cookTemperatureProgress.stepIndex === idx, done: cookTemperatureProgress.stepIndex > idx && cookTemperatureProgress.status !== 'failed', failed: cookTemperatureProgress.status === 'failed' && cookTemperatureProgress.stepIndex === idx}">
@@ -2093,12 +2101,13 @@
 	                            </div>
 	                            <div class="col-xl-3 col-md-6">
 	                                <label class="filter-label">实际能量不低于（{{ energyUnitLabel }}）</label>
-	                                <input type="number" step="0.001" class="form-control form-control-sm" v-model.number="powerDiagnosisFilters.minEnergy" placeholder="例如 0.05">
+	                                <input type="number" step="0.001" class="form-control form-control-sm" v-model.number="powerDiagnosisFilters.minEnergy" placeholder="按当前单位输入">
 	                            </div>
 	                            <div class="col-xl-3 col-md-12">
 	                                <div class="filter-label">能量单位</div>
 	                                <div class="d-flex gap-2 align-items-center flex-wrap">
 	                                    <span class="segmented-control">
+	                                        <button :class="{active: powerEnergyUnit === 'kj'}" @click="powerEnergyUnit = 'kj'">kJ</button>
 	                                        <button :class="{active: powerEnergyUnit === 'kwh'}" @click="powerEnergyUnit = 'kwh'">kWh</button>
 	                                        <button :class="{active: powerEnergyUnit === 'kws'}" @click="powerEnergyUnit = 'kws'">kW·s</button>
 	                                    </span>
@@ -2313,6 +2322,14 @@
 	                                <input type="number" class="form-control form-control-sm" v-model.number="thermalModel.initialPotTemp" placeholder="自动取首点">
 	                            </div>
 	                            <div class="col-md-2">
+	                                <label class="filter-label">能量单位</label>
+	                                <select class="form-select form-select-sm" v-model="powerEnergyUnit">
+	                                    <option value="kj">kJ 千焦</option>
+	                                    <option value="kwh">kWh 千瓦时</option>
+	                                    <option value="kws">kW·s 千瓦秒</option>
+	                                </select>
+	                            </div>
+	                            <div class="col-md-2">
 	                                <label class="filter-label">分析范围</label>
 	                                <label class="d-flex align-items-center gap-2 small">
 	                                    <input type="checkbox" v-model="thermalModel.includePreheat"> 包含当前作业内热锅/润锅
@@ -2412,7 +2429,7 @@
 	                                            <td>{{ ing.category }}</td>
 	                                            <td>{{ ing.mass_g }}g</td>
 	                                            <td>{{ ing.specific_heat }}</td>
-	                                            <td>{{ Math.round(ing.heat_to_100_kj) }} kJ</td>
+	                                            <td>{{ thermalKjLabel(ing.heat_to_100_kj) }}</td>
 	                                            <td>{{ thermalFirePointLabel(ing) }}</td>
 	                                        </tr>
 	                                        <tr v-if="!thermalAnalysis.ingredients.length"><td colspan="7" class="text-muted">未从步骤文本中识别到带重量的投料。后续接菜谱配料表后可补齐。</td></tr>
@@ -3014,7 +3031,7 @@
                     { id: 'vinegar_wine', name: '醋/料酒', aliases: ['陈醋', '香醋', '料酒', '黄酒'], category: '液体调料', specific_heat: 3.8, water_fraction: 0.8, oil_fraction: 0, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水挥发液体', confidence: '低', source: '工程估算' },
                     { id: 'aromatics', name: '葱姜蒜', aliases: ['葱', '姜', '蒜', '蒜末', '姜片'], category: '蔬菜类', specific_heat: 3.5, water_fraction: 0.7, oil_fraction: 0.02, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水可焦化食材', confidence: '中', source: '工程估算' },
                 ],
-                powerEnergyUnit: 'kwh',
+                powerEnergyUnit: 'kj',
                 powerChartHover: null,
                 cookTemperatureLoading: false,
                 cookTemperatureError: '',
@@ -3326,7 +3343,7 @@
                             powerDiagnosis: {
                                 title: '核对单道菜的指令功率、实际输出和能量',
                                 text: '用于研发定位“给了多少功率、机器实际输出多少、某个食材或步骤消耗多少能量”。先选日志包解析，再按单道菜和动作关键词筛查。',
-                                meta: [`已选 ${this.selectedCookTemperatureFiles.length || 0} 包`, this.cookTemperature ? `${this.filteredPowerDiagnosisCooks.length || 0} 道菜` : '等待解析', 'kW / kWh'],
+                                meta: [`已选 ${this.selectedCookTemperatureFiles.length || 0} 包`, this.cookTemperature ? `${this.filteredPowerDiagnosisCooks.length || 0} 道菜` : '等待解析', `能量单位 ${this.energyUnitLabel}`],
                                 actions: [
                                     { id: 'selectRecentLogs', label: '选最近3包', primary: true },
                                     { id: 'cookTemperature', label: '温度对齐' },
@@ -3529,10 +3546,14 @@
 		            normalizedPowerMinEnergyKwh() {
 		                const raw = Number(this.powerDiagnosisFilters.minEnergy || 0);
 		                if (!raw) return 0;
-		                return this.powerEnergyUnit === 'kws' ? raw / 3600 : raw;
+		                if (this.powerEnergyUnit === 'kws') return raw / 3600;
+		                if (this.powerEnergyUnit === 'kj') return raw / 3600;
+		                return raw;
 		            },
 		            energyUnitLabel() {
-		                return this.powerEnergyUnit === 'kws' ? 'kW·s' : 'kWh';
+		                if (this.powerEnergyUnit === 'kws') return 'kW·s';
+		                if (this.powerEnergyUnit === 'kj') return 'kJ';
+		                return 'kWh';
 		            },
 		            selectedPowerCook() {
 		                const rows = this.filteredPowerDiagnosisCooks;
@@ -4531,6 +4552,7 @@
                 const n = Number(kwh || 0);
                 if (!Number.isFinite(n)) return '-';
                 if (this.powerEnergyUnit === 'kws') return `${(n * 3600).toFixed(1)} kW·s`;
+                if (this.powerEnergyUnit === 'kj') return `${(n * 3600).toFixed(1)} kJ`;
                 return `${n.toFixed(4)} kWh`;
             },
             chartXForOffset(offset, duration) {
@@ -4597,15 +4619,14 @@
                 if (!found) this.thermalModel.selectedCookKey = '';
             },
             thermalEnergyLabel(kwh) {
-                const n = Number(kwh || 0);
-                if (!Number.isFinite(n)) return '-';
-                if (Math.abs(n) < 0.001) return `${(n * 3600).toFixed(1)} kW·s`;
-                return `${n.toFixed(4)} kWh`;
+                return this.energyValueLabel(kwh);
             },
             thermalKjLabel(kj) {
                 const n = Number(kj || 0);
                 if (!Number.isFinite(n)) return '-';
-                return n >= 1000 ? `${(n / 1000).toFixed(2)} MJ` : `${n.toFixed(1)} kJ`;
+                if (this.powerEnergyUnit === 'kwh') return `${(n / 3600).toFixed(4)} kWh`;
+                if (this.powerEnergyUnit === 'kws') return `${n.toFixed(1)} kW·s`;
+                return `${n.toFixed(1)} kJ`;
             },
             thermalTempLabel(value) {
                 const n = Number(value);
@@ -4646,7 +4667,7 @@
             thermalKnowledgeEnergyLabel(item, targetTemp) {
                 const kj = this.thermalKnowledgeEnergyKj(item, targetTemp, this.thermalKnowledgeFilters.massG, this.thermalKnowledgeFilters.roomTemp);
                 if (!Number.isFinite(kj)) return '-';
-                return kj >= 1 ? `${kj.toFixed(1)} kJ` : `${(kj * 1000).toFixed(0)} J`;
+                return this.thermalKjLabel(kj);
             },
             thermalKnowledgeAverageEnergyLabel(targetTemp) {
                 const rows = this.filteredThermalKnowledgeItems.length ? this.filteredThermalKnowledgeItems : this.thermalKnowledgeBase;
