@@ -48,6 +48,8 @@
         .alert-danger { background: #fff2ed; border-color: #ffcfbd; color: #8a2b12; }
         .resource-chip { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; border-radius: 999px; background: #eef3fb; color: #475569; font-size: 12px; border: 1px solid #dbe4f0; }
         .resource-chip.danger-chip { background: #fff1f2; color: #b42318; border-color: #fecdd3; }
+        .resource-chip.warning-chip { background: #fff7ed; color: #b45309; border-color: #fed7aa; }
+        .resource-chip.safe-chip { background: #f0fdf4; color: #15803d; border-color: #bbf7d0; }
         .recipe-row { cursor: pointer; }
         .recipe-row:hover td { background: #f1f7ff; }
         .detail-panel { background: #fbfdff; border-left: 3px solid var(--brand); }
@@ -202,6 +204,11 @@
         .weekday-count { font-size: 18px; font-weight: 700; margin-top: 2px; }
         .thermal-chart { position: relative; border: 1px solid var(--line); border-radius: 3px; background: #fff; padding: 12px; }
         .thermal-chart svg { width: 100%; height: 280px; display: block; }
+        .knowledge-energy-grid { display: grid; grid-template-columns: repeat(5, minmax(90px, 1fr)); gap: 8px; }
+        .knowledge-energy-cell { border: 1px solid var(--line); border-radius: 3px; background: #fff; padding: 8px 10px; min-height: 58px; }
+        .knowledge-energy-temp { color: var(--muted); font-size: 12px; }
+        .knowledge-energy-value { font-weight: 700; margin-top: 2px; }
+        @media (max-width: 900px) { .knowledge-energy-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
         .chart-hover-card { position: absolute; top: 52px; right: 18px; z-index: 5; min-width: 220px; border: 1px solid #cfe1ff; background: rgba(255,255,255,.96); box-shadow: 0 8px 20px rgba(15,23,42,.12); border-radius: 4px; padding: 8px 10px; font-size: 12px; pointer-events: none; }
         .chart-hover-title { font-weight: 700; margin-bottom: 4px; }
         .segmented-control { display: inline-flex; border: 1px solid #d5dce8; border-radius: 3px; overflow: hidden; background: #fff; }
@@ -1139,6 +1146,109 @@
 	                    </div>
 	                </div>
 	            </template>
+	        </div>
+	    </div>
+
+	    <div class="content-wrap" v-if="activeTab === 'thermalKnowledge'">
+	        <div class="card mb-3">
+	            <div class="card-header">食材热物性知识库</div>
+	            <div class="card-body">
+	                <div class="row g-3 align-items-end">
+	                    <div class="col-xl-3 col-md-6">
+	                        <label class="filter-label">关键词</label>
+	                        <input class="form-control form-control-sm" v-model="thermalKnowledgeFilters.keyword" placeholder="食材/别名/类别/风险">
+	                    </div>
+	                    <div class="col-xl-2 col-md-3">
+	                        <label class="filter-label">食材分类</label>
+	                        <select class="form-select form-select-sm" v-model="thermalKnowledgeFilters.category">
+	                            <option value="">全部分类</option>
+	                            <option v-for="c in thermalKnowledgeCategories" :key="c" :value="c">{{ c }}</option>
+	                        </select>
+	                    </div>
+	                    <div class="col-xl-2 col-md-3">
+	                        <label class="filter-label">燃烧风险</label>
+	                        <select class="form-select form-select-sm" v-model="thermalKnowledgeFilters.hazard">
+	                            <option value="">全部风险</option>
+	                            <option v-for="h in thermalKnowledgeHazards" :key="h" :value="h">{{ h }}</option>
+	                        </select>
+	                    </div>
+	                    <div class="col-xl-2 col-md-4">
+	                        <label class="filter-label">计算质量 g</label>
+	                        <input type="number" min="1" class="form-control form-control-sm" v-model.number="thermalKnowledgeFilters.massG">
+	                    </div>
+	                    <div class="col-xl-1 col-md-4">
+	                        <label class="filter-label">初温 ℃</label>
+	                        <input type="number" class="form-control form-control-sm" v-model.number="thermalKnowledgeFilters.roomTemp">
+	                    </div>
+	                    <div class="col-xl-2 col-md-4">
+	                        <label class="filter-label">目标温度 ℃</label>
+	                        <input type="number" class="form-control form-control-sm" v-model.number="thermalKnowledgeFilters.targetTemp">
+	                    </div>
+	                </div>
+	                <div class="history-meta mt-3">
+	                    第一版是工程种子库：比热、烟点、闪点、自燃点用于模型解释和风险筛选，不作为最终安全阈值；后续需要用公司实验、供应商数据和菜谱实测持续校准。
+	                </div>
+	            </div>
+	        </div>
+
+	        <div class="row g-3 mb-3">
+	            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKnowledgeSummary.total }}</div><div class="admin-metric-label">物料条目</div></div></div>
+	            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKnowledgeSummary.categories }}</div><div class="admin-metric-label">分类数量</div></div></div>
+	            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKnowledgeSummary.oils }}</div><div class="admin-metric-label">油脂/液态油</div></div></div>
+	            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKnowledgeSummary.risky }}</div><div class="admin-metric-label">需重点复核</div></div></div>
+	        </div>
+
+	        <div class="card mb-3">
+	            <div class="card-header">升温能量速查</div>
+	            <div class="card-body">
+	                <div class="knowledge-energy-grid">
+	                    <div v-for="temp in [60, 100, 150, 180, 220]" :key="`energy-temp-${temp}`" class="knowledge-energy-cell">
+	                        <div class="knowledge-energy-temp">{{ thermalKnowledgeFilters.massG || 100 }}g 从 {{ thermalKnowledgeFilters.roomTemp || 25 }}℃ 到 {{ temp }}℃</div>
+	                        <div class="knowledge-energy-value">{{ thermalKnowledgeAverageEnergyLabel(temp) }}</div>
+	                    </div>
+	                </div>
+	                <div class="history-meta mt-2">上方按当前筛选结果的平均比热粗算，单项精确值以明细表为准。</div>
+	            </div>
+	        </div>
+
+	        <div class="card">
+	            <div class="card-header">物性与燃烧参考明细</div>
+	            <div class="card-body p-0">
+	                <table class="table table-sm table-striped mb-0">
+	                    <thead>
+	                        <tr>
+	                            <th>食材/物料</th>
+	                            <th>分类</th>
+	                            <th>比热 kJ/kg℃</th>
+	                            <th>当前目标吸热</th>
+	                            <th>水分/油脂</th>
+	                            <th>烟点/沸点</th>
+	                            <th>闪点</th>
+	                            <th>自燃点</th>
+	                            <th>风险分类</th>
+	                            <th>置信度</th>
+	                        </tr>
+	                    </thead>
+	                    <tbody>
+	                        <tr v-for="item in filteredThermalKnowledgeItems" :key="item.id">
+	                            <td>
+	                                <strong>{{ item.name }}</strong>
+	                                <div class="history-meta">{{ (item.aliases || []).join(' / ') || '-' }}</div>
+	                            </td>
+	                            <td>{{ item.category }}</td>
+	                            <td>{{ item.specific_heat }}</td>
+	                            <td>{{ thermalKnowledgeEnergyLabel(item, thermalKnowledgeFilters.targetTemp) }}</td>
+	                            <td>{{ thermalFractionLabel(item) }}</td>
+	                            <td>{{ item.smoke_point_c ? `${item.smoke_point_c}℃ 烟点` : (item.boiling_c ? `${item.boiling_c}℃ 沸点` : '-') }}</td>
+	                            <td>{{ item.flash_point_c ? `${item.flash_point_c}℃` : '-' }}</td>
+	                            <td>{{ item.autoignition_c ? `${item.autoignition_c}℃` : '-' }}</td>
+	                            <td><span class="resource-chip" :class="thermalHazardClass(item.hazard_class)">{{ item.hazard_class }}</span></td>
+	                            <td>{{ item.confidence }}<div class="history-meta">{{ item.source }}</div></td>
+	                        </tr>
+	                        <tr v-if="!filteredThermalKnowledgeItems.length"><td colspan="10" class="text-muted">没有匹配的物料。</td></tr>
+	                    </tbody>
+	                </table>
+	            </div>
 	        </div>
 	    </div>
 
@@ -2219,6 +2329,11 @@
 	                    <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalTempLabel(thermalAnalysis.prediction.max_pred_temp) }}</div><div class="admin-metric-label">预测最高锅温</div></div></div>
 	                    <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalTempLabel(thermalAnalysis.measured.max_temp) }}</div><div class="admin-metric-label">实测最高锅温</div></div></div>
 	                </div>
+	                <div class="row g-3 mb-3">
+	                    <div class="col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKjLabel(thermalAnalysis.energy.effective_input_kj) }}</div><div class="admin-metric-label">按效率后的累计入热</div></div></div>
+	                    <div class="col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKjLabel(thermalAnalysis.energy.food_load_kj) }}</div><div class="admin-metric-label">投料吸热估算</div></div></div>
+	                    <div class="col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKjLabel(thermalAnalysis.energy.loss_kj) }}</div><div class="admin-metric-label">散热损失估算</div></div></div>
+	                </div>
 
 	                <div class="card mb-3">
 	                    <div class="card-header">预测锅温 vs 实测锅温</div>
@@ -2289,7 +2404,7 @@
 	                            <div class="card-header">食材热负载估算</div>
 	                            <div class="card-body p-0">
 	                                <table class="table table-sm table-striped mb-0">
-	                                    <thead><tr><th>投料</th><th>时间</th><th>类别</th><th>重量</th><th>比热</th><th>升到100℃吸热</th></tr></thead>
+	                                    <thead><tr><th>投料</th><th>时间</th><th>类别</th><th>重量</th><th>比热</th><th>升到100℃吸热</th><th>燃烧参考</th></tr></thead>
 	                                    <tbody>
 	                                        <tr v-for="ing in thermalAnalysis.ingredients" :key="`thermal-ing-${ing.offset}-${ing.name}-${ing.amount}`">
 	                                            <td class="text-break">{{ ing.name }}</td>
@@ -2298,8 +2413,9 @@
 	                                            <td>{{ ing.mass_g }}g</td>
 	                                            <td>{{ ing.specific_heat }}</td>
 	                                            <td>{{ Math.round(ing.heat_to_100_kj) }} kJ</td>
+	                                            <td>{{ thermalFirePointLabel(ing) }}</td>
 	                                        </tr>
-	                                        <tr v-if="!thermalAnalysis.ingredients.length"><td colspan="6" class="text-muted">未从步骤文本中识别到带重量的投料。后续接菜谱配料表后可补齐。</td></tr>
+	                                        <tr v-if="!thermalAnalysis.ingredients.length"><td colspan="7" class="text-muted">未从步骤文本中识别到带重量的投料。后续接菜谱配料表后可补齐。</td></tr>
 	                                    </tbody>
 	                                </table>
 	                            </div>
@@ -2867,6 +2983,37 @@
                     lossCoefficientKjPerSC: 0.012,
                     initialPotTemp: '',
                 },
+                thermalKnowledgeFilters: {
+                    keyword: '',
+                    category: '',
+                    hazard: '',
+                    massG: 100,
+                    roomTemp: 25,
+                    targetTemp: 100,
+                },
+                thermalKnowledgeBase: [
+                    { id: 'water', name: '水', aliases: ['清水', '饮用水', '开水', '冷水', '热水'], category: '水/汤汁', specific_heat: 4.184, water_fraction: 1, oil_fraction: 0, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '不可燃', confidence: '高', source: '常用物性参考' },
+                    { id: 'stock', name: '高汤/汤汁', aliases: ['汤', '汤底', '汤汁'], category: '水/汤汁', specific_heat: 4.0, water_fraction: 0.9, oil_fraction: 0.03, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '低风险含水液体', confidence: '中', source: '工程估算' },
+                    { id: 'starch_slurry', name: '水淀粉', aliases: ['生粉水', '淀粉水', '片栗粉水'], category: '水/汤汁', specific_heat: 3.8, water_fraction: 0.75, oil_fraction: 0, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '低风险含水液体', confidence: '中', source: '工程估算' },
+                    { id: 'vegetable_oil', name: '植物油/色拉油', aliases: ['色拉油', '菜籽油', '花生油', '大豆油', '食用油'], category: '油脂', specific_heat: 2.0, water_fraction: 0, oil_fraction: 1, boiling_c: null, smoke_point_c: 220, flash_point_c: 315, autoignition_c: 370, hazard_class: '可燃油脂', confidence: '中', source: '工程参考/需实测' },
+                    { id: 'lard', name: '猪油', aliases: ['猪油桶', '动物油'], category: '油脂', specific_heat: 2.0, water_fraction: 0, oil_fraction: 1, boiling_c: null, smoke_point_c: 190, flash_point_c: 300, autoignition_c: 360, hazard_class: '可燃油脂', confidence: '中', source: '工程参考/需实测' },
+                    { id: 'beef_tallow', name: '牛油', aliases: ['牛脂'], category: '油脂', specific_heat: 2.0, water_fraction: 0, oil_fraction: 1, boiling_c: null, smoke_point_c: 200, flash_point_c: 300, autoignition_c: 360, hazard_class: '可燃油脂', confidence: '低', source: '工程参考/需实测' },
+                    { id: 'chicken', name: '鸡肉', aliases: ['鸡丁', '鸡腿', '鸡胸', '鸡肉丁'], category: '肉蛋类', specific_heat: 3.3, water_fraction: 0.65, oil_fraction: 0.08, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水可焦化食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'beef', name: '牛肉', aliases: ['牛肉丝', '牛肉片', '牛肉粒'], category: '肉蛋类', specific_heat: 3.2, water_fraction: 0.62, oil_fraction: 0.12, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水可焦化食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'pork', name: '猪肉', aliases: ['肉丝', '肉片', '五花肉', '肥肉'], category: '肉蛋类', specific_heat: 3.1, water_fraction: 0.58, oil_fraction: 0.18, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含脂可焦化食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'egg', name: '鸡蛋', aliases: ['蛋液', '土鸡蛋'], category: '肉蛋类', specific_heat: 3.4, water_fraction: 0.74, oil_fraction: 0.1, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水可焦化食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'tofu', name: '豆腐', aliases: ['豆干', '香干'], category: '豆制品', specific_heat: 3.6, water_fraction: 0.75, oil_fraction: 0.03, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水低风险食材', confidence: '中', source: '工程估算' },
+                    { id: 'potato', name: '土豆', aliases: ['马铃薯', '薯片'], category: '蔬菜类', specific_heat: 3.6, water_fraction: 0.78, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水低风险食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'leafy_veg', name: '叶菜/包菜', aliases: ['白菜', '包菜', '青菜', '生菜'], category: '蔬菜类', specific_heat: 3.8, water_fraction: 0.88, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水低风险食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'chili_fresh', name: '鲜辣椒', aliases: ['青椒', '红椒', '辣椒'], category: '蔬菜类', specific_heat: 3.7, water_fraction: 0.85, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水低风险食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'dry_chili', name: '干辣椒', aliases: ['干辣椒段', '辣椒干'], category: '干货/香辛料', specific_heat: 1.6, water_fraction: 0.12, oil_fraction: 0.08, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: 260, hazard_class: '可燃干货', confidence: '低', source: '工程参考/需实测' },
+                    { id: 'peppercorn', name: '花椒/麻椒', aliases: ['花椒', '麻椒', '藤椒'], category: '干货/香辛料', specific_heat: 1.5, water_fraction: 0.1, oil_fraction: 0.1, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: 260, hazard_class: '可燃干货', confidence: '低', source: '工程参考/需实测' },
+                    { id: 'sugar', name: '白糖', aliases: ['糖', '冰糖'], category: '调料', specific_heat: 1.25, water_fraction: 0, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: 350, hazard_class: '可燃固体/焦糖化', confidence: '中', source: '工程参考/需实测' },
+                    { id: 'salt', name: '盐', aliases: ['食盐'], category: '调料', specific_heat: 0.85, water_fraction: 0, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '不可燃', confidence: '中', source: '物性参考' },
+                    { id: 'soy_sauce', name: '酱油/生抽', aliases: ['生抽', '老抽', '酱汁'], category: '液体调料', specific_heat: 3.7, water_fraction: 0.75, oil_fraction: 0, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '低风险含水液体', confidence: '中', source: '工程估算' },
+                    { id: 'vinegar_wine', name: '醋/料酒', aliases: ['陈醋', '香醋', '料酒', '黄酒'], category: '液体调料', specific_heat: 3.8, water_fraction: 0.8, oil_fraction: 0, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水挥发液体', confidence: '低', source: '工程估算' },
+                    { id: 'aromatics', name: '葱姜蒜', aliases: ['葱', '姜', '蒜', '蒜末', '姜片'], category: '蔬菜类', specific_heat: 3.5, water_fraction: 0.7, oil_fraction: 0.02, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水可焦化食材', confidence: '中', source: '工程估算' },
+                ],
                 powerEnergyUnit: 'kwh',
                 powerChartHover: null,
                 cookTemperatureLoading: false,
@@ -2908,7 +3055,7 @@
 		                monthLoading: '',
 		                monthDetails: {},
 				                activeTab: 'home',
-	                appVersion: '2026.06.07-thermal1',
+	                appVersion: '2026.06.07-thermal-knowledge1',
 		                navGroups: [
 		                    { title: '工作台', tabs: [
 		                        { id: 'home', label: '工作台', icon: '⌂', desc: '搜索、历史、入口' },
@@ -2930,6 +3077,7 @@
 		                    ]},
 		                    { title: '管理与治理', tabs: [
 		                        { id: 'versionStats', label: '版本治理', icon: 'V', desc: '上位机版本' },
+		                        { id: 'thermalKnowledge', label: '热物性库', icon: 'K', desc: '食材、比热、燃点' },
 		                        { id: 'admin', label: '系统审计', icon: 'A', desc: '账号、缓存、导出', adminOnly: true },
 		                        { id: 'emergency', label: '重点设备', icon: '!', desc: '重点设备复盘', adminOnly: true },
 		                    ]},
@@ -3040,6 +3188,7 @@
 		                    logs: '日志包',
 		                    recipeSearch: '菜谱检索',
 		                    versionStats: '版本治理',
+		                    thermalKnowledge: '热物性库',
 		                    logAnalysis: '日志结论',
 		                    cookTemperature: '温度诊断',
 		                    powerDiagnosis: '功率诊断',
@@ -3054,6 +3203,7 @@
 		                if (this.activeTab === 'home') return '统一搜索、继续工作和常用入口';
 		                if (this.activeTab === 'recipeSearch') return '按客户、设备和时间查询菜谱、配料与资源覆盖';
 		                if (this.activeTab === 'versionStats') return '查看全量设备的软件版本、升级时间和版本归类';
+		                if (this.activeTab === 'thermalKnowledge') return '维护食材分类、比热容、升温能量和燃烧参考温度，供热过程模型调用';
 		                if (this.activeTab === 'logAnalysis') return '按日志包解析故障码、油路、温控和原始证据';
 		                if (this.activeTab === 'cookTemperature') return '对齐单次烹饪的菜谱步骤、真实动作和锅体温度';
 		                if (this.activeTab === 'powerDiagnosis') return '对齐指令功率、实际输出功率、温度和能量值';
@@ -3094,6 +3244,7 @@
 		            currentPageHint() {
 		                if (this.activeTab === 'recipeSearch') return '检索会优先复用本地和服务器缓存。';
 		                if (this.activeTab === 'versionStats') return '版本治理只读设备档案和客户信息。';
+		                if (this.activeTab === 'thermalKnowledge') return '热物性库是工程底座，数值需要用实验和实测持续校准。';
 		                if (this.activeTab === 'logAnalysis') return '先选日志包，再生成诊断证据。';
 		                if (this.activeTab === 'cookTemperature') return '温度诊断依赖日志包，缺口会提示。';
 		                if (this.activeTab === 'powerDiagnosis') return '功率诊断复用日志解析缓存。';
@@ -3190,6 +3341,15 @@
                                     { id: 'selectRecentLogs', label: '选最近3包', primary: true },
                                     { id: 'powerDiagnosis', label: '功率诊断' },
                                     { id: 'cookTemperature', label: '温度诊断' },
+                                ],
+                            },
+                            thermalKnowledge: {
+                                title: '把食材物性沉淀成可复用底座',
+                                text: '用于维护食材分类、比热容、升温能量和燃烧参考温度。热过程分析会优先从这里取食材参数。',
+                                meta: [`${this.thermalKnowledgeBase.length} 条种子数据`, `${this.thermalKnowledgeCategories.length} 个分类`, '后续接数据库'],
+                                actions: [
+                                    { id: 'thermalModel', label: '热过程分析', primary: true },
+                                    { id: 'recipeSearch', label: '菜谱检索' },
                                 ],
                             },
                             versionStats: {
@@ -3401,6 +3561,31 @@
 		            },
 		            thermalAnalysis() {
 		                return this.buildThermalAnalysis(this.selectedThermalCook);
+		            },
+		            thermalKnowledgeCategories() {
+		                return Array.from(new Set(this.thermalKnowledgeBase.map(item => item.category))).sort();
+		            },
+		            thermalKnowledgeHazards() {
+		                return Array.from(new Set(this.thermalKnowledgeBase.map(item => item.hazard_class))).sort();
+		            },
+		            filteredThermalKnowledgeItems() {
+		                const keyword = String(this.thermalKnowledgeFilters.keyword || '').trim().toLowerCase();
+		                return this.thermalKnowledgeBase.filter(item => {
+		                    if (this.thermalKnowledgeFilters.category && item.category !== this.thermalKnowledgeFilters.category) return false;
+		                    if (this.thermalKnowledgeFilters.hazard && item.hazard_class !== this.thermalKnowledgeFilters.hazard) return false;
+		                    if (!keyword) return true;
+		                    const text = [item.name, item.category, item.hazard_class, item.source, ...(item.aliases || [])].join(' ').toLowerCase();
+		                    return text.includes(keyword);
+		                });
+		            },
+		            thermalKnowledgeSummary() {
+		                const rows = this.filteredThermalKnowledgeItems;
+		                return {
+		                    total: rows.length,
+		                    categories: new Set(rows.map(item => item.category)).size,
+		                    oils: rows.filter(item => item.category === '油脂' || Number(item.oil_fraction || 0) > 0.5).length,
+		                    risky: rows.filter(item => /可燃|油脂|挥发/.test(item.hazard_class || '')).length,
+		                };
 		            },
             versionStatsVersionOptions() {
 	                return (this.versionStats.result?.versions || []).map(v => v.version).filter(Boolean);
@@ -4173,7 +4358,7 @@
             runPageGuideAction(action) {
                 if (!action || !action.id) return;
                 const id = action.id;
-                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'powerDiagnosis', 'thermalModel', 'versionStats', 'admin', 'emergency'].includes(id)) {
+                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'powerDiagnosis', 'thermalModel', 'thermalKnowledge', 'versionStats', 'admin', 'emergency'].includes(id)) {
                     this.setActiveTab(id);
                     return;
                 }
@@ -4417,6 +4602,11 @@
                 if (Math.abs(n) < 0.001) return `${(n * 3600).toFixed(1)} kW·s`;
                 return `${n.toFixed(4)} kWh`;
             },
+            thermalKjLabel(kj) {
+                const n = Number(kj || 0);
+                if (!Number.isFinite(n)) return '-';
+                return n >= 1000 ? `${(n / 1000).toFixed(2)} MJ` : `${n.toFixed(1)} kJ`;
+            },
             thermalTempLabel(value) {
                 const n = Number(value);
                 if (!Number.isFinite(n)) return '-';
@@ -4447,14 +4637,60 @@
                     cook: '加热/翻炒',
                 }[kind] || '其他';
             },
+            thermalKnowledgeEnergyKj(item, targetTemp, massG, roomTemp) {
+                const c = this.thermalNumber(item?.specific_heat, 0);
+                const massKg = Math.max(0, this.thermalNumber(massG, this.thermalKnowledgeFilters.massG || 100)) / 1000;
+                const delta = Math.max(0, this.thermalNumber(targetTemp, 100) - this.thermalNumber(roomTemp, this.thermalKnowledgeFilters.roomTemp || 25));
+                return massKg * c * delta;
+            },
+            thermalKnowledgeEnergyLabel(item, targetTemp) {
+                const kj = this.thermalKnowledgeEnergyKj(item, targetTemp, this.thermalKnowledgeFilters.massG, this.thermalKnowledgeFilters.roomTemp);
+                if (!Number.isFinite(kj)) return '-';
+                return kj >= 1 ? `${kj.toFixed(1)} kJ` : `${(kj * 1000).toFixed(0)} J`;
+            },
+            thermalKnowledgeAverageEnergyLabel(targetTemp) {
+                const rows = this.filteredThermalKnowledgeItems.length ? this.filteredThermalKnowledgeItems : this.thermalKnowledgeBase;
+                if (!rows.length) return '-';
+                const avgC = rows.reduce((sum, item) => sum + this.thermalNumber(item.specific_heat, 0), 0) / rows.length;
+                return this.thermalKnowledgeEnergyLabel({ specific_heat: avgC }, targetTemp);
+            },
+            thermalFractionLabel(item) {
+                const water = Math.round(this.thermalNumber(item?.water_fraction, 0) * 100);
+                const oil = Math.round(this.thermalNumber(item?.oil_fraction, 0) * 100);
+                return `水 ${water}% / 油 ${oil}%`;
+            },
+            thermalHazardClass(hazard) {
+                if (/可燃油脂|可燃干货|挥发|固体/.test(String(hazard || ''))) return 'danger-chip';
+                if (/低风险|含水/.test(String(hazard || ''))) return 'safe-chip';
+                return 'warning-chip';
+            },
+            thermalFirePointLabel(item) {
+                if (!item) return '-';
+                const rows = [];
+                if (item.smoke_point_c) rows.push(`烟点${item.smoke_point_c}℃`);
+                if (item.flash_point_c) rows.push(`闪点${item.flash_point_c}℃`);
+                if (item.autoignition_c) rows.push(`自燃${item.autoignition_c}℃`);
+                if (item.boiling_c) rows.push(`沸点${item.boiling_c}℃`);
+                return rows.join(' / ') || '-';
+            },
+            thermalIngredientKnowledge(name, unit) {
+                const text = String(name || '').toLowerCase();
+                const normalized = text.replace(/\s+/g, '');
+                const candidates = [];
+                this.thermalKnowledgeBase.forEach(item => {
+                    [item.name, ...(item.aliases || [])].forEach(label => {
+                        const key = String(label || '').toLowerCase().replace(/\s+/g, '');
+                        if (key && normalized.includes(key)) candidates.push({ item, length: key.length });
+                    });
+                });
+                const match = candidates.sort((a, b) => b.length - a.length)[0]?.item;
+                if (match) return match;
+                if (/ml|毫升|l|升/i.test(unit || '')) return this.thermalKnowledgeBase.find(item => item.id === 'water') || { category: '水/汤汁', specific_heat: 4.184, hazard_class: '低风险含水液体' };
+                return { id: 'unknown', name: '未分类', aliases: [], category: '未分类', specific_heat: 3.5, water_fraction: 0.5, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '待归类', confidence: '低', source: '默认兜底' };
+            },
             thermalIngredientCategory(name, unit) {
-                const text = String(name || '');
-                if (/油|猪油|牛油|花椒油|葱油/.test(text)) return { category: '油脂', specific_heat: 2.0 };
-                if (/水|汤|高汤|水淀粉|汁/.test(text) || /ml|毫升|L|升/i.test(unit || '')) return { category: '水/汤汁', specific_heat: 4.18 };
-                if (/鸡|牛|猪|肉|鱼|虾|蛋/.test(text)) return { category: '肉蛋类', specific_heat: 3.2 };
-                if (/土豆|笋|辣椒|白菜|包菜|葱|姜|蒜|菜/.test(text)) return { category: '蔬菜类', specific_heat: 3.7 };
-                if (/盐|糖|酱|醋|料酒|生抽|老抽|蚝油|味精|鸡精|花椒|麻椒/.test(text)) return { category: '调料', specific_heat: 2.5 };
-                return { category: '未分类', specific_heat: 3.5 };
+                const meta = this.thermalIngredientKnowledge(name, unit);
+                return { category: meta.category, specific_heat: meta.specific_heat };
             },
             parseThermalIngredients(item) {
                 const rows = [];
@@ -4474,7 +4710,7 @@
                         if (!Number.isFinite(amount) || amount <= 0) continue;
                         const mass_g = amount * (unitScale[unit] || 1);
                         if (mass_g > 5000) continue;
-                        const meta = this.thermalIngredientCategory(name, unit);
+                        const meta = this.thermalIngredientKnowledge(name, unit);
                         const heat_to_100_kj = (mass_g / 1000) * meta.specific_heat * Math.max(0, 100 - this.thermalNumber(this.thermalModel.roomTemp, 25));
                         rows.push({
                             offset: Math.max(0, Math.round(source.offset || 0)),
@@ -4484,6 +4720,15 @@
                             mass_g: Number(mass_g.toFixed(1)),
                             category: meta.category,
                             specific_heat: meta.specific_heat,
+                            knowledge_id: meta.id,
+                            hazard_class: meta.hazard_class,
+                            water_fraction: meta.water_fraction,
+                            oil_fraction: meta.oil_fraction,
+                            boiling_c: meta.boiling_c,
+                            smoke_point_c: meta.smoke_point_c,
+                            flash_point_c: meta.flash_point_c,
+                            autoignition_c: meta.autoignition_c,
+                            source: meta.source,
                             heat_to_100_kj: Number(heat_to_100_kj.toFixed(1)),
                             consumed: false,
                         });
@@ -4565,6 +4810,9 @@
                 const panCapacity = Math.max(0.5, this.thermalNumber(this.thermalModel.panHeatCapacityKjPerC, 3.2));
                 const loss = Math.max(0, this.thermalNumber(this.thermalModel.lossCoefficientKjPerSC, 0.012));
                 let foodCapacity = 0;
+                let cumulativeInputKj = 0;
+                let cumulativeLossKj = 0;
+                let cumulativeFoodLoadKj = 0;
                 const events = ingredients.filter(row => row.offset >= startOffset).map(row => ({ ...row, consumed: false }));
                 const offsets = new Set([startOffset, duration]);
                 samples.forEach(row => offsets.add(Math.round(row.offset)));
@@ -4579,6 +4827,7 @@
                         const load = (row.mass_g / 1000) * row.specific_heat * Math.max(0, temp - room);
                         temp -= load / Math.max(0.5, panCapacity + foodCapacity);
                         foodCapacity += (row.mass_g / 1000) * row.specific_heat;
+                        cumulativeFoodLoadKj += load;
                         row.consumed = true;
                     });
                     const measured = this.measuredThermalTempAt(item, offset);
@@ -4590,11 +4839,16 @@
                         measured_temp: measured,
                         command_power_kw: command,
                         actual_power_kw: actual,
+                        cumulative_input_kj: Number(cumulativeInputKj.toFixed(1)),
+                        cumulative_food_load_kj: Number(cumulativeFoodLoadKj.toFixed(1)),
+                        cumulative_loss_kj: Number(cumulativeLossKj.toFixed(1)),
                     });
                     const dt = Math.max(0, next - offset);
                     if (dt > 0) {
                         const inputKj = actual * dt * eta;
                         const lossKj = loss * Math.max(0, temp - room) * dt;
+                        cumulativeInputKj += inputKj;
+                        cumulativeLossKj += lossKj;
                         temp += (inputKj - lossKj) / Math.max(0.5, panCapacity + foodCapacity);
                         temp = Math.max(room - 10, Math.min(520, temp));
                     }
@@ -4612,6 +4866,10 @@
                 const curve = this.buildThermalCurve(item, ingredients, duration, analysisStart);
                 const actualEnergy = this.integrateThermalPower(item.power_samples || [], analysisStart, duration, 'actual_power_kw') || this.thermalNumber(item.summary?.actual_energy_kwh, 0);
                 const commandEnergy = this.integrateThermalPower(item.power_samples || [], analysisStart, duration, 'command_power_kw') || this.thermalNumber(item.summary?.command_energy_kwh, 0);
+                const finalCurve = curve.length ? curve[curve.length - 1] : {};
+                const foodLoadKj = this.thermalNumber(finalCurve.cumulative_food_load_kj, 0);
+                const lossKj = this.thermalNumber(finalCurve.cumulative_loss_kj, 0);
+                const effectiveInputKj = this.thermalNumber(finalCurve.cumulative_input_kj, 0);
                 const maxPred = Math.max(...curve.map(row => Number(row.pred_temp || 0)), 0);
                 const measuredRows = curve.filter(row => row.measured_temp !== null && row.measured_temp !== undefined);
                 const maxMeasured = measuredRows.length ? Math.max(...measuredRows.map(row => Number(row.measured_temp || 0))) : this.thermalNumber(item.summary?.max_temp, 0);
@@ -4632,6 +4890,12 @@
                 if (energyBeforeFood > 0.18) risks.push({ label: `主料前能量 ${this.thermalEnergyLabel(energyBeforeFood)}`, level: 'high' });
                 if (maxMeasured > 330) risks.push({ label: `实测高温 ${this.thermalTempLabel(maxMeasured)}`, level: 'high' });
                 if (maxPred > 360) risks.push({ label: `预测高温 ${this.thermalTempLabel(maxPred)}`, level: 'high' });
+                ingredients.filter(row => Number(row.oil_fraction || 0) > 0.5 || row.category === '油脂').forEach(row => {
+                    const peak = Math.max(maxPred || 0, maxMeasured || 0);
+                    if (row.autoignition_c && peak >= row.autoignition_c) risks.push({ label: `${row.name} 达自燃参考 ${row.autoignition_c}℃`, level: 'high' });
+                    else if (row.flash_point_c && peak >= row.flash_point_c) risks.push({ label: `${row.name} 达闪点参考 ${row.flash_point_c}℃`, level: 'high' });
+                    else if (row.smoke_point_c && peak >= row.smoke_point_c) risks.push({ label: `${row.name} 超烟点参考 ${row.smoke_point_c}℃`, level: 'medium' });
+                });
                 if (!item.power_samples || !item.power_samples.length) risks.push({ label: '缺功率采样', level: 'medium' });
                 if (!measuredRows.length) risks.push({ label: '缺实测温度', level: 'medium' });
                 if (Math.abs(maxPred - maxMeasured) > 80 && maxMeasured) risks.push({ label: '预测/实测偏差过大', level: 'medium' });
@@ -4646,7 +4910,7 @@
                     cook: item.cook || {},
                     duration,
                     analysis_start: analysisStart,
-                    energy: { actual_kwh: actualEnergy, command_kwh: commandEnergy },
+                    energy: { actual_kwh: actualEnergy, command_kwh: commandEnergy, effective_input_kj: effectiveInputKj, food_load_kj: foodLoadKj, loss_kj: lossKj },
                     measured: { max_temp: maxMeasured },
                     prediction: { max_pred_temp: maxPred, end_pred_temp: endPred },
                     ingredients,
