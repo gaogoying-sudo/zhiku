@@ -2,6 +2,27 @@
 
 ## 2026-06-07
 
+### 云端部署：安全治理看板
+- 操作人/会话：Codex / Claude。
+- 目标：把起火风险从"事后分析"变成"自动扫描 + 全局可见"，新增安全总览和告警明细两个页面。
+- 本次修改：
+  - 新增 4 张 MySQL 表：`safety_scan_runs`、`safety_scan_alerts`、`safety_daily_stats`（+ 已有 `cook_jobs` 复用）。
+  - 后端新增 5 个 API：`GET /api/safety/overview`、`GET /api/safety/alerts`、`POST /api/safety/scan`、`POST /api/safety/alerts/{id}/dismiss`、`GET /api/safety/trends`。
+  - 安全扫描规则：实测高温 > 330℃（高危）、280-330℃（中危）、投料间隔 > 60s、缺功率采样、缺温度样本。
+  - 前端新增「安全治理」导航组：安全总览（温度分布柱状图、高危设备/菜谱 TOP 10、摘要卡片）和告警明细（按风险等级/规则/SN 筛选、分页、dismiss 处理、跳转设备）。
+  - 新增 `safety_daily_stats` 每日聚合表，支持按天趋势查询。
+  - 同步 `deploy/frontend/index.html -> deploy/frontend/app.html`。
+- 验证结果：
+  - `make check` 通过。
+  - `make deploy` 成功，云端容器已重建启动。
+  - `make smoke SMOKE_KEYWORD=安全总览 SMOKE_SN=0105222506020185` 通过。
+  - API 测试通过：771 作业，5 条临界高温（≥330℃），68 条警示（300-330℃），历史最高 339℃，活跃告警 646 条。
+- 说明：
+  - 安全扫描基于本地 MySQL `cook_jobs` 表，覆盖范围取决于已解析入库的日志包数量。当前仅 1 台设备数据，需持续解析更多设备日志以扩大覆盖面。
+  - 告警规则目前是离线批量扫描（按需触发），后续可做成后台定时任务。
+  - 温度阈值 330/280℃ 是工程初始值，需结合真实起火数据持续校准。
+- 解除锁定：安全风险可观测性从零到一。
+
 ### 云端部署：能量单位统一选择
 - 操作人/会话：Codex。
 - 目标：按用户补充要求，把页面里分散出现的 `kJ / kWh / kW·s` 统一成可选单位，避免同一页面混用多种能量口径。

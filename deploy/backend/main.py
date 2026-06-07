@@ -813,6 +813,72 @@ def init_analytics_db():
                         INDEX idx_thermal_sync_time(started_at)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS safety_scan_runs (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        scan_type VARCHAR(64) NOT NULL DEFAULT 'full',
+                        status VARCHAR(32) NOT NULL DEFAULT 'RUNNING',
+                        total_jobs INT NOT NULL DEFAULT 0,
+                        high_temp_jobs INT NOT NULL DEFAULT 0,
+                        delay_risk_jobs INT NOT NULL DEFAULT 0,
+                        sensor_gap_jobs INT NOT NULL DEFAULT 0,
+                        total_alerts INT NOT NULL DEFAULT 0,
+                        error_message TEXT NULL,
+                        started_at DATETIME NOT NULL,
+                        finished_at DATETIME NULL,
+                        INDEX idx_safety_scan_time(started_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS safety_scan_alerts (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        scan_run_id BIGINT NULL,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NULL,
+                        cook_job_id BIGINT NULL,
+                        recipe_name VARCHAR(255) NULL,
+                        cook_start_time DATETIME NULL,
+                        cook_end_time DATETIME NULL,
+                        duration_seconds INT NULL,
+                        rule_key VARCHAR(64) NOT NULL,
+                        rule_label VARCHAR(120) NOT NULL,
+                        risk_level VARCHAR(16) NOT NULL DEFAULT 'medium',
+                        severity_score INT NOT NULL DEFAULT 0,
+                        max_pot_temp DECIMAL(8,2) NULL,
+                        avg_pot_temp DECIMAL(8,2) NULL,
+                        actual_energy_kwh DECIMAL(10,4) NULL,
+                        oil_to_food_interval INT NULL,
+                        detail_json TEXT NULL,
+                        dismissed TINYINT NOT NULL DEFAULT 0,
+                        dismissed_by VARCHAR(64) NULL,
+                        dismissed_at DATETIME NULL,
+                        created_at DATETIME NOT NULL,
+                        INDEX idx_alert_sn(sn, created_at),
+                        INDEX idx_alert_rule(rule_key, risk_level),
+                        INDEX idx_alert_level(risk_level, dismissed, created_at),
+                        INDEX idx_alert_cook(cook_job_id),
+                        INDEX idx_alert_scan(scan_run_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS safety_daily_stats (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        stat_date DATE NOT NULL,
+                        sn VARCHAR(64) NOT NULL,
+                        total_jobs INT NOT NULL DEFAULT 0,
+                        high_temp_300c INT NOT NULL DEFAULT 0,
+                        high_temp_330c INT NOT NULL DEFAULT 0,
+                        oil_delay_60s INT NOT NULL DEFAULT 0,
+                        sensor_gap INT NOT NULL DEFAULT 0,
+                        max_temp_reached DECIMAL(8,2) NULL,
+                        avg_temp_across_jobs DECIMAL(8,2) NULL,
+                        total_energy_kwh DECIMAL(12,4) NULL,
+                        created_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_stat_date_sn(stat_date, sn),
+                        INDEX idx_stat_date(stat_date),
+                        INDEX idx_stat_sn(sn)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
             conn.commit()
             ANALYTICS_DB_READY = True
             return True
@@ -4931,6 +4997,405 @@ def thermal_knowledge_summary():
         'last_sync': latest_thermal_sync(),
     }
 
+# ── Safety Scan Engine ──────────────────────────────────────────────
+
+SAFETY_RULES = [
+    {
+        'key': 'max_temp_high',
+        'label': '实测高温 > 330℃',
+        'level': 'high',
+        'score': 100,
+        'sql_condition': 'max_pot_temp > 330',
+        'description': '锅体最高温度超过330℃，接近油脂自燃风险区',
+    },
+    {
+        'key': 'max_temp_elevated',
+        'label': '实测高温 280-330℃',
+        'level': 'medium',
+        'score': 60,
+        'sql_condition': 'max_pot_temp BETWEEN 280 AND 330',
+        'description': '锅体温度偏高，需关注投料和功率控制',
+    },
+    {
+        'key': 'no_power_samples',
+        'label': '缺功率采样',
+        'level': 'medium',
+        'score': 50,
+        'sql_condition': None,
+        'description': '作业有温度数据但缺少功率采样，测温或通讯可能异常',
+    },
+    {
+        'key': 'no_temp_samples',
+        'label': '缺温度样本',
+        'level': 'medium',
+        'score': 55,
+        'sql_condition': '(sample_count = 0 OR max_pot_temp IS NULL)',
+        'description': '作业窗口内无有效温度样本，传感器可能故障',
+    },
+    {
+        'key': 'recipe_high_freq',
+        'label': '高频高温菜谱',
+        'level': 'info',
+        'score': 30,
+        'sql_condition': None,
+        'description': '该菜谱在全局统计中高温比例偏高',
+    },
+]
+
+
+def run_safety_scan(scan_type='quick'):
+    """Run safety rules against all cook_jobs in local DB. Returns scan run id."""
+    ensure_analytics_db()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    run_id = None
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO safety_scan_runs(scan_type, status, started_at) VALUES (%s, %s, %s)",
+                (scan_type, 'RUNNING', now),
+            )
+            run_id = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    total_alerts = 0
+    stats = {'total_jobs': 0, 'high_temp_jobs': 0, 'delay_risk_jobs': 0, 'sensor_gap_jobs': 0}
+
+    try:
+        # ── Rule 1 & 2: Temperature-based rules ──
+        for rule in SAFETY_RULES:
+            if not rule.get('sql_condition'):
+                continue
+            sql = f"""
+                SELECT cj.id AS cook_job_id, cj.sn, cj.source_file_id, cj.recipe_name,
+                       cj.cook_start_time, cj.cook_end_time, cj.duration_seconds,
+                       cj.max_pot_temp, cj.avg_pot_temp, cj.sample_count,
+                       cj.step_count, cj.android_action_count
+                FROM cook_jobs cj
+                WHERE {rule['sql_condition']}
+                ORDER BY cj.max_pot_temp DESC
+                LIMIT 5000
+            """
+            rows = fetch_all(sql)
+            alerts = []
+            for row in rows:
+                alerts.append((
+                    run_id, row.get('sn'), row.get('source_file_id'), row.get('cook_job_id'),
+                    row.get('recipe_name'), row.get('cook_start_time'), row.get('cook_end_time'),
+                    row.get('duration_seconds'), rule['key'], rule['label'], rule['level'],
+                    rule['score'], row.get('max_pot_temp'), row.get('avg_pot_temp'),
+                    None, None,
+                    json.dumps({'rule': rule['key'], 'condition': rule['sql_condition']}, ensure_ascii=False),
+                    now,
+                ))
+            if alerts:
+                placeholders = ','.join(['(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)'] * len(alerts))
+                flat = [v for tup in alerts for v in tup]
+                execute_local(
+                    f"INSERT INTO safety_scan_alerts(scan_run_id, sn, source_file_id, cook_job_id, recipe_name, cook_start_time, cook_end_time, duration_seconds, rule_key, rule_label, risk_level, severity_score, max_pot_temp, avg_pot_temp, actual_energy_kwh, oil_to_food_interval, detail_json, created_at) VALUES {placeholders}",
+                    flat,
+                )
+                total_alerts += len(alerts)
+                if rule['key'] == 'max_temp_high':
+                    stats['high_temp_jobs'] = len(alerts)
+                if rule['key'] in ('no_power_samples', 'no_temp_samples'):
+                    stats['sensor_gap_jobs'] += len(alerts)
+
+            stats['total_jobs'] = (fetch_one("SELECT COUNT(*) AS cnt FROM cook_jobs") or {}).get('cnt', 0)
+
+        # ── Rule "no_power_samples": jobs with temperature but no power events ──
+        no_power_sql = """
+            SELECT cj.id AS cook_job_id, cj.sn, cj.source_file_id, cj.recipe_name,
+                   cj.cook_start_time, cj.cook_end_time, cj.duration_seconds,
+                   cj.max_pot_temp, cj.avg_pot_temp, cj.sample_count
+            FROM cook_jobs cj
+            LEFT JOIN cook_power_events cpe ON cpe.cook_job_id = cj.id
+            WHERE cj.sample_count > 0 AND cpe.id IS NULL
+            ORDER BY cj.max_pot_temp DESC
+            LIMIT 5000
+        """
+        no_power_rows = fetch_all(no_power_sql)
+        no_power_alerts = []
+        for row in (no_power_rows or []):
+            no_power_alerts.append((
+                run_id, row.get('sn'), row.get('source_file_id'), row.get('cook_job_id'),
+                row.get('recipe_name'), row.get('cook_start_time'), row.get('cook_end_time'),
+                row.get('duration_seconds'), 'no_power_samples', '缺功率采样',
+                'medium', 50, row.get('max_pot_temp'), row.get('avg_pot_temp'),
+                None, None,
+                json.dumps({'sample_count': row.get('sample_count')}, ensure_ascii=False),
+                now,
+            ))
+        if no_power_alerts:
+            placeholders = ','.join(['(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)'] * len(no_power_alerts))
+            flat = [v for tup in no_power_alerts for v in tup]
+            execute_local(
+                f"INSERT INTO safety_scan_alerts(scan_run_id, sn, source_file_id, cook_job_id, recipe_name, cook_start_time, cook_end_time, duration_seconds, rule_key, rule_label, risk_level, severity_score, max_pot_temp, avg_pot_temp, actual_energy_kwh, oil_to_food_interval, detail_json, created_at) VALUES {placeholders}",
+                flat,
+            )
+            total_alerts += len(no_power_alerts)
+            stats['sensor_gap_jobs'] += len(no_power_alerts)
+
+        # ── Rule: Oil-to-food delay (join action_events) ──
+        delay_sql = """
+            SELECT cj.id AS cook_job_id, cj.sn, cj.source_file_id, cj.recipe_name,
+                   cj.cook_start_time, cj.cook_end_time, cj.duration_seconds,
+                   cj.max_pot_temp, cj.avg_pot_temp,
+                   oil.offset_seconds AS oil_offset,
+                   food.offset_seconds AS food_offset,
+                   (food.offset_seconds - oil.offset_seconds) AS oil_to_food_interval
+            FROM cook_jobs cj
+            JOIN cook_action_events oil ON oil.cook_job_id = cj.id AND oil.event_type = 'add_oil'
+            JOIN cook_action_events food ON food.cook_job_id = cj.id
+                AND food.event_type IN ('ingredient', 'stir', 'roll_move', 'pump')
+                AND food.offset_seconds > oil.offset_seconds
+            WHERE (food.offset_seconds - oil.offset_seconds) > 60
+            GROUP BY cj.id, cj.sn, cj.source_file_id, cj.recipe_name,
+                     cj.cook_start_time, cj.cook_end_time, cj.duration_seconds,
+                     cj.max_pot_temp, cj.avg_pot_temp, oil.offset_seconds, food.offset_seconds
+            ORDER BY (food.offset_seconds - oil.offset_seconds) DESC
+            LIMIT 5000
+        """
+        delay_rows = fetch_all(delay_sql)
+        delay_alerts = []
+        for row in delay_rows:
+            interval = int(row.get('oil_to_food_interval') or 0)
+            score = min(100, 40 + interval // 2)
+            level = 'high' if interval > 120 else 'medium'
+            delay_alerts.append((
+                run_id, row.get('sn'), row.get('source_file_id'), row.get('cook_job_id'),
+                row.get('recipe_name'), row.get('cook_start_time'), row.get('cook_end_time'),
+                row.get('duration_seconds'), 'oil_food_delay', '投油到主料间隔过长',
+                level, score, row.get('max_pot_temp'), row.get('avg_pot_temp'),
+                None, interval,
+                json.dumps({'oil_offset': row.get('oil_offset'), 'food_offset': row.get('food_offset'), 'interval_s': interval}, ensure_ascii=False),
+                now,
+            ))
+        if delay_alerts:
+            placeholders = ','.join(['(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)'] * len(delay_alerts))
+            flat = [v for tup in delay_alerts for v in tup]
+            execute_local(
+                f"INSERT INTO safety_scan_alerts(scan_run_id, sn, source_file_id, cook_job_id, recipe_name, cook_start_time, cook_end_time, duration_seconds, rule_key, rule_label, risk_level, severity_score, max_pot_temp, avg_pot_temp, actual_energy_kwh, oil_to_food_interval, detail_json, created_at) VALUES {placeholders}",
+                flat,
+            )
+            total_alerts += len(delay_alerts)
+            stats['delay_risk_jobs'] = len(delay_alerts)
+
+        # ── Update daily stats ──
+        stats_sql = """
+            INSERT INTO safety_daily_stats(stat_date, sn, total_jobs, high_temp_300c, high_temp_330c,
+                oil_delay_60s, sensor_gap, max_temp_reached, avg_temp_across_jobs, total_energy_kwh, created_at)
+            SELECT
+                DATE(cook_start_time) AS stat_date,
+                sn,
+                COUNT(*) AS total_jobs,
+                SUM(CASE WHEN max_pot_temp >= 300 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN max_pot_temp >= 330 THEN 1 ELSE 0 END),
+                0,
+                SUM(CASE WHEN sample_count = 0 OR max_pot_temp IS NULL THEN 1 ELSE 0 END),
+                MAX(max_pot_temp),
+                AVG(avg_pot_temp),
+                NULL,
+                NOW()
+            FROM cook_jobs
+            WHERE cook_start_time IS NOT NULL
+            GROUP BY stat_date, sn
+            ON DUPLICATE KEY UPDATE
+                total_jobs = VALUES(total_jobs),
+                high_temp_300c = VALUES(high_temp_300c),
+                high_temp_330c = VALUES(high_temp_330c),
+                max_temp_reached = VALUES(max_temp_reached),
+                avg_temp_across_jobs = VALUES(avg_temp_across_jobs),
+                created_at = NOW()
+        """
+        execute_local(stats_sql)
+
+        finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        execute_local(
+            "UPDATE safety_scan_runs SET status=%s, total_jobs=%s, high_temp_jobs=%s, delay_risk_jobs=%s, sensor_gap_jobs=%s, total_alerts=%s, finished_at=%s WHERE id=%s",
+            ('COMPLETED', stats['total_jobs'], stats['high_temp_jobs'], stats['delay_risk_jobs'], stats['sensor_gap_jobs'], total_alerts, finished, run_id),
+        )
+        return {'run_id': run_id, 'alerts': total_alerts, 'stats': stats, 'status': 'COMPLETED'}
+
+    except Exception as exc:
+        finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        execute_local(
+            "UPDATE safety_scan_runs SET status=%s, error_message=%s, finished_at=%s WHERE id=%s",
+            ('FAILED', str(exc), finished, run_id),
+        )
+        raise
+
+
+def safety_overview():
+    """Aggregate safety stats for dashboard overview."""
+    ensure_analytics_db()
+    # High-level counts
+    summary = fetch_one("""
+        SELECT
+            COUNT(*) AS total_jobs,
+            SUM(CASE WHEN max_pot_temp >= 330 THEN 1 ELSE 0 END) AS critical_jobs,
+            SUM(CASE WHEN max_pot_temp >= 300 AND max_pot_temp < 330 THEN 1 ELSE 0 END) AS warning_jobs,
+            SUM(CASE WHEN max_pot_temp >= 250 AND max_pot_temp < 300 THEN 1 ELSE 0 END) AS caution_jobs,
+            MAX(max_pot_temp) AS all_time_max_temp,
+            AVG(max_pot_temp) AS all_time_avg_max_temp,
+            COUNT(DISTINCT sn) AS device_count
+        FROM cook_jobs
+        WHERE max_pot_temp IS NOT NULL
+    """) or {}
+
+    # Top risky devices
+    top_devices = fetch_all("""
+        SELECT sn, COUNT(*) AS high_count, MAX(max_pot_temp) AS worst_temp,
+               AVG(max_pot_temp) AS avg_high_temp
+        FROM cook_jobs
+        WHERE max_pot_temp >= 280
+        GROUP BY sn
+        HAVING high_count >= 2
+        ORDER BY high_count DESC, worst_temp DESC
+        LIMIT 20
+    """)
+
+    # Top risky recipes
+    top_recipes = fetch_all("""
+        SELECT recipe_name, COUNT(*) AS high_count, MAX(max_pot_temp) AS worst_temp,
+               AVG(max_pot_temp) AS avg_high_temp
+        FROM cook_jobs
+        WHERE max_pot_temp >= 280
+        GROUP BY recipe_name
+        ORDER BY high_count DESC
+        LIMIT 20
+    """)
+
+    # Temperature distribution
+    temp_dist = fetch_all("""
+        SELECT
+            CASE
+                WHEN max_pot_temp >= 350 THEN '>=350℃'
+                WHEN max_pot_temp >= 300 THEN '300-350℃'
+                WHEN max_pot_temp >= 250 THEN '250-300℃'
+                WHEN max_pot_temp >= 200 THEN '200-250℃'
+                WHEN max_pot_temp >= 150 THEN '150-200℃'
+                WHEN max_pot_temp >= 100 THEN '100-150℃'
+                ELSE '<100℃'
+            END AS band,
+            COUNT(*) AS cnt
+        FROM cook_jobs
+        WHERE max_pot_temp IS NOT NULL
+        GROUP BY band
+        ORDER BY MIN(max_pot_temp) DESC
+    """)
+
+    # Last scan
+    last_scan = fetch_one("SELECT * FROM safety_scan_runs WHERE status='COMPLETED' ORDER BY finished_at DESC LIMIT 1")
+
+    # Active alert counts
+    alert_counts = fetch_one("""
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN risk_level='high' AND dismissed=0 THEN 1 ELSE 0 END) AS high_active,
+            SUM(CASE WHEN risk_level='medium' AND dismissed=0 THEN 1 ELSE 0 END) AS medium_active,
+            SUM(CASE WHEN dismissed=1 THEN 1 ELSE 0 END) AS dismissed
+        FROM safety_scan_alerts
+    """) or {}
+
+    return {
+        'summary': {
+            'total_jobs': int(summary.get('total_jobs') or 0),
+            'critical_jobs': int(summary.get('critical_jobs') or 0),
+            'warning_jobs': int(summary.get('warning_jobs') or 0),
+            'caution_jobs': int(summary.get('caution_jobs') or 0),
+            'all_time_max_temp': float(summary.get('all_time_max_temp') or 0),
+            'all_time_avg_max_temp': round(float(summary.get('all_time_avg_max_temp') or 0), 1),
+            'device_count': int(summary.get('device_count') or 0),
+        },
+        'top_devices': [{
+            'sn': r.get('sn'),
+            'high_count': int(r.get('high_count') or 0),
+            'worst_temp': float(r.get('worst_temp') or 0),
+            'avg_high_temp': round(float(r.get('avg_high_temp') or 0), 1),
+        } for r in (top_devices or [])],
+        'top_recipes': [{
+            'recipe_name': r.get('recipe_name'),
+            'high_count': int(r.get('high_count') or 0),
+            'worst_temp': float(r.get('worst_temp') or 0),
+            'avg_high_temp': round(float(r.get('avg_high_temp') or 0), 1),
+        } for r in (top_recipes or [])],
+        'temp_distribution': [{
+            'band': r.get('band'),
+            'cnt': int(r.get('cnt') or 0),
+        } for r in (temp_dist or [])],
+        'last_scan': {
+            'scan_type': last_scan.get('scan_type') if last_scan else None,
+            'status': last_scan.get('status') if last_scan else None,
+            'total_alerts': int(last_scan.get('total_alerts') or 0) if last_scan else 0,
+            'finished_at': last_scan.get('finished_at').strftime("%Y-%m-%d %H:%M:%S") if last_scan and last_scan.get('finished_at') else None,
+        } if last_scan else None,
+        'alert_counts': {
+            'total': int(alert_counts.get('total') or 0),
+            'high_active': int(alert_counts.get('high_active') or 0),
+            'medium_active': int(alert_counts.get('medium_active') or 0),
+            'dismissed': int(alert_counts.get('dismissed') or 0),
+        },
+    }
+
+
+def safety_alerts_query(risk_level=None, rule_key=None, sn=None, dismissed=None, limit=200, offset=0):
+    """Paginated safety alerts query."""
+    ensure_analytics_db()
+    conditions = []
+    args = []
+    if risk_level:
+        conditions.append("risk_level = %s")
+        args.append(risk_level)
+    if rule_key:
+        conditions.append("rule_key = %s")
+        args.append(rule_key)
+    if sn:
+        conditions.append("sn = %s")
+        args.append(sn)
+    if dismissed is not None:
+        conditions.append("dismissed = %s")
+        args.append(int(dismissed))
+
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    total_row = fetch_one(f"SELECT COUNT(*) AS total FROM safety_scan_alerts {where_sql}", tuple(args))
+    rows = fetch_all(
+        f"SELECT * FROM safety_scan_alerts {where_sql} ORDER BY severity_score DESC, created_at DESC LIMIT %s OFFSET %s",
+        tuple(args + [limit, offset]),
+    )
+
+    items = []
+    for row in (rows or []):
+        item = dict(row)
+        for dt_field in ('cook_start_time', 'cook_end_time', 'created_at', 'dismissed_at'):
+            if item.get(dt_field) and hasattr(item[dt_field], 'strftime'):
+                item[dt_field] = item[dt_field].strftime("%Y-%m-%d %H:%M:%S")
+        if item.get('detail_json') and isinstance(item.get('detail_json'), str):
+            try:
+                item['detail'] = json.loads(item['detail_json'])
+            except Exception:
+                item['detail'] = {}
+        else:
+            item['detail'] = item.get('detail_json') or {}
+        items.append(item)
+
+    rule_counts = fetch_all("""
+        SELECT rule_key, rule_label, risk_level, COUNT(*) AS cnt
+        FROM safety_scan_alerts WHERE dismissed=0
+        GROUP BY rule_key, rule_label, risk_level ORDER BY cnt DESC
+    """)
+
+    return {
+        'total': int(total_row.get('total') or 0),
+        'limit': limit,
+        'offset': offset,
+        'items': items,
+        'rule_counts': [dict(r) for r in (rule_counts or [])],
+    }
+
 def step_type_label(value):
     labels = {
         '1': '投料',
@@ -5965,6 +6430,108 @@ def sync_thermal_knowledge(request: Request, recipe_limit: int = Query(20000), a
             ('FAILED', str(exc), finished, run_id),
         )
         raise HTTPException(status_code=500, detail=f"热物性库同步失败：{exc}")
+
+# ── Safety Scan APIs ──────────────────────────────────────────────
+
+@app.get("/api/safety/overview")
+def safety_overview_api(request: Request, authorization: str = Header(None)):
+    username = require_auth(authorization=authorization)
+    ensure_analytics_db()
+    try:
+        result = safety_overview()
+        log_event(username, 'safety_overview', request, detail={'summary': result.get('summary')})
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"安全总览查询失败：{exc}")
+
+
+@app.get("/api/safety/alerts")
+def safety_alerts_api(
+    request: Request,
+    risk_level: str = Query(None),
+    rule_key: str = Query(None),
+    sn: str = Query(None),
+    dismissed: int = Query(None),
+    limit: int = Query(200),
+    offset: int = Query(0),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    ensure_analytics_db()
+    try:
+        result = safety_alerts_query(
+            risk_level=risk_level, rule_key=rule_key, sn=sn,
+            dismissed=dismissed, limit=limit, offset=offset,
+        )
+        log_event(username, 'safety_alerts_query', request, detail={
+            'risk_level': risk_level, 'rule_key': rule_key, 'sn': sn, 'total': result.get('total'),
+        })
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"安全告警查询失败：{exc}")
+
+
+@app.post("/api/safety/scan")
+def trigger_safety_scan(request: Request, scan_type: str = Query('quick'), authorization: str = Header(None)):
+    username = require_admin(authorization=authorization)
+    ensure_analytics_db()
+    try:
+        result = run_safety_scan(scan_type=scan_type)
+        log_event(username, 'safety_scan', request, detail=result)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"安全扫描失败：{exc}")
+
+
+@app.post("/api/safety/alerts/{alert_id}/dismiss")
+def dismiss_safety_alert(alert_id: int, request: Request, authorization: str = Header(None)):
+    username = require_admin(authorization=authorization)
+    ensure_analytics_db()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    affected = execute_local(
+        "UPDATE safety_scan_alerts SET dismissed=1, dismissed_by=%s, dismissed_at=%s WHERE id=%s AND dismissed=0",
+        (username, now, alert_id),
+    )
+    if not affected:
+        raise HTTPException(status_code=404, detail="告警不存在或已处理")
+    log_event(username, 'safety_alert_dismiss', request, detail={'alert_id': alert_id})
+    return {'dismissed': True, 'alert_id': alert_id}
+
+
+@app.get("/api/safety/trends")
+def safety_trends_api(
+    request: Request,
+    days: int = Query(7),
+    sn: str = Query(None),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    ensure_analytics_db()
+    try:
+        sn_filter = "WHERE sn = %s" if sn else ""
+        args = (sn,) if sn else ()
+        trends = fetch_all(
+            f"""
+            SELECT stat_date, SUM(total_jobs) AS total_jobs,
+                   SUM(high_temp_300c) AS high_temp_300c,
+                   SUM(high_temp_330c) AS high_temp_330c,
+                   MAX(max_temp_reached) AS max_temp_reached,
+                   AVG(avg_temp_across_jobs) AS avg_temp_across_jobs
+            FROM safety_daily_stats
+            {sn_filter} {'AND' if sn else 'WHERE'} stat_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+            GROUP BY stat_date ORDER BY stat_date ASC
+            """,
+            args + (days,),
+        )
+        log_event(username, 'safety_trends', request, detail={'days': days, 'sn': sn, 'rows': len(trends or [])})
+        return {
+            'days': days,
+            'sn': sn,
+            'trends': [{**dict(r), 'stat_date': r['stat_date'].strftime('%Y-%m-%d') if hasattr(r['stat_date'], 'strftime') else str(r['stat_date'])} for r in (trends or [])],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"安全趋势查询失败：{exc}")
+
 
 @app.get("/api/recipe-search")
 def recipe_search(
