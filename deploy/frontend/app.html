@@ -413,18 +413,160 @@
                     <span class="context-pill"><span>生产</span><strong>{{ data.stats.total_logs || 0 }} 次</strong></span>
                     <span class="context-pill"><span>日志</span><strong>{{ (data.device_logs || []).length }} 包</strong></span>
                 </div>
-                <div class="content-wrap" v-if="isDeviceTab && !data">
-                    <div class="empty-state">
-                        <div class="empty-state-title">先选择一台设备</div>
-                        <div>输入 SN 可直接进入设备；输入客户、门店或地区关键词会先匹配候选设备。</div>
-                        <div class="mt-3">
+	                <div class="content-wrap" v-if="isDeviceTab && !data">
+	                    <div class="empty-state">
+	                        <div class="empty-state-title">先选择一台设备</div>
+	                        <div>输入 SN 可直接进入设备；输入客户、门店或地区关键词会先匹配候选设备。</div>
+	                        <div class="mt-3">
                             <button class="btn btn-primary" @click="smartDeviceEntry">查询</button>
                             <button class="btn btn-outline-primary ms-2" @click="searchDevices(false)">只匹配</button>
                         </div>
-                    </div>
-                </div>
+	                    </div>
+	                </div>
 
-            <div class="content-wrap" v-if="activeTab === 'home'">
+	            <div class="content-wrap" v-if="activeTab === 'safetyOverview'">
+	                <div class="d-flex gap-2 mb-3 align-items-center">
+	                    <button class="btn btn-primary btn-sm" @click="triggerSafetyScan" :disabled="safetyDashboard.scanLoading || !isAdmin">
+	                        {{ safetyDashboard.scanLoading ? '扫描中...' : '运行安全扫描' }}
+	                    </button>
+	                    <button class="btn btn-outline-secondary btn-sm" @click="loadSafetyOverview" :disabled="safetyDashboard.overviewLoading">刷新总览</button>
+	                    <span v-if="safetyDashboard.scanResult" class="text-success small">最近扫描：{{ safetyDashboard.scanResult.alerts }} 条告警</span>
+	                    <span v-if="safetyDashboard.overview && safetyDashboard.overview.last_scan" class="text-muted small">上次扫描：{{ safetyDashboard.overview.last_scan.finished_at }}</span>
+	                </div>
+	                <div v-if="safetyDashboard.overviewLoading" class="text-muted text-center py-4">正在加载安全总览...</div>
+	                <div v-if="safetyDashboard.overviewError" class="alert alert-danger">{{ safetyDashboard.overviewError }}</div>
+	                <template v-if="safetyDashboard.overview && safetyDashboard.overview.summary">
+	                    <div class="row g-3 mb-3">
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ safetyDashboard.overview.summary.total_jobs || 0 }}</div><div class="admin-metric-label">已入库作业</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric" style="border-left: 3px solid var(--danger);"><div class="admin-metric-value text-danger">{{ safetyDashboard.overview.summary.critical_jobs || 0 }}</div><div class="admin-metric-label">临界高温作业</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric" style="border-left: 3px solid var(--accent);"><div class="admin-metric-value text-warning">{{ safetyDashboard.overview.summary.warning_jobs || 0 }}</div><div class="admin-metric-label">警示作业</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ safetyDashboard.overview.summary.all_time_max_temp || '-' }}℃</div><div class="admin-metric-label">历史最高锅温</div></div></div>
+	                    </div>
+	                    <div class="row g-3 mb-3">
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ safetyDashboard.overview.summary.device_count || 0 }}</div><div class="admin-metric-label">涉及设备</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ (safetyDashboard.overview.alert_counts || {}).high_active || 0 }}</div><div class="admin-metric-label">活跃高危告警</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ (safetyDashboard.overview.alert_counts || {}).medium_active || 0 }}</div><div class="admin-metric-label">活跃中危告警</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ safetyDashboard.overview.summary.all_time_avg_max_temp || '-' }}℃</div><div class="admin-metric-label">平均最高锅温</div></div></div>
+	                    </div>
+	                    <div class="card mb-3">
+	                        <div class="card-header">温度分布</div>
+	                        <div class="card-body">
+	                            <div v-if="safetyDashboard.overview.temp_distribution && safetyDashboard.overview.temp_distribution.length" class="d-flex align-items-end gap-2" style="height:160px;">
+	                                <div v-for="item in safetyDashboard.overview.temp_distribution" :key="item.band" class="text-center flex-grow-1">
+	                                    <div :style="{height: Math.max(4, Math.min(140, item.cnt / (safetyDashboard.overview.summary.total_jobs || 1) * 300)) + 'px', background: item.band.includes('350') ? '#d93026' : item.band.includes('300') ? '#ff7a1a' : item.band.includes('250') ? '#f5c842' : item.band.includes('200') ? '#12a150' : '#6b7280', borderRadius: '4px 4px 0 0', minWidth: '40px'}"></div>
+	                                    <div class="small mt-1">{{ item.cnt }}</div>
+	                                    <div class="small text-muted">{{ item.band }}</div>
+	                                </div>
+	                            </div>
+	                            <div v-else class="text-muted">暂无温度分布数据。</div>
+	                        </div>
+	                    </div>
+	                    <div class="row g-3">
+	                        <div class="col-lg-6">
+	                            <div class="card">
+	                                <div class="card-header">高温设备排行</div>
+	                                <table class="table table-sm table-striped mb-0">
+	                                    <thead><tr><th>SN</th><th>次数</th><th>最高温</th><th>平均高温</th></tr></thead>
+	                                    <tbody>
+	                                        <tr v-for="d in (safetyDashboard.overview.top_devices || []).slice(0, 10)" :key="d.sn" class="recipe-row" @click="snInput = d.sn; search();">
+	                                            <td class="fw-bold">{{ d.sn }}</td><td>{{ d.high_count }}</td><td>{{ d.worst_temp }}℃</td><td>{{ d.avg_high_temp }}℃</td>
+	                                        </tr>
+	                                    </tbody>
+	                                </table>
+	                                <div v-if="!(safetyDashboard.overview.top_devices || []).length" class="p-3 text-muted">暂无高温设备记录。</div>
+	                            </div>
+	                        </div>
+	                        <div class="col-lg-6">
+	                            <div class="card">
+	                                <div class="card-header">高温菜谱排行</div>
+	                                <table class="table table-sm table-striped mb-0">
+	                                    <thead><tr><th>菜谱</th><th>次数</th><th>最高温</th><th>平均高温</th></tr></thead>
+	                                    <tbody>
+	                                        <tr v-for="r in (safetyDashboard.overview.top_recipes || []).slice(0, 10)" :key="r.recipe_name">
+	                                            <td>{{ r.recipe_name || '(未命名菜谱)' }}</td><td>{{ r.high_count }}</td><td>{{ r.worst_temp }}℃</td><td>{{ r.avg_high_temp }}℃</td>
+	                                        </tr>
+	                                    </tbody>
+	                                </table>
+	                                <div v-if="!(safetyDashboard.overview.top_recipes || []).length" class="p-3 text-muted">暂无高温菜谱记录。</div>
+	                            </div>
+	                        </div>
+	                    </div>
+	                </template>
+	                <div v-if="safetyDashboard.overview && !safetyDashboard.overview.summary && !safetyDashboard.overviewLoading && !safetyDashboard.overviewError" class="alert alert-warning">安全总览接口已返回，但数据结构不完整，请刷新或重新运行安全扫描。</div>
+	                <div v-if="!safetyDashboard.overview && !safetyDashboard.overviewLoading && !safetyDashboard.overviewError" class="text-center py-5 text-muted">暂无安全数据。请先解析一些日志包，或点击运行安全扫描。</div>
+	            </div>
+
+	            <div class="content-wrap" v-if="activeTab === 'safetyAlerts'">
+	                <div class="row g-2 mb-3 align-items-end">
+	                    <div class="col-md-2">
+	                        <label class="filter-label">风险等级</label>
+	                        <select class="form-select form-select-sm" v-model="safetyDashboard.alertsFilters.riskLevel" @change="loadSafetyAlerts(0)">
+	                            <option value="">全部</option>
+	                            <option value="high">高危</option>
+	                            <option value="medium">中危</option>
+	                            <option value="info">信息</option>
+	                        </select>
+	                    </div>
+	                    <div class="col-md-2">
+	                        <label class="filter-label">规则</label>
+	                        <select class="form-select form-select-sm" v-model="safetyDashboard.alertsFilters.ruleKey" @change="loadSafetyAlerts(0)">
+	                            <option value="">全部</option>
+	                            <option value="max_temp_high">实测高温>330℃</option>
+	                            <option value="max_temp_elevated">高温280-330℃</option>
+	                            <option value="oil_food_delay">投油间隔</option>
+	                            <option value="no_power_samples">缺功率采样</option>
+	                            <option value="no_temp_samples">缺温度样本</option>
+	                        </select>
+	                    </div>
+	                    <div class="col-md-2">
+	                        <label class="filter-label">状态</label>
+	                        <select class="form-select form-select-sm" v-model="safetyDashboard.alertsFilters.dismissed" @change="loadSafetyAlerts(0)">
+	                            <option value="">全部</option>
+	                            <option value="0">活跃</option>
+	                            <option value="1">已处理</option>
+	                        </select>
+	                    </div>
+	                    <div class="col-md-2">
+	                        <label class="filter-label">设备 SN</label>
+	                        <input class="form-control form-control-sm" v-model="safetyDashboard.alertsFilters.sn" placeholder="可选过滤" @keyup.enter="loadSafetyAlerts(0)">
+	                    </div>
+	                    <div class="col-md-4 d-flex gap-2">
+	                        <button class="btn btn-sm btn-primary" @click="loadSafetyAlerts(0)">查询</button>
+	                        <button class="btn btn-sm btn-outline-secondary" @click="resetSafetyAlertsFilters">重置</button>
+	                        <button class="btn btn-sm btn-outline-success" @click="triggerSafetyScan" :disabled="safetyDashboard.scanLoading || !isAdmin" v-if="isAdmin">{{ safetyDashboard.scanLoading ? '扫描中...' : '重新扫描' }}</button>
+	                    </div>
+	                </div>
+	                <div v-if="safetyDashboard.alertsLoading" class="text-muted text-center py-4">正在加载告警...</div>
+	                <div v-if="safetyDashboard.alertsError" class="alert alert-danger">{{ safetyDashboard.alertsError }}</div>
+	                <template v-if="safetyDashboard.alerts && safetyDashboard.alerts.items">
+	                    <div class="d-flex justify-content-between align-items-center mb-2">
+	                        <small class="text-muted">共 {{ safetyDashboard.alerts.total }} 条告警</small>
+	                        <div class="d-flex gap-1">
+	                            <button class="btn btn-sm btn-outline-secondary" :disabled="safetyDashboard.alertsPage <= 0" @click="loadSafetyAlerts((safetyDashboard.alertsPage - 1) * 200)">上一页</button>
+	                            <button class="btn btn-sm btn-outline-secondary" :disabled="(safetyDashboard.alertsPage + 1) * 200 >= (safetyDashboard.alerts.total || 0)" @click="loadSafetyAlerts((safetyDashboard.alertsPage + 1) * 200)">下一页</button>
+	                        </div>
+	                    </div>
+	                    <div class="card" v-for="alert in safetyDashboard.alerts.items" :key="alert.id" style="margin-bottom: 6px;" :style="{borderLeft: alert.risk_level === 'high' ? '3px solid #d93026' : alert.risk_level === 'medium' ? '3px solid #ff7a1a' : '3px solid #6b7280'}">
+	                        <div class="card-body py-2 px-3">
+	                            <div class="d-flex justify-content-between align-items-start flex-wrap">
+	                                <div><span class="badge me-2" :class="safetyRiskBadgeClass(alert.risk_level)">{{ alert.risk_level === 'high' ? '高危' : alert.risk_level === 'medium' ? '中危' : '信息' }}</span><strong>{{ alert.rule_label }}</strong><span class="text-muted ms-2 small">{{ alert.recipe_name || '(未命名菜谱)' }}</span></div>
+	                                <div class="d-flex gap-2 align-items-center"><small class="text-muted">{{ alert.created_at }}</small><button v-if="isAdmin && !alert.dismissed" class="btn btn-sm btn-outline-secondary" @click="dismissSafetyAlert(alert.id)">忽略</button></div>
+	                            </div>
+	                            <div class="row g-2 mt-1 small">
+	                                <div class="col-md-2"><span class="text-muted">SN:</span> <a href="#" @click.prevent="jumpToDeviceFromAlert(alert)" class="fw-bold">{{ alert.sn }}</a></div>
+	                                <div class="col-md-2"><span class="text-muted">最高锅温:</span> <span :class="alert.max_pot_temp > 300 ? 'text-danger fw-bold' : ''">{{ alert.max_pot_temp || '-' }}℃</span></div>
+	                                <div class="col-md-2"><span class="text-muted">平均锅温:</span> {{ alert.avg_pot_temp || '-' }}℃</div>
+	                                <div class="col-md-2"><span class="text-muted">时长:</span> {{ alert.duration_seconds || '-' }}s</div>
+	                                <div class="col-md-4"><span class="text-muted">烹饪时间:</span> {{ alert.cook_start_time || '-' }}</div>
+	                            </div>
+	                        </div>
+	                    </div>
+	                    <div v-if="!safetyDashboard.alerts.items.length" class="text-center py-5 text-muted">暂无匹配告警。</div>
+	                </template>
+	                <div v-if="!safetyDashboard.alerts && !safetyDashboard.alertsLoading && !safetyDashboard.alertsError" class="text-center py-5 text-muted">暂无告警数据。请先运行安全扫描。</div>
+	            </div>
+
+	            <div class="content-wrap" v-if="activeTab === 'home'">
                 <div class="workbench-hero">
                     <div class="command-panel">
                         <div class="command-title">今天查什么？</div>
@@ -2930,255 +3072,6 @@
         </div>
         </section>
 
-        <div class="content-wrap" v-if="activeTab === 'safetyOverview'">
-                <div v-if="safetyDashboard.overviewLoading" class="text-muted text-center py-4">正在加载安全总览...</div>
-                <div v-if="safetyDashboard.overviewError" class="alert alert-danger">{{ safetyDashboard.overviewError }}</div>
-                <template v-if="safetyDashboard.overview && safetyDashboard.overview.summary">
-                    <!-- Summary Cards -->
-                    <div class="row g-3 mb-3">
-                        <div class="col-md-3">
-                            <div class="admin-metric">
-                                <div class="admin-metric-value">{{ safetyDashboard.overview.summary.total_jobs || 0 }}</div>
-                                <div class="admin-metric-label">已入库作业总数</div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="admin-metric" style="border-left: 3px solid var(--danger);">
-                                <div class="admin-metric-value text-danger">{{ safetyDashboard.overview.summary.critical_jobs || 0 }}</div>
-                                <div class="admin-metric-label">高危作业 ≥330℃</div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="admin-metric" style="border-left: 3px solid var(--accent);">
-                                <div class="admin-metric-value text-warning">{{ safetyDashboard.overview.summary.warning_jobs || 0 }}</div>
-                                <div class="admin-metric-label">警示作业 300-330℃</div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="admin-metric">
-                                <div class="admin-metric-value">{{ safetyDashboard.overview.summary.all_time_max_temp || '-' }}℃</div>
-                                <div class="admin-metric-label">历史最高锅温</div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="row g-3 mb-3">
-                        <div class="col-md-3">
-                            <div class="admin-metric">
-                                <div class="admin-metric-value">{{ safetyDashboard.overview.summary.device_count || 0 }}</div>
-                                <div class="admin-metric-label">涉及设备数</div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="admin-metric">
-                                <div class="admin-metric-value">{{ safetyDashboard.overview.alert_counts.high_active || 0 }}</div>
-                                <div class="admin-metric-label">活跃高危告警</div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="admin-metric">
-                                <div class="admin-metric-value">{{ safetyDashboard.overview.alert_counts.medium_active || 0 }}</div>
-                                <div class="admin-metric-label">活跃中危告警</div>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="admin-metric">
-                                <div class="admin-metric-value">{{ safetyDashboard.overview.summary.all_time_avg_max_temp || '-' }}℃</div>
-                                <div class="admin-metric-label">平均最高锅温</div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Scan Controls -->
-                    <div class="d-flex gap-2 mb-3 align-items-center">
-                        <button class="btn btn-primary btn-sm" @click="triggerSafetyScan" :disabled="safetyDashboard.scanLoading || !isAdmin">
-                            {{ safetyDashboard.scanLoading ? '扫描中...' : '运行安全扫描' }}
-                        </button>
-                        <button class="btn btn-outline-secondary btn-sm" @click="loadSafetyOverview" :disabled="safetyDashboard.overviewLoading">
-                            刷新总览
-                        </button>
-                        <span v-if="safetyDashboard.scanResult" class="text-success small ms-2">
-                            最近扫描：{{ safetyDashboard.scanResult.alerts }} 条告警
-                        </span>
-                        <span v-if="safetyDashboard.overview.last_scan" class="text-muted small ms-2">
-                            上次扫描：{{ safetyDashboard.overview.last_scan.finished_at }}
-                        </span>
-                    </div>
-
-                    <!-- Temperature Distribution -->
-                    <div class="card mb-3">
-                        <div class="card-header">温度分布</div>
-                        <div class="card-body">
-                            <div v-if="safetyDashboard.overview.temp_distribution && safetyDashboard.overview.temp_distribution.length" class="d-flex align-items-end gap-2" style="height:160px;">
-                                <div v-for="item in safetyDashboard.overview.temp_distribution" :key="item.band" class="text-center flex-grow-1">
-                                    <div :style="{height: Math.max(4, Math.min(140, item.cnt / (safetyDashboard.overview.summary.total_jobs || 1) * 300)) + 'px', background: item.band.includes('350') ? '#d93026' : item.band.includes('300') ? '#ff7a1a' : item.band.includes('250') ? '#f5c842' : item.band.includes('200') ? '#12a150' : '#6b7280', borderRadius: '4px 4px 0 0', minWidth: '40px'}"></div>
-                                    <div class="small mt-1" style="font-size:10px;">{{ item.cnt }}</div>
-                                    <div class="small text-muted" style="font-size:10px;">{{ item.band }}</div>
-                                </div>
-                            </div>
-                            <div v-else class="text-muted">暂无温度数据。请先同步日志包并解析温度。</div>
-                        </div>
-                    </div>
-
-                    <!-- Top Risky Devices & Recipes -->
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="card mb-3">
-                                <div class="card-header">高危设备 TOP 10 (≥280℃ 次数)</div>
-                                <div class="card-body p-0">
-                                    <table class="table table-sm table-striped mb-0" v-if="safetyDashboard.overview.top_devices && safetyDashboard.overview.top_devices.length">
-                                        <thead><tr><th>SN</th><th>高温次数</th><th>最严重温度</th><th>平均高温</th></tr></thead>
-                                        <tbody>
-                                            <tr v-for="d in safetyDashboard.overview.top_devices.slice(0, 10)" :key="d.sn" class="recipe-row" @click="snInput = d.sn; search();">
-                                                <td class="fw-bold">{{ d.sn }}</td>
-                                                <td><span class="badge bg-danger">{{ d.high_count }}</span></td>
-                                                <td>{{ d.worst_temp }}℃</td>
-                                                <td>{{ d.avg_high_temp }}℃</td>
-                                            </tr>
-                                        </tbody>
-                                    </table>
-                                    <div v-else class="p-3 text-muted">暂无高温设备记录。</div>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <div class="card mb-3">
-                                <div class="card-header">高危菜谱 TOP 10 (≥280℃ 次数)</div>
-                                <div class="card-body p-0">
-                                    <table class="table table-sm table-striped mb-0" v-if="safetyDashboard.overview.top_recipes && safetyDashboard.overview.top_recipes.length">
-                                        <thead><tr><th>菜谱</th><th>高温次数</th><th>最严重温度</th><th>平均高温</th></tr></thead>
-                                        <tbody>
-                                            <tr v-for="r in safetyDashboard.overview.top_recipes.slice(0, 10)" :key="r.recipe_name">
-                                                <td>{{ r.recipe_name || '(未命名菜谱)' }}</td>
-                                                <td><span class="badge bg-danger">{{ r.high_count }}</span></td>
-                                                <td>{{ r.worst_temp }}℃</td>
-                                                <td>{{ r.avg_high_temp }}℃</td>
-                                            </tr>
-                                        </tbody>
-                                    </table>
-                                    <div v-else class="p-3 text-muted">暂无高温菜谱记录。</div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </template>
-                <div v-if="safetyDashboard.overview && !safetyDashboard.overview.summary && !safetyDashboard.overviewLoading && !safetyDashboard.overviewError" class="alert alert-warning">
-                    安全总览接口已返回，但数据结构不完整，请刷新或重新运行安全扫描。
-                </div>
-                <div v-if="!safetyDashboard.overview && !safetyDashboard.overviewLoading && !safetyDashboard.overviewError" class="text-center py-5 text-muted">
-                    暂无安全数据。请先解析一些日志包，然后点击「运行安全扫描」。
-                </div>
-        </div>
-
-        <div class="content-wrap" v-if="activeTab === 'safetyAlerts'">
-                <div class="row g-2 mb-3 align-items-end">
-                    <div class="col-md-2">
-                        <label class="filter-label">风险等级</label>
-                        <select class="form-select form-select-sm" v-model="safetyDashboard.alertsFilters.riskLevel" @change="loadSafetyAlerts(0)">
-                            <option value="">全部</option>
-                            <option value="high">高危</option>
-                            <option value="medium">中危</option>
-                            <option value="info">信息</option>
-                        </select>
-                    </div>
-                    <div class="col-md-2">
-                        <label class="filter-label">规则</label>
-                        <select class="form-select form-select-sm" v-model="safetyDashboard.alertsFilters.ruleKey" @change="loadSafetyAlerts(0)">
-                            <option value="">全部</option>
-                            <option value="max_temp_high">实测高温>330℃</option>
-                            <option value="max_temp_elevated">高温280-330℃</option>
-                            <option value="oil_food_delay">投油间隔</option>
-                            <option value="no_power_samples">缺功率采样</option>
-                            <option value="no_temp_samples">缺温度样本</option>
-                        </select>
-                    </div>
-                    <div class="col-md-2">
-                        <label class="filter-label">状态</label>
-                        <select class="form-select form-select-sm" v-model="safetyDashboard.alertsFilters.dismissed" @change="loadSafetyAlerts(0)">
-                            <option value="">全部</option>
-                            <option value="0">活跃</option>
-                            <option value="1">已处理</option>
-                        </select>
-                    </div>
-                    <div class="col-md-2">
-                        <label class="filter-label">设备 SN</label>
-                        <input class="form-control form-control-sm" v-model="safetyDashboard.alertsFilters.sn" placeholder="可选过滤" @keyup.enter="loadSafetyAlerts(0)">
-                    </div>
-                    <div class="col-md-4 d-flex gap-2">
-                        <button class="btn btn-sm btn-primary" @click="loadSafetyAlerts(0)">查询</button>
-                        <button class="btn btn-sm btn-outline-secondary" @click="resetSafetyAlertsFilters">重置</button>
-                        <button class="btn btn-sm btn-outline-success" @click="triggerSafetyScan" :disabled="safetyDashboard.scanLoading || !isAdmin" v-if="isAdmin">
-                            {{ safetyDashboard.scanLoading ? '扫描中...' : '重新扫描' }}
-                        </button>
-                    </div>
-                </div>
-
-                <!-- Rule Counts -->
-                <div class="mb-2" v-if="safetyDashboard.alerts && safetyDashboard.alerts.rule_counts && safetyDashboard.alerts.rule_counts.length">
-                    <span v-for="rc in safetyDashboard.alerts.rule_counts" :key="rc.rule_key" class="resource-chip me-1 mb-1" :class="rc.risk_level === 'high' ? 'danger-chip' : ''" style="cursor:pointer" @click="safetyDashboard.alertsFilters.ruleKey = rc.rule_key; loadSafetyAlerts(0);">
-                        {{ rc.rule_label }}: {{ rc.cnt }}
-                    </span>
-                </div>
-
-                <div v-if="safetyDashboard.alertsLoading" class="text-muted text-center py-4">正在加载告警...</div>
-                <div v-if="safetyDashboard.alertsError" class="alert alert-danger">{{ safetyDashboard.alertsError }}</div>
-
-                <template v-if="safetyDashboard.alerts && safetyDashboard.alerts.items">
-                    <div class="d-flex justify-content-between align-items-center mb-2">
-                        <small class="text-muted">共 {{ safetyDashboard.alerts.total }} 条告警</small>
-                        <div class="d-flex gap-1">
-                            <button class="btn btn-sm btn-outline-secondary" :disabled="safetyDashboard.alertsPage <= 0" @click="loadSafetyAlerts((safetyDashboard.alertsPage - 1) * 200)">上一页</button>
-                            <button class="btn btn-sm btn-outline-secondary" :disabled="(safetyDashboard.alertsPage + 1) * 200 >= (safetyDashboard.alerts.total || 0)" @click="loadSafetyAlerts((safetyDashboard.alertsPage + 1) * 200)">下一页</button>
-                        </div>
-                    </div>
-
-                    <div class="card" v-for="alert in safetyDashboard.alerts.items" :key="alert.id" style="margin-bottom: 6px;" :style="{borderLeft: alert.risk_level === 'high' ? '3px solid #d93026' : alert.risk_level === 'medium' ? '3px solid #ff7a1a' : '3px solid #6b7280'}">
-                        <div class="card-body py-2 px-3">
-                            <div class="d-flex justify-content-between align-items-start flex-wrap">
-                                <div>
-                                    <span class="badge me-2" :class="safetyRiskBadgeClass(alert.risk_level)">{{ alert.risk_level === 'high' ? '高危' : alert.risk_level === 'medium' ? '中危' : '信息' }}</span>
-                                    <strong>{{ alert.rule_label }}</strong>
-                                    <span class="text-muted ms-2 small">{{ alert.recipe_name || '(未命名菜谱)' }}</span>
-                                </div>
-                                <div class="d-flex gap-2 align-items-center">
-                                    <small class="text-muted">{{ alert.created_at }}</small>
-                                    <button v-if="isAdmin && !alert.dismissed" class="btn btn-sm btn-outline-secondary" @click="dismissSafetyAlert(alert.id)">忽略</button>
-                                </div>
-                            </div>
-                            <div class="row g-2 mt-1 small">
-                                <div class="col-md-2">
-                                    <span class="text-muted">SN:</span>
-                                    <a href="#" @click.prevent="jumpToDeviceFromAlert(alert)" class="fw-bold">{{ alert.sn }}</a>
-                                </div>
-                                <div class="col-md-2">
-                                    <span class="text-muted">最高锅温:</span>
-                                    <span :class="alert.max_pot_temp > 300 ? 'text-danger fw-bold' : ''">{{ alert.max_pot_temp || '-' }}℃</span>
-                                </div>
-                                <div class="col-md-2">
-                                    <span class="text-muted">平均锅温:</span> {{ alert.avg_pot_temp || '-' }}℃
-                                </div>
-                                <div class="col-md-2" v-if="alert.oil_to_food_interval">
-                                    <span class="text-muted">投料间隔:</span> {{ alert.oil_to_food_interval }}s
-                                </div>
-                                <div class="col-md-2">
-                                    <span class="text-muted">时长:</span> {{ alert.duration_seconds || '-' }}s
-                                </div>
-                                <div class="col-md-2">
-                                    <span class="text-muted">烹饪时间:</span> {{ alert.cook_start_time || '-' }}
-                                </div>
-                            </div>
-                            <div v-if="alert.dismissed" class="mt-1"><span class="badge bg-secondary">已处理</span> {{ alert.dismissed_by }} · {{ alert.dismissed_at }}</div>
-                        </div>
-                    </div>
-
-                    <div v-if="safetyDashboard.alerts.items && !safetyDashboard.alerts.items.length" class="text-center py-5 text-muted">
-                        暂无匹配的告警记录。尝试放宽筛选条件或先运行安全扫描。
-                    </div>
-                </template>
-
-                <div v-if="!safetyDashboard.alerts && !safetyDashboard.alertsLoading && !safetyDashboard.alertsError" class="text-center py-5 text-muted">
-                    暂无告警数据。请先运行安全扫描。
-                </div>
-        </div>
 
     </div>
         </main>
