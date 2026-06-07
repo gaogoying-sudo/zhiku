@@ -304,3 +304,40 @@
   - PR #2 基于上一轮已部署但未合并的 PR #1 继续开发；如果 PR #1 未合并，PR #2 会包含其基础变更。
   - GitHub 返回 `mergeable=false`，本地 `git merge-tree` 未发现冲突，可能与 PR #1 未合并或 GitHub 状态刷新有关，后续合并前需要再看一次。
 - 解除锁定：热过程分析前端模块。
+
+### 热物性库数据库底座 v0.2
+- 操作人/会话：Codex。
+- 目标：把“热物性库”从前端 21 条种子数据升级为云端本地数据库底座，后续作为热过程分析、温度预测和起火风险筛选的核心资产复用。
+- 变更文件：
+  - `deploy/backend/main.py`
+  - `deploy/frontend/index.html`
+  - `deploy/frontend/app.html`
+  - `docs/THERMAL_INGREDIENT_KNOWLEDGE_BASE.md`
+  - `docs/progress.md`
+- 新增本地表：
+  - `ingredient_thermal_properties`
+  - `ingredient_thermal_sync_runs`
+- 数据来源：
+  - `btyc.base_ingredients` 全量基础食材。
+  - `manage_backend.recipe_detail.cooking_ingredient` 最近 20,000 条菜谱配料 JSON。
+  - `manage_backend.main_recipe` 菜谱名称和分类上下文。
+- 功能结果：
+  - 新增 `GET /api/thermal-knowledge`，支持关键词、分类、燃烧风险、分页查询。
+  - 新增 `POST /api/thermal-knowledge/sync`，admin 可触发源库同步。
+  - 前端 `热物性库` 页面优先读取云端本地数据库；未同步或接口异常时才使用前端种子数据兜底。
+  - 页面展示最近同步时间、基础食材数量、菜谱配料引用次数，并支持 `同步源库 / 查询底座 / 清筛选`。
+  - 规则归类 8 个标准大类：`未分类`、`蔬菜类`、`肉蛋类`、`油脂`、`液体调料`、`调料`、`水/汤汁`、`干货/香辛料`。
+- 线上同步结果：
+  - 基础食材源数据：54,224 行。
+  - 本地食材底座：52,446 条。
+  - 菜谱配料样本：20,000 条 `recipe_detail`。
+  - 菜谱配料引用聚合：236,112 次。
+  - `牛油` 查询返回 38 条，能识别为 `油脂 / 可燃油脂`，并带菜谱出现次数和累计用量。
+- 部署命令：
+  - `make check`
+  - `make deploy`
+  - 线上 admin 调用 `/api/thermal-knowledge/sync?recipe_limit=20000`
+- 遗留问题：
+  - `recipe_detail` 总量约 226,840 条，当前同步接口默认取最近 20,000 条，后续应升级为后台队列分批全量同步。
+  - 源库分类字段存在数字编码，当前保留原始字段并用名称规则推断标准分类；后续需要人工映射和实验/供应商数据校准。
+- 解除锁定：热物性库数据库底座。

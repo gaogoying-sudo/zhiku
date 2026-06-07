@@ -755,6 +755,55 @@ def init_analytics_db():
                         INDEX idx_power_sn_time(sn, event_time)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS ingredient_thermal_properties (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        source_ingredient_id VARCHAR(128) NULL,
+                        canonical_name VARCHAR(255) NOT NULL,
+                        aliases_json TEXT NULL,
+                        category VARCHAR(64) NOT NULL DEFAULT '未分类',
+                        source_category_1 VARCHAR(128) NULL,
+                        source_category_2 VARCHAR(128) NULL,
+                        ingredient_type VARCHAR(32) NULL,
+                        automatic VARCHAR(32) NULL,
+                        specific_heat_kj_kg_c DECIMAL(8,3) NOT NULL DEFAULT 3.500,
+                        water_fraction DECIMAL(5,3) NOT NULL DEFAULT 0.500,
+                        oil_fraction DECIMAL(5,3) NOT NULL DEFAULT 0.000,
+                        boiling_c DECIMAL(8,2) NULL,
+                        smoke_point_c DECIMAL(8,2) NULL,
+                        flash_point_c DECIMAL(8,2) NULL,
+                        autoignition_c DECIMAL(8,2) NULL,
+                        hazard_class VARCHAR(64) NOT NULL DEFAULT '待归类',
+                        confidence VARCHAR(32) NOT NULL DEFAULT '低',
+                        source_note VARCHAR(255) NOT NULL DEFAULT '规则推断',
+                        recipe_usage_count INT NOT NULL DEFAULT 0,
+                        recipe_count INT NOT NULL DEFAULT 0,
+                        total_amount_g DECIMAL(18,3) NOT NULL DEFAULT 0,
+                        total_amount_ml DECIMAL(18,3) NOT NULL DEFAULT 0,
+                        last_seen_recipe_id BIGINT NULL,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_ingredient_source(source_ingredient_id),
+                        INDEX idx_ingredient_name(canonical_name),
+                        INDEX idx_ingredient_category(category, hazard_class),
+                        INDEX idx_ingredient_usage(recipe_usage_count)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS ingredient_thermal_sync_runs (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        sync_type VARCHAR(64) NOT NULL,
+                        status VARCHAR(32) NOT NULL,
+                        base_rows INT NOT NULL DEFAULT 0,
+                        recipe_rows INT NOT NULL DEFAULT 0,
+                        ingredient_rows INT NOT NULL DEFAULT 0,
+                        error_message TEXT NULL,
+                        created_by VARCHAR(64) NULL,
+                        started_at DATETIME NOT NULL,
+                        finished_at DATETIME NULL,
+                        INDEX idx_thermal_sync_time(started_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
             conn.commit()
             ANALYTICS_DB_READY = True
             return True
@@ -4568,6 +4617,270 @@ def normalized_amount(value, unit):
         return raw
     return None
 
+THERMAL_RULES = [
+    {'category': '油脂', 'keywords': ['油', '猪油', '牛油', '鸡油', '色拉油', '菜籽油', '花生油', '大豆油', '香油', '葱油', '花椒油', '辣椒油'], 'specific_heat': 2.0, 'water_fraction': 0.0, 'oil_fraction': 1.0, 'smoke_point_c': 210, 'flash_point_c': 315, 'autoignition_c': 370, 'hazard_class': '可燃油脂', 'confidence': '中'},
+    {'category': '水/汤汁', 'keywords': ['水', '清水', '饮用水', '高汤', '汤', '汤汁', '汤底', '水淀粉', '淀粉水', '生粉水'], 'specific_heat': 4.0, 'water_fraction': 0.9, 'oil_fraction': 0.0, 'boiling_c': 100, 'hazard_class': '低风险含水液体', 'confidence': '中'},
+    {'category': '液体调料', 'keywords': ['酱油', '生抽', '老抽', '醋', '料酒', '黄酒', '蚝油', '酱汁', '汁', '液', '奶', '乳'], 'specific_heat': 3.7, 'water_fraction': 0.75, 'oil_fraction': 0.02, 'boiling_c': 100, 'hazard_class': '含水挥发液体', 'confidence': '低'},
+    {'category': '肉蛋类', 'keywords': ['鸡', '牛', '猪', '肉', '鱼', '虾', '蛋', '鸭', '羊', '肥肠', '腊肠'], 'specific_heat': 3.2, 'water_fraction': 0.62, 'oil_fraction': 0.1, 'hazard_class': '含水可焦化食材', 'confidence': '中'},
+    {'category': '蔬菜类', 'keywords': ['菜', '椒', '葱', '姜', '蒜', '笋', '土豆', '萝卜', '豆角', '洋葱', '菌', '菇', '茄', '瓜'], 'specific_heat': 3.7, 'water_fraction': 0.82, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '中'},
+    {'category': '干货/香辛料', 'keywords': ['干辣椒', '花椒', '麻椒', '胡椒', '八角', '桂皮', '香叶', '孜然', '芝麻', '辣椒粉'], 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.08, 'autoignition_c': 260, 'hazard_class': '可燃干货', 'confidence': '低'},
+    {'category': '调料', 'keywords': ['盐', '糖', '鸡精', '味精', '粉', '淀粉', '生粉', '面粉', '豆瓣酱', '辣酱', '酱'], 'specific_heat': 2.0, 'water_fraction': 0.1, 'oil_fraction': 0.0, 'hazard_class': '调味料/需复核', 'confidence': '低'},
+]
+
+def infer_thermal_property(name='', category_1='', category_2='', ingredient_type=None):
+    text = ' '.join(str(x or '') for x in [name, category_1, category_2])
+    if str(ingredient_type or '') == '3':
+        text = f"{text} 液"
+    for rule in THERMAL_RULES:
+        if any(keyword and keyword in text for keyword in rule['keywords']):
+            result = dict(rule)
+            result.setdefault('boiling_c', None)
+            result.setdefault('smoke_point_c', None)
+            result.setdefault('flash_point_c', None)
+            result.setdefault('autoignition_c', None)
+            result['source_note'] = '源库分类+名称关键词推断'
+            return result
+    return {
+        'category': '未分类',
+        'specific_heat': 3.5,
+        'water_fraction': 0.5,
+        'oil_fraction': 0.0,
+        'boiling_c': None,
+        'smoke_point_c': None,
+        'flash_point_c': None,
+        'autoignition_c': None,
+        'hazard_class': '待归类',
+        'confidence': '低',
+        'source_note': '默认兜底/待人工校准',
+    }
+
+def canonical_ingredient_key(ingredient_id, name):
+    raw_id = str(ingredient_id or '').strip()
+    if raw_id:
+        return raw_id
+    return f"name:{str(name or '').strip()}"
+
+def upsert_thermal_ingredient_rows(rows):
+    if not rows:
+        return 0
+    ensure_analytics_db()
+    conn = get_conn()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sql = """
+        INSERT INTO ingredient_thermal_properties (
+            source_ingredient_id, canonical_name, aliases_json, category, source_category_1, source_category_2,
+            ingredient_type, automatic, specific_heat_kj_kg_c, water_fraction, oil_fraction, boiling_c,
+            smoke_point_c, flash_point_c, autoignition_c, hazard_class, confidence, source_note,
+            recipe_usage_count, recipe_count, total_amount_g, total_amount_ml, last_seen_recipe_id, created_at, updated_at
+        ) VALUES (
+            %(source_ingredient_id)s, %(canonical_name)s, %(aliases_json)s, %(category)s, %(source_category_1)s, %(source_category_2)s,
+            %(ingredient_type)s, %(automatic)s, %(specific_heat_kj_kg_c)s, %(water_fraction)s, %(oil_fraction)s, %(boiling_c)s,
+            %(smoke_point_c)s, %(flash_point_c)s, %(autoignition_c)s, %(hazard_class)s, %(confidence)s, %(source_note)s,
+            %(recipe_usage_count)s, %(recipe_count)s, %(total_amount_g)s, %(total_amount_ml)s, %(last_seen_recipe_id)s, %(created_at)s, %(updated_at)s
+        )
+        ON DUPLICATE KEY UPDATE
+            canonical_name = VALUES(canonical_name),
+            aliases_json = VALUES(aliases_json),
+            category = VALUES(category),
+            source_category_1 = VALUES(source_category_1),
+            source_category_2 = VALUES(source_category_2),
+            ingredient_type = VALUES(ingredient_type),
+            automatic = VALUES(automatic),
+            specific_heat_kj_kg_c = VALUES(specific_heat_kj_kg_c),
+            water_fraction = VALUES(water_fraction),
+            oil_fraction = VALUES(oil_fraction),
+            boiling_c = VALUES(boiling_c),
+            smoke_point_c = VALUES(smoke_point_c),
+            flash_point_c = VALUES(flash_point_c),
+            autoignition_c = VALUES(autoignition_c),
+            hazard_class = VALUES(hazard_class),
+            confidence = VALUES(confidence),
+            source_note = VALUES(source_note),
+            recipe_usage_count = GREATEST(recipe_usage_count, VALUES(recipe_usage_count)),
+            recipe_count = GREATEST(recipe_count, VALUES(recipe_count)),
+            total_amount_g = GREATEST(total_amount_g, VALUES(total_amount_g)),
+            total_amount_ml = GREATEST(total_amount_ml, VALUES(total_amount_ml)),
+            last_seen_recipe_id = COALESCE(VALUES(last_seen_recipe_id), last_seen_recipe_id),
+            updated_at = VALUES(updated_at)
+    """
+    payload = []
+    for row in rows:
+        item = dict(row)
+        for key in ['aliases_json', 'source_category_1', 'source_category_2', 'ingredient_type', 'automatic', 'boiling_c', 'smoke_point_c', 'flash_point_c', 'autoignition_c', 'last_seen_recipe_id']:
+            item.setdefault(key, None)
+        item.setdefault('recipe_usage_count', 0)
+        item.setdefault('recipe_count', 0)
+        item.setdefault('total_amount_g', 0)
+        item.setdefault('total_amount_ml', 0)
+        item['created_at'] = now
+        item['updated_at'] = now
+        payload.append(item)
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(sql, payload)
+        conn.commit()
+        return len(payload)
+    finally:
+        conn.close()
+
+def sync_base_ingredients_to_thermal():
+    rows = fetch_all(
+        "SELECT ingredinent_id, ingredients_name, ingredinent_type, categories_1, categories_2, automatic, lang "
+        "FROM base_ingredients WHERE ingredients_name IS NOT NULL AND ingredients_name != '' "
+        "ORDER BY ingredinent_id, CASE WHEN lang = 'cn' THEN 0 WHEN lang = 'zh' THEN 1 WHEN lang = '' THEN 2 ELSE 3 END",
+        source=True,
+        database='btyc',
+    )
+    best = {}
+    aliases = defaultdict(set)
+    for row in rows:
+        key = str(row.get('ingredinent_id') or '').strip()
+        name = str(row.get('ingredients_name') or '').strip()
+        if not key or not name:
+            continue
+        aliases[key].add(name)
+        if key not in best:
+            best[key] = row
+    payload = []
+    for key, row in best.items():
+        name = str(row.get('ingredients_name') or '').strip()
+        inferred = infer_thermal_property(name, row.get('categories_1'), row.get('categories_2'), row.get('ingredinent_type'))
+        payload.append({
+            'source_ingredient_id': key,
+            'canonical_name': name,
+            'aliases_json': json.dumps(sorted(aliases[key] - {name}), ensure_ascii=False),
+            'category': inferred['category'],
+            'source_category_1': row.get('categories_1'),
+            'source_category_2': row.get('categories_2'),
+            'ingredient_type': row.get('ingredinent_type'),
+            'automatic': row.get('automatic'),
+            'specific_heat_kj_kg_c': inferred['specific_heat'],
+            'water_fraction': inferred['water_fraction'],
+            'oil_fraction': inferred['oil_fraction'],
+            'boiling_c': inferred.get('boiling_c'),
+            'smoke_point_c': inferred.get('smoke_point_c'),
+            'flash_point_c': inferred.get('flash_point_c'),
+            'autoignition_c': inferred.get('autoignition_c'),
+            'hazard_class': inferred['hazard_class'],
+            'confidence': inferred['confidence'],
+            'source_note': inferred['source_note'],
+        })
+    total = 0
+    for i in range(0, len(payload), 1000):
+        total += upsert_thermal_ingredient_rows(payload[i:i + 1000])
+    return {'source_rows': len(rows), 'ingredient_rows': total}
+
+def sync_recipe_ingredients_to_thermal(limit=20000):
+    limit = max(100, min(int(limit or 20000), 100000))
+    rows = fetch_all(
+        "SELECT rd.recipe_id, mr.name AS recipe_name, mr.group_name, rd.cooking_ingredient "
+        "FROM recipe_detail rd JOIN main_recipe mr ON mr.id = rd.recipe_id "
+        "WHERE rd.cooking_ingredient IS NOT NULL AND rd.cooking_ingredient != '' "
+        "ORDER BY rd.recipe_id DESC LIMIT %s",
+        (limit,),
+        source=True,
+        database='manage_backend',
+    )
+    agg = {}
+    recipe_sets = defaultdict(set)
+    ingredient_ids = set()
+    for row in rows:
+        recipe_id = row.get('recipe_id')
+        for item in parse_json_array(row.get('cooking_ingredient')):
+            if not isinstance(item, dict):
+                continue
+            ingredient_id = first_present(item, 'ingredientsId', 'Ingredients_id', 'ingredientId', 'id')
+            name = first_present(item, 'name', 'materialName', 'food_name', 'ingredient_name')
+            key = canonical_ingredient_key(ingredient_id, name)
+            if not key or key == 'name:':
+                continue
+            if ingredient_id:
+                ingredient_ids.add(str(ingredient_id))
+            entry = agg.setdefault(key, {
+                'source_ingredient_id': str(ingredient_id or key),
+                'canonical_name': str(name or '').strip() or str(ingredient_id),
+                'aliases': set(),
+                'recipe_usage_count': 0,
+                'total_amount_g': 0.0,
+                'total_amount_ml': 0.0,
+                'last_seen_recipe_id': recipe_id,
+            })
+            if name:
+                entry['aliases'].add(str(name).strip())
+            entry['recipe_usage_count'] += 1
+            entry['last_seen_recipe_id'] = recipe_id
+            recipe_sets[key].add(recipe_id)
+            unit = first_present(item, 'ingredientsUnit', 'Ingredients_unit', 'unit', 'dosageUnit', 'unit_name')
+            amount = normalized_amount(first_present(item, 'ingredientsDosage', 'Ingredients_dosage', 'dosage', 'weight', 'num', 'amount'), unit)
+            unit_text = str(unit or '').strip().lower()
+            if amount:
+                if unit_text in {'ml', '毫升', 'l', '升'}:
+                    entry['total_amount_ml'] += amount
+                else:
+                    entry['total_amount_g'] += amount
+    meta = fetch_ingredient_name_map(ingredient_ids)
+    payload = []
+    for key, entry in agg.items():
+        m = meta.get(str(entry['source_ingredient_id'])) or {}
+        name = str(m.get('ingredients_name') or entry['canonical_name'] or '').strip()
+        inferred = infer_thermal_property(name, m.get('categories_1'), m.get('categories_2'), m.get('ingredinent_type'))
+        aliases = sorted((entry['aliases'] | {entry['canonical_name']}) - {name})
+        payload.append({
+            'source_ingredient_id': entry['source_ingredient_id'],
+            'canonical_name': name,
+            'aliases_json': json.dumps(aliases, ensure_ascii=False),
+            'category': inferred['category'],
+            'source_category_1': m.get('categories_1'),
+            'source_category_2': m.get('categories_2'),
+            'ingredient_type': m.get('ingredinent_type'),
+            'automatic': m.get('automatic'),
+            'specific_heat_kj_kg_c': inferred['specific_heat'],
+            'water_fraction': inferred['water_fraction'],
+            'oil_fraction': inferred['oil_fraction'],
+            'boiling_c': inferred.get('boiling_c'),
+            'smoke_point_c': inferred.get('smoke_point_c'),
+            'flash_point_c': inferred.get('flash_point_c'),
+            'autoignition_c': inferred.get('autoignition_c'),
+            'hazard_class': inferred['hazard_class'],
+            'confidence': inferred['confidence'],
+            'source_note': '菜谱配料聚合+' + inferred['source_note'],
+            'recipe_usage_count': entry['recipe_usage_count'],
+            'recipe_count': len(recipe_sets[key]),
+            'total_amount_g': round(entry['total_amount_g'], 3),
+            'total_amount_ml': round(entry['total_amount_ml'], 3),
+            'last_seen_recipe_id': entry['last_seen_recipe_id'],
+        })
+    total = 0
+    for i in range(0, len(payload), 1000):
+        total += upsert_thermal_ingredient_rows(payload[i:i + 1000])
+    return {'recipe_rows': len(rows), 'ingredient_rows': total}
+
+def latest_thermal_sync():
+    ensure_analytics_db()
+    rows = fetch_all("SELECT * FROM ingredient_thermal_sync_runs ORDER BY started_at DESC LIMIT 1")
+    return rows[0] if rows else None
+
+def thermal_knowledge_summary():
+    ensure_analytics_db()
+    row = fetch_one(
+        "SELECT COUNT(*) AS total, COUNT(DISTINCT category) AS categories, "
+        "SUM(CASE WHEN category = '油脂' OR oil_fraction >= 0.5 THEN 1 ELSE 0 END) AS oils, "
+        "SUM(CASE WHEN hazard_class LIKE '%%可燃%%' OR hazard_class LIKE '%%油脂%%' OR hazard_class LIKE '%%挥发%%' THEN 1 ELSE 0 END) AS risky, "
+        "SUM(recipe_usage_count) AS usage_count FROM ingredient_thermal_properties"
+    ) or {}
+    cats = fetch_all("SELECT category, COUNT(*) AS count FROM ingredient_thermal_properties GROUP BY category ORDER BY count DESC, category")
+    hazards = fetch_all("SELECT hazard_class, COUNT(*) AS count FROM ingredient_thermal_properties GROUP BY hazard_class ORDER BY count DESC, hazard_class")
+    return {
+        'total': int(row.get('total') or 0),
+        'categories': int(row.get('categories') or 0),
+        'oils': int(row.get('oils') or 0),
+        'risky': int(row.get('risky') or 0),
+        'usage_count': int(row.get('usage_count') or 0),
+        'category_options': cats,
+        'hazard_options': hazards,
+        'last_sync': latest_thermal_sync(),
+    }
+
 def step_type_label(value):
     labels = {
         '1': '投料',
@@ -5507,6 +5820,101 @@ def watch_structured_device(sn: str, request: Request, authorization: str = Head
     summary = device_structured_summary(real_sn)
     log_event(username, 'structured_watch', request, sn=real_sn, detail={'queued': queued, 'log_count': len(logs)})
     return {'sn': real_sn, 'queued': queued, 'summary': summary}
+
+@app.get("/api/thermal-knowledge")
+def thermal_knowledge(
+    request: Request,
+    keyword: str = Query(''),
+    category: str = Query(''),
+    hazard: str = Query(''),
+    limit: int = Query(300),
+    offset: int = Query(0),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    ensure_analytics_db()
+    limit = max(20, min(int(limit or 300), 1000))
+    offset = max(0, int(offset or 0))
+    where = []
+    args = []
+    if keyword.strip():
+        like = f"%{keyword.strip()}%"
+        where.append("(canonical_name LIKE %s OR aliases_json LIKE %s OR source_category_1 LIKE %s OR source_category_2 LIKE %s OR hazard_class LIKE %s)")
+        args.extend([like, like, like, like, like])
+    if category.strip():
+        where.append("category = %s")
+        args.append(category.strip())
+    if hazard.strip():
+        where.append("hazard_class = %s")
+        args.append(hazard.strip())
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ''
+    total_row = fetch_one(f"SELECT COUNT(*) AS total FROM ingredient_thermal_properties {where_sql}", tuple(args)) or {}
+    rows = fetch_all(
+        f"""
+        SELECT id, source_ingredient_id, canonical_name, aliases_json, category, source_category_1, source_category_2,
+               ingredient_type, automatic, specific_heat_kj_kg_c, water_fraction, oil_fraction, boiling_c,
+               smoke_point_c, flash_point_c, autoignition_c, hazard_class, confidence, source_note,
+               recipe_usage_count, recipe_count, total_amount_g, total_amount_ml, last_seen_recipe_id, updated_at
+        FROM ingredient_thermal_properties
+        {where_sql}
+        ORDER BY recipe_usage_count DESC, recipe_count DESC, canonical_name
+        LIMIT %s OFFSET %s
+        """,
+        tuple(args + [limit, offset]),
+    )
+    items = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item['aliases'] = json.loads(item.get('aliases_json') or '[]')
+        except Exception:
+            item['aliases'] = []
+        items.append(item)
+    summary = thermal_knowledge_summary()
+    log_event(username, 'thermal_knowledge_query', request, detail={'keyword': keyword, 'category': category, 'hazard': hazard, 'limit': limit, 'offset': offset, 'total': total_row.get('total')})
+    return {
+        'summary': summary,
+        'total': int(total_row.get('total') or 0),
+        'limit': limit,
+        'offset': offset,
+        'items': items,
+    }
+
+@app.post("/api/thermal-knowledge/sync")
+def sync_thermal_knowledge(request: Request, recipe_limit: int = Query(20000), authorization: str = Header(None)):
+    username = require_admin(authorization=authorization)
+    ensure_analytics_db()
+    started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    run_id = None
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO ingredient_thermal_sync_runs(sync_type, status, created_by, started_at) VALUES (%s, %s, %s, %s)",
+                ('manual_source_sync', 'RUNNING', username, started),
+            )
+            run_id = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+    try:
+        base = sync_base_ingredients_to_thermal()
+        recipe = sync_recipe_ingredients_to_thermal(limit=recipe_limit)
+        finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        execute_local(
+            "UPDATE ingredient_thermal_sync_runs SET status=%s, base_rows=%s, recipe_rows=%s, ingredient_rows=%s, finished_at=%s WHERE id=%s",
+            ('COMPLETED', base.get('source_rows', 0), recipe.get('recipe_rows', 0), base.get('ingredient_rows', 0) + recipe.get('ingredient_rows', 0), finished, run_id),
+        )
+        result = {'run_id': run_id, 'base': base, 'recipe': recipe, 'summary': thermal_knowledge_summary()}
+        log_event(username, 'thermal_knowledge_sync', request, detail=result)
+        return result
+    except Exception as exc:
+        finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        execute_local(
+            "UPDATE ingredient_thermal_sync_runs SET status=%s, error_message=%s, finished_at=%s WHERE id=%s",
+            ('FAILED', str(exc), finished, run_id),
+        )
+        raise HTTPException(status_code=500, detail=f"热物性库同步失败：{exc}")
 
 @app.get("/api/recipe-search")
 def recipe_search(

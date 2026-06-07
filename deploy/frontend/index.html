@@ -1192,9 +1192,19 @@
 	                            <option value="kws">kW·s 千瓦秒</option>
 	                        </select>
 	                    </div>
+	                    <div class="col-xl-4 col-md-12 d-flex gap-2 flex-wrap">
+	                        <button class="btn btn-sm btn-primary" @click="loadThermalKnowledge(0)" :disabled="thermalKnowledge.loading">查询底座</button>
+	                        <button v-if="isAdmin" class="btn btn-sm btn-outline-primary" @click="syncThermalKnowledge" :disabled="thermalKnowledge.syncLoading">{{ thermalKnowledge.syncLoading ? '同步中' : '同步源库' }}</button>
+	                        <button class="btn btn-sm btn-outline-secondary" @click="resetThermalKnowledgeFilters" :disabled="thermalKnowledge.loading">清筛选</button>
+	                    </div>
 	                </div>
 	                <div class="history-meta mt-3">
-	                    第一版是工程种子库：比热、烟点、闪点、自燃点用于模型解释和风险筛选，不作为最终安全阈值；后续需要用公司实验、供应商数据和菜谱实测持续校准。
+	                    当前优先读取本地数据库底座；未同步时使用前端种子库兜底。比热、烟点、闪点、自燃点用于模型解释和风险筛选，不作为最终安全阈值。
+	                </div>
+	                <div v-if="thermalKnowledge.loading" class="text-muted mt-2">正在读取热物性底座...</div>
+	                <div v-if="thermalKnowledge.error" class="alert alert-danger mt-2">{{ thermalKnowledge.error }}</div>
+	                <div v-if="thermalKnowledge.result?.summary?.last_sync" class="history-meta mt-2">
+	                    最近同步：{{ thermalKnowledge.result.summary.last_sync.started_at }} · {{ thermalKnowledge.result.summary.last_sync.status }} · 食材 {{ thermalKnowledge.result.summary.total }} 条 · 菜谱配料引用 {{ thermalKnowledge.result.summary.usage_count || 0 }} 次
 	                </div>
 	            </div>
 	        </div>
@@ -1240,22 +1250,30 @@
 	                    <tbody>
 	                        <tr v-for="item in filteredThermalKnowledgeItems" :key="item.id">
 	                            <td>
-	                                <strong>{{ item.name }}</strong>
+	                                <strong>{{ item.name || item.canonical_name }}</strong>
+	                                <div v-if="item.source_ingredient_id" class="history-meta">ID {{ item.source_ingredient_id }} · 菜谱 {{ item.recipe_count || 0 }} 款 · 引用 {{ item.recipe_usage_count || 0 }} 次</div>
 	                                <div class="history-meta">{{ (item.aliases || []).join(' / ') || '-' }}</div>
 	                            </td>
 	                            <td>{{ item.category }}</td>
-	                            <td>{{ item.specific_heat }}</td>
+	                            <td>{{ item.specific_heat || item.specific_heat_kj_kg_c }}</td>
 	                            <td>{{ thermalKnowledgeEnergyLabel(item, thermalKnowledgeFilters.targetTemp) }}</td>
 	                            <td>{{ thermalFractionLabel(item) }}</td>
 	                            <td>{{ item.smoke_point_c ? `${item.smoke_point_c}℃ 烟点` : (item.boiling_c ? `${item.boiling_c}℃ 沸点` : '-') }}</td>
 	                            <td>{{ item.flash_point_c ? `${item.flash_point_c}℃` : '-' }}</td>
 	                            <td>{{ item.autoignition_c ? `${item.autoignition_c}℃` : '-' }}</td>
 	                            <td><span class="resource-chip" :class="thermalHazardClass(item.hazard_class)">{{ item.hazard_class }}</span></td>
-	                            <td>{{ item.confidence }}<div class="history-meta">{{ item.source }}</div></td>
+	                            <td>{{ item.confidence }}<div class="history-meta">{{ item.source || item.source_note }}</div></td>
 	                        </tr>
 	                        <tr v-if="!filteredThermalKnowledgeItems.length"><td colspan="10" class="text-muted">没有匹配的物料。</td></tr>
 	                    </tbody>
 	                </table>
+	            </div>
+	            <div class="card-body d-flex justify-content-between align-items-center">
+	                <div class="history-meta">当前显示 {{ filteredThermalKnowledgeItems.length }} / {{ thermalKnowledge.result?.total || thermalKnowledgeSummary.total }} 条</div>
+	                <div class="d-flex gap-2">
+	                    <button class="btn btn-sm btn-outline-secondary" @click="loadThermalKnowledge(Math.max(0, (thermalKnowledge.result?.offset || 0) - (thermalKnowledge.result?.limit || 300)))" :disabled="thermalKnowledge.loading || !(thermalKnowledge.result?.offset)">上一页</button>
+	                    <button class="btn btn-sm btn-outline-secondary" @click="loadThermalKnowledge((thermalKnowledge.result?.offset || 0) + (thermalKnowledge.result?.limit || 300))" :disabled="thermalKnowledge.loading || !thermalKnowledge.result || ((thermalKnowledge.result.offset || 0) + (thermalKnowledge.result.limit || 300) >= thermalKnowledge.result.total)">下一页</button>
+	                </div>
 	            </div>
 	        </div>
 	    </div>
@@ -3008,6 +3026,12 @@
                     roomTemp: 25,
                     targetTemp: 100,
                 },
+                thermalKnowledge: {
+                    loading: false,
+                    syncLoading: false,
+                    error: '',
+                    result: null,
+                },
                 thermalKnowledgeBase: [
                     { id: 'water', name: '水', aliases: ['清水', '饮用水', '开水', '冷水', '热水'], category: '水/汤汁', specific_heat: 4.184, water_fraction: 1, oil_fraction: 0, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '不可燃', confidence: '高', source: '常用物性参考' },
                     { id: 'stock', name: '高汤/汤汁', aliases: ['汤', '汤底', '汤汁'], category: '水/汤汁', specific_heat: 4.0, water_fraction: 0.9, oil_fraction: 0.03, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '低风险含水液体', confidence: '中', source: '工程估算' },
@@ -3583,15 +3607,34 @@
 		            thermalAnalysis() {
 		                return this.buildThermalAnalysis(this.selectedThermalCook);
 		            },
+		            thermalKnowledgeItems() {
+		                const rows = this.thermalKnowledge.result?.items;
+		                if (Array.isArray(rows) && rows.length) {
+		                    return rows.map(row => ({
+		                        ...row,
+		                        name: row.canonical_name || row.name,
+		                        specific_heat: Number(row.specific_heat_kj_kg_c ?? row.specific_heat ?? 0),
+		                        water_fraction: Number(row.water_fraction ?? 0),
+		                        oil_fraction: Number(row.oil_fraction ?? 0),
+		                        source: row.source_note || row.source,
+		                    }));
+		                }
+		                return this.thermalKnowledgeBase;
+		            },
 		            thermalKnowledgeCategories() {
+		                const opts = this.thermalKnowledge.result?.summary?.category_options;
+		                if (Array.isArray(opts) && opts.length) return opts.map(item => item.category).filter(Boolean);
 		                return Array.from(new Set(this.thermalKnowledgeBase.map(item => item.category))).sort();
 		            },
 		            thermalKnowledgeHazards() {
+		                const opts = this.thermalKnowledge.result?.summary?.hazard_options;
+		                if (Array.isArray(opts) && opts.length) return opts.map(item => item.hazard_class).filter(Boolean);
 		                return Array.from(new Set(this.thermalKnowledgeBase.map(item => item.hazard_class))).sort();
 		            },
 		            filteredThermalKnowledgeItems() {
+		                if (this.thermalKnowledge.result?.items) return this.thermalKnowledgeItems;
 		                const keyword = String(this.thermalKnowledgeFilters.keyword || '').trim().toLowerCase();
-		                return this.thermalKnowledgeBase.filter(item => {
+		                return this.thermalKnowledgeItems.filter(item => {
 		                    if (this.thermalKnowledgeFilters.category && item.category !== this.thermalKnowledgeFilters.category) return false;
 		                    if (this.thermalKnowledgeFilters.hazard && item.hazard_class !== this.thermalKnowledgeFilters.hazard) return false;
 		                    if (!keyword) return true;
@@ -3600,6 +3643,15 @@
 		                });
 		            },
 		            thermalKnowledgeSummary() {
+		                const server = this.thermalKnowledge.result?.summary;
+		                if (server && Number(server.total || 0)) {
+		                    return {
+		                        total: Number(server.total || 0),
+		                        categories: Number(server.categories || 0),
+		                        oils: Number(server.oils || 0),
+		                        risky: Number(server.risky || 0),
+		                    };
+		                }
 		                const rows = this.filteredThermalKnowledgeItems;
 		                return {
 		                    total: rows.length,
@@ -4414,11 +4466,70 @@
                 if (tabId === 'emergency') this.loadEmergencyDevices();
                 if (tabId === 'oilThermal') this.loadOilThermal();
                 if (tabId === 'versionStats' && !this.versionStats.result) this.loadVersionStats(false);
+                if (tabId === 'thermalKnowledge' && !this.thermalKnowledge.result) this.loadThermalKnowledge(0);
                 if (tabId === 'logAnalysis') this.prepareLogAnalysis();
                 if ((tabId === 'cookTemperature' || tabId === 'powerDiagnosis') && this.data && !this.selectedCookTemperatureFileIds.length && this.logAnalysisOptions.length) {
                     this.selectedCookTemperatureFileIds = [String(this.logAnalysisOptions[0].id)];
                     this.syncPrimaryTemperatureLog();
                 }
+            },
+            async loadThermalKnowledge(offset = 0) {
+                this.thermalKnowledge.loading = true;
+                this.thermalKnowledge.error = '';
+                try {
+                    const params = new URLSearchParams();
+                    if (this.thermalKnowledgeFilters.keyword) params.set('keyword', this.thermalKnowledgeFilters.keyword);
+                    if (this.thermalKnowledgeFilters.category) params.set('category', this.thermalKnowledgeFilters.category);
+                    if (this.thermalKnowledgeFilters.hazard) params.set('hazard', this.thermalKnowledgeFilters.hazard);
+                    params.set('limit', '300');
+                    params.set('offset', String(Math.max(0, Number(offset || 0))));
+                    const res = await fetch(`/api/thermal-knowledge?${params.toString()}`, { headers: this.authHeaders() });
+                    if (res.status === 401) {
+                        this.logout();
+                        this.loginError = '登录已失效，请重新登录';
+                        return;
+                    }
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        this.thermalKnowledge.error = payload.detail || '热物性库读取失败';
+                        return;
+                    }
+                    this.thermalKnowledge.result = await res.json();
+                } catch (e) {
+                    this.thermalKnowledge.error = '热物性库读取失败，请稍后重试。';
+                } finally {
+                    this.thermalKnowledge.loading = false;
+                }
+            },
+            async syncThermalKnowledge() {
+                if (!this.isAdmin) return;
+                this.thermalKnowledge.syncLoading = true;
+                this.thermalKnowledge.error = '';
+                try {
+                    const res = await fetch('/api/thermal-knowledge/sync?recipe_limit=20000', { method: 'POST', headers: this.authHeaders() });
+                    if (res.status === 401) {
+                        this.logout();
+                        this.loginError = '登录已失效，请重新登录';
+                        return;
+                    }
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        this.thermalKnowledge.error = payload.detail || '热物性库同步失败';
+                        return;
+                    }
+                    await res.json();
+                    await this.loadThermalKnowledge(0);
+                } catch (e) {
+                    this.thermalKnowledge.error = '热物性库同步失败，请稍后重试。';
+                } finally {
+                    this.thermalKnowledge.syncLoading = false;
+                }
+            },
+            resetThermalKnowledgeFilters() {
+                this.thermalKnowledgeFilters.keyword = '';
+                this.thermalKnowledgeFilters.category = '';
+                this.thermalKnowledgeFilters.hazard = '';
+                this.loadThermalKnowledge(0);
             },
 	            async loadAdminStatus() {
 	                if (!this.isAdmin) return;
@@ -4698,7 +4809,7 @@
                 const text = String(name || '').toLowerCase();
                 const normalized = text.replace(/\s+/g, '');
                 const candidates = [];
-                this.thermalKnowledgeBase.forEach(item => {
+                this.thermalKnowledgeItems.forEach(item => {
                     [item.name, ...(item.aliases || [])].forEach(label => {
                         const key = String(label || '').toLowerCase().replace(/\s+/g, '');
                         if (key && normalized.includes(key)) candidates.push({ item, length: key.length });
@@ -4706,7 +4817,7 @@
                 });
                 const match = candidates.sort((a, b) => b.length - a.length)[0]?.item;
                 if (match) return match;
-                if (/ml|毫升|l|升/i.test(unit || '')) return this.thermalKnowledgeBase.find(item => item.id === 'water') || { category: '水/汤汁', specific_heat: 4.184, hazard_class: '低风险含水液体' };
+                if (/ml|毫升|l|升/i.test(unit || '')) return this.thermalKnowledgeItems.find(item => item.id === 'water' || item.name === '水' || item.canonical_name === '水') || { category: '水/汤汁', specific_heat: 4.184, hazard_class: '低风险含水液体' };
                 return { id: 'unknown', name: '未分类', aliases: [], category: '未分类', specific_heat: 3.5, water_fraction: 0.5, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '待归类', confidence: '低', source: '默认兜底' };
             },
             thermalIngredientCategory(name, unit) {
