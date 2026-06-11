@@ -86,6 +86,9 @@ AUTO_PARSE_INTERVAL_SECONDS = int(os.getenv('AUTO_PARSE_INTERVAL_SECONDS', '90')
 AUTO_PARSE_MAX_PACKAGES_PER_CYCLE = int(os.getenv('AUTO_PARSE_MAX_PACKAGES_PER_CYCLE', '2'))
 STRUCTURED_DAY_DETAIL_LIMIT = int(os.getenv('STRUCTURED_DAY_DETAIL_LIMIT', '20'))
 AUTO_PARSE_STALE_MINUTES = int(os.getenv('AUTO_PARSE_STALE_MINUTES', '12'))
+LOG_EVENT_SCAN_VERSION = 2
+LOG_EVENT_SCAN_WORKERS = {}
+LOG_EVENT_SCAN_WORKERS_LOCK = threading.Lock()
 
 LOG_KIND_DEFS = {
     'oildrum_board': {
@@ -753,6 +756,47 @@ def init_analytics_db():
                         created_at DATETIME NOT NULL,
                         INDEX idx_power_cook(cook_job_id, offset_seconds),
                         INDEX idx_power_sn_time(sn, event_time)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS device_log_event_scans (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NOT NULL,
+                        scan_type VARCHAR(64) NOT NULL,
+                        scan_status VARCHAR(32) NOT NULL DEFAULT 'queued',
+                        scan_version INT NOT NULL DEFAULT 0,
+                        event_count INT NOT NULL DEFAULT 0,
+                        error_message TEXT NULL,
+                        attempts INT NOT NULL DEFAULT 0,
+                        queued_at DATETIME NULL,
+                        started_at DATETIME NULL,
+                        finished_at DATETIME NULL,
+                        updated_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_device_log_event_scan(sn, source_file_id, scan_type),
+                        INDEX idx_event_scan_queue(scan_type, scan_status, queued_at),
+                        INDEX idx_event_scan_sn(sn, scan_type, scan_status)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS device_log_events (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NOT NULL,
+                        event_category VARCHAR(64) NOT NULL,
+                        event_type VARCHAR(64) NOT NULL,
+                        event_label VARCHAR(120) NOT NULL,
+                        event_time DATETIME NULL,
+                        matched_keyword VARCHAR(120) NULL,
+                        source_log_name VARCHAR(255) NULL,
+                        raw_log_excerpt TEXT NULL,
+                        event_hash CHAR(64) NOT NULL,
+                        scan_version INT NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_device_log_event(event_hash),
+                        INDEX idx_device_event_sn_time(sn, event_time),
+                        INDEX idx_device_event_category(event_category, event_time),
+                        INDEX idx_device_event_package(sn, source_file_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
                 cur.execute("""
@@ -2127,6 +2171,237 @@ def queue_recent_log_packages_for_device(sn, limit=3):
         )
     return len(rows)
 
+def parse_date_range(start_date, end_date, max_days=370):
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+    except Exception:
+        raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD")
+    if end <= start:
+        raise HTTPException(status_code=400, detail="结束日期不能早于开始日期")
+    if (end - start).days > max_days:
+        raise HTTPException(status_code=400, detail=f"单次查询最多支持 {max_days} 天")
+    return start, end
+
+def get_device_log_files_in_range(sn, start, end, limit=1000):
+    rows = fetch_all(
+        "SELECT id, sn, file_length, file_name, pic AS url, type, create_time, update_time, cos_deleted "
+        "FROM machine_ftp WHERE sn=%s ORDER BY create_time DESC LIMIT %s",
+        (sn, max(1, min(int(limit or 1000), 2000))),
+        source=True,
+        database='btyc',
+    )
+    selected = []
+    for row in rows:
+        row['file_size_label'] = format_bytes(row.get('file_length'))
+        row['downloadable'] = bool(row.get('url')) and not bool(row.get('cos_deleted'))
+        row['log_time_hint'] = infer_log_time_from_filename(row.get('file_name'))
+        package_time = to_mysql_dt(row.get('log_time_hint')) or to_mysql_dt(row.get('create_time'))
+        if package_time and start <= package_time < end:
+            selected.append(row)
+    upsert_log_package_index(sn, selected)
+    attach_log_package_statuses(sn, selected)
+    return selected
+
+def queue_temperature_calibration_scans(sn, rows, retry_failed=False):
+    if not rows or not ensure_analytics_db():
+        return 0
+    now = datetime.now().replace(microsecond=0)
+    queued = 0
+    for row in rows:
+        if not row.get('downloadable') or parse_mb_value(row.get('file_length')) in (None, 0):
+            continue
+        file_id = int(row['id'])
+        existing = fetch_one(
+            "SELECT scan_status, scan_version, attempts FROM device_log_event_scans "
+            "WHERE sn=%s AND source_file_id=%s AND scan_type='temperature_calibration'",
+            (sn, file_id),
+        )
+        if existing:
+            status = existing.get('scan_status')
+            current_version = int(existing.get('scan_version') or 0)
+            attempts = int(existing.get('attempts') or 0)
+            if status == 'completed' and current_version == LOG_EVENT_SCAN_VERSION:
+                continue
+            if status in ('queued', 'scanning'):
+                continue
+            if status == 'failed' and (not retry_failed or attempts >= 4):
+                continue
+            execute_local(
+                """
+                UPDATE device_log_event_scans
+                SET scan_status='queued', error_message=NULL, queued_at=%s, updated_at=%s
+                WHERE sn=%s AND source_file_id=%s AND scan_type='temperature_calibration'
+                """,
+                (now, now, sn, file_id),
+            )
+        else:
+            execute_local(
+                """
+                INSERT INTO device_log_event_scans(
+                    sn, source_file_id, scan_type, scan_status, scan_version,
+                    event_count, queued_at, updated_at
+                ) VALUES (%s,%s,'temperature_calibration','queued',0,0,%s,%s)
+                """,
+                (sn, file_id, now, now),
+            )
+        queued += 1
+    return queued
+
+def temperature_calibration_scan_worker(sn):
+    try:
+        while True:
+            row = fetch_one(
+                """
+                SELECT source_file_id
+                FROM device_log_event_scans
+                WHERE sn=%s AND scan_type='temperature_calibration' AND scan_status='queued'
+                ORDER BY queued_at ASC, source_file_id ASC
+                LIMIT 1
+                """,
+                (sn,),
+            )
+            if not row:
+                break
+            file_id = int(row['source_file_id'])
+            now = datetime.now().replace(microsecond=0)
+            execute_local(
+                """
+                UPDATE device_log_event_scans
+                SET scan_status='scanning', started_at=%s, attempts=attempts+1,
+                    error_message=NULL, updated_at=%s
+                WHERE sn=%s AND source_file_id=%s AND scan_type='temperature_calibration'
+                """,
+                (now, now, sn, file_id),
+            )
+            try:
+                event_count = scan_temperature_calibration_package(sn, file_id)
+                finished = datetime.now().replace(microsecond=0)
+                execute_local(
+                    """
+                    UPDATE device_log_event_scans
+                    SET scan_status='completed', scan_version=%s, event_count=%s,
+                        finished_at=%s, updated_at=%s
+                    WHERE sn=%s AND source_file_id=%s AND scan_type='temperature_calibration'
+                    """,
+                    (LOG_EVENT_SCAN_VERSION, event_count, finished, finished, sn, file_id),
+                )
+            except Exception as exc:
+                finished = datetime.now().replace(microsecond=0)
+                execute_local(
+                    """
+                    UPDATE device_log_event_scans
+                    SET scan_status='failed', error_message=%s, finished_at=%s, updated_at=%s
+                    WHERE sn=%s AND source_file_id=%s AND scan_type='temperature_calibration'
+                    """,
+                    (str(exc)[:1000], finished, finished, sn, file_id),
+                )
+            gc.collect()
+    finally:
+        with LOG_EVENT_SCAN_WORKERS_LOCK:
+            LOG_EVENT_SCAN_WORKERS.pop(sn, None)
+
+def kick_temperature_calibration_scan(sn):
+    with LOG_EVENT_SCAN_WORKERS_LOCK:
+        running = LOG_EVENT_SCAN_WORKERS.get(sn)
+        if running and running.is_alive():
+            return False
+        thread = threading.Thread(
+            target=temperature_calibration_scan_worker,
+            args=(sn,),
+            name=f"zhiku-calibration-scan-{sn[-6:]}",
+            daemon=True,
+        )
+        LOG_EVENT_SCAN_WORKERS[sn] = thread
+        thread.start()
+        return True
+
+def temperature_calibration_payload(sn, start, end, rows):
+    package_ids = [int(row['id']) for row in rows if row.get('id')]
+    scans = []
+    if package_ids:
+        placeholders = ','.join(['%s'] * len(package_ids))
+        scans = fetch_all(
+            f"""
+            SELECT source_file_id, scan_status, event_count, error_message, attempts,
+                   queued_at, started_at, finished_at
+            FROM device_log_event_scans
+            WHERE sn=%s AND scan_type='temperature_calibration'
+              AND source_file_id IN ({placeholders})
+            ORDER BY COALESCE(finished_at, started_at, queued_at) DESC
+            """,
+            tuple([sn] + package_ids),
+        )
+    scan_map = {int(row['source_file_id']): row for row in scans}
+    package_map = {int(row['id']): row for row in rows if row.get('id')}
+    event_rows = fetch_all(
+        """
+        SELECT id, source_file_id, event_type, event_label, event_time, matched_keyword,
+               source_log_name, raw_log_excerpt
+        FROM device_log_events
+        WHERE sn=%s AND event_category='temperature_calibration'
+          AND event_time >= %s AND event_time < %s
+        ORDER BY event_time DESC, id DESC
+        LIMIT 1000
+        """,
+        (sn, start, end),
+    )
+    deduped = []
+    seen = set()
+    for event in event_rows:
+        key = (
+            event.get('event_time'),
+            re.sub(r'\s+', ' ', str(event.get('raw_log_excerpt') or '')),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        package = package_map.get(int(event.get('source_file_id') or 0), {})
+        event['package_name'] = package.get('file_name')
+        deduped.append(event)
+    status_counts = Counter((row.get('scan_status') or 'pending') for row in scans)
+    pending_count = max(0, len(package_ids) - len(scans))
+    failed_rows = [
+        {
+            'source_file_id': row.get('source_file_id'),
+            'package_name': (package_map.get(int(row.get('source_file_id') or 0)) or {}).get('file_name'),
+            'error': row.get('error_message'),
+        }
+        for row in scans if row.get('scan_status') == 'failed'
+    ][:12]
+    event_days = {str(row.get('event_time'))[:10] for row in deduped if row.get('event_time')}
+    event_type_counts = Counter(row.get('event_type') or 'unknown' for row in deduped)
+    return {
+        'sn': sn,
+        'range': {
+            'start_date': start.strftime("%Y-%m-%d"),
+            'end_date': (end - timedelta(days=1)).strftime("%Y-%m-%d"),
+        },
+        'summary': {
+            'event_count': len(deduped),
+            'completed_event_count': int(event_type_counts.get('temperature_calibration_completed', 0)),
+            'failed_event_count': int(event_type_counts.get('temperature_calibration_failed', 0)),
+            'parameter_event_count': int(event_type_counts.get('temperature_calibration_parameter', 0)),
+            'status_event_count': int(event_type_counts.get('temperature_calibration_status', 0)),
+            'event_day_count': len(event_days),
+            'package_count': len(package_ids),
+            'completed_packages': int(status_counts.get('completed', 0)),
+            'queued_packages': int(status_counts.get('queued', 0)),
+            'scanning_packages': int(status_counts.get('scanning', 0)),
+            'failed_packages': int(status_counts.get('failed', 0)),
+            'pending_packages': pending_count,
+            'completion_rate': round(status_counts.get('completed', 0) * 100 / len(package_ids), 1) if package_ids else 0,
+        },
+        'events': deduped,
+        'failed_packages': failed_rows,
+        'status_explanation': {
+            'completed': '已扫描并写入本地事件库，后续查询不再下载该日志包。',
+            'queued': '等待后台轻量扫描，只提取校准事件，不依赖菜谱匹配。',
+            'scanning': '正在下载并扫描日志包。',
+            'failed': '该日志包扫描失败，可重新补齐；其他包不受影响。',
+        },
+    }
+
 def recover_stale_parsing_packages(sn=None):
     if not ensure_analytics_db():
         return 0
@@ -2608,6 +2883,143 @@ def is_android_log_name(name):
 def is_temperature_log_name(name):
     base = (name or '').lower()
     return base.startswith('temperature') and base.endswith('.log')
+
+TEMPERATURE_CALIBRATION_PATTERNS = [
+    re.compile(r'温度.{0,16}(?:校准|校正|矫正|标定|修正)', re.I),
+    re.compile(r'(?:校准|校正|矫正|标定|修正).{0,16}温度', re.I),
+    re.compile(r'(?:temperature|temp).{0,20}(?:calibrat|correct|adjust)', re.I),
+    re.compile(r'(?:calibrat|correct|adjust).{0,20}(?:temperature|temp)', re.I),
+]
+
+def classify_temperature_calibration_line(line):
+    text = str(line or '').strip()
+    matched = None
+    for pattern in TEMPERATURE_CALIBRATION_PATTERNS:
+        hit = pattern.search(text)
+        if hit:
+            matched = hit.group(0)
+            break
+    if not matched:
+        return None
+    if re.search(r'操作结果[：:]\s*false|失败|异常|取消|fail|error|cancel', text, re.I):
+        event_type = 'temperature_calibration_failed'
+        event_label = '温度校正失败'
+    elif re.search(r'操作结果[：:]\s*true', text, re.I) or re.search(r'["\']opType["\']\s*:\s*["\']TempCalibrate', text, re.I):
+        event_type = 'temperature_calibration_completed'
+        event_label = '温度校正完成'
+    elif re.search(r'最近.{0,8}(?:校准|校正|矫正|标定|修正).{0,8}时间', text, re.I):
+        event_type = 'temperature_calibration_status'
+        event_label = '校正状态读取'
+    elif re.search(r'设置.{0,12}(?:参数|标定温度)|tempCoefficient', text, re.I):
+        event_type = 'temperature_calibration_parameter'
+        event_label = '校正参数设置'
+    elif re.search(r'完成|成功|结束|完毕|finish|complete|success', text, re.I):
+        event_type = 'temperature_calibration_completed'
+        event_label = '温度校正完成'
+    elif re.search(r'开始|启动|进入|start|begin', text, re.I):
+        event_type = 'temperature_calibration_started'
+        event_label = '温度校正开始'
+    else:
+        event_type = 'temperature_calibration_event'
+        event_label = '温度校正动作'
+    return {
+        'event_category': 'temperature_calibration',
+        'event_type': event_type,
+        'event_label': event_label,
+        'matched_keyword': matched[:120],
+    }
+
+def scan_temperature_calibration_text(text, source_log_name, fallback_time=None):
+    events = []
+    seen = set()
+    for line in str(text or '').splitlines():
+        classification = classify_temperature_calibration_line(line)
+        if not classification:
+            continue
+        ts = parse_log_ts(line) or fallback_time
+        raw = line.strip()[:1200]
+        dedupe_key = (ts.isoformat() if ts else '', re.sub(r'\s+', ' ', raw))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        events.append({
+            **classification,
+            'event_time': ts,
+            'source_log_name': source_log_name,
+            'raw_log_excerpt': raw,
+        })
+    return events
+
+def persist_device_log_events(sn, source_file_id, scan_type, events):
+    if not ensure_analytics_db():
+        return 0
+    now = datetime.now().replace(microsecond=0)
+    execute_local(
+        "DELETE FROM device_log_events WHERE sn=%s AND source_file_id=%s AND event_category=%s",
+        (sn, int(source_file_id), scan_type),
+    )
+    payload = []
+    for event in events or []:
+        raw = str(event.get('raw_log_excerpt') or '')
+        event_time = to_mysql_dt(event.get('event_time'))
+        event_hash = hashlib.sha256(
+            f"{sn}|{int(source_file_id)}|{scan_type}|{event_time}|{raw}".encode('utf-8')
+        ).hexdigest()
+        payload.append((
+            sn, int(source_file_id), scan_type, event.get('event_type') or 'event',
+            event.get('event_label') or '日志事件', event_time, event.get('matched_keyword'),
+            event.get('source_log_name'), raw, event_hash, LOG_EVENT_SCAN_VERSION, now,
+        ))
+    executemany_local(
+        """
+        INSERT IGNORE INTO device_log_events(
+            sn, source_file_id, event_category, event_type, event_label, event_time,
+            matched_keyword, source_log_name, raw_log_excerpt, event_hash, scan_version, created_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        payload,
+    )
+    return len(payload)
+
+def scan_temperature_calibration_package(sn, source_file_id):
+    file_row = fetch_one(
+        "SELECT id, sn, file_name, file_length, pic AS url, create_time, cos_deleted "
+        "FROM machine_ftp WHERE id=%s AND sn=%s LIMIT 1",
+        (int(source_file_id), sn),
+        source=True,
+        database='btyc',
+    )
+    if not file_row or not file_row.get('url') or file_row.get('cos_deleted'):
+        raise ValueError('日志包不可下载或已被删除')
+    zip_bytes = download_log_zip(file_row['url'])
+    try:
+        zf = zipfile.ZipFile(BytesIO(zip_bytes))
+    except zipfile.BadZipFile as exc:
+        raise ValueError('下载内容不是有效 ZIP') from exc
+    fallback_time = to_mysql_dt(infer_log_time_from_filename(file_row.get('file_name'))) or to_mysql_dt(file_row.get('create_time'))
+    events = []
+    with zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            base = Path(info.filename).name
+            if not is_android_log_name(base):
+                continue
+            text = text_from_zip_member(zf, info, max_bytes=16 * 1024 * 1024)
+            events.extend(scan_temperature_calibration_text(text, base, fallback_time=fallback_time))
+    deduped = {}
+    for event in events:
+        key = (
+            event.get('event_time'),
+            re.sub(r'\s+', ' ', str(event.get('raw_log_excerpt') or '')),
+        )
+        deduped[key] = event
+    return persist_device_log_events(
+        sn,
+        source_file_id,
+        'temperature_calibration',
+        sorted(deduped.values(), key=lambda item: item.get('event_time') or datetime.min),
+    )
 
 def parse_android_pot_temperature_series(text, max_points=300000):
     temp_re = re.compile(r'温度:_?(-?\d+)_(-?\d+)_(-?\d+)')
@@ -6303,13 +6715,7 @@ def cook_temperature_structured(sn: str, request: Request, day: str = Query(None
     mark_device_watched(real_sn, username=username, priority=25)
     target_day = day or datetime.now().strftime("%Y-%m-%d")
     result = structured_cook_temperature_by_day(real_sn, target_day, limit=limit)
-    try:
-        queued = queue_recent_log_packages_for_device(real_sn, limit=2)
-        if queued:
-            kick_auto_parse_once()
-        result['structured_summary'] = device_structured_summary(real_sn)
-    except Exception as exc:
-        print(f"structured read queue wake failed: {exc}")
+    result['structured_summary'] = device_structured_summary(real_sn)
     log_event(
         username,
         'cook_temperature_structured',
@@ -6335,6 +6741,77 @@ def watch_structured_device(sn: str, request: Request, authorization: str = Head
     summary = device_structured_summary(real_sn)
     log_event(username, 'structured_watch', request, sn=real_sn, detail={'queued': queued, 'log_count': len(logs)})
     return {'sn': real_sn, 'queued': queued, 'summary': summary}
+
+@app.get("/api/temperature-calibrations/{sn}")
+def temperature_calibrations(
+    sn: str,
+    request: Request,
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    auto_queue: int = Query(1),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    end_text = end_date or datetime.now().strftime("%Y-%m-%d")
+    start_text = start_date or (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    start, end = parse_date_range(start_text, end_text)
+    mark_device_watched(real_sn, username=username, priority=15)
+    rows = get_device_log_files_in_range(real_sn, start, end)
+    queued = queue_temperature_calibration_scans(real_sn, rows, retry_failed=False) if auto_queue else 0
+    if queued:
+        kick_temperature_calibration_scan(real_sn)
+    result = temperature_calibration_payload(real_sn, start, end, rows)
+    result['newly_queued'] = queued
+    log_event(
+        username,
+        'temperature_calibration_search',
+        request,
+        sn=real_sn,
+        detail={
+            'start_date': start_text,
+            'end_date': end_text,
+            'event_count': result.get('summary', {}).get('event_count'),
+            'package_count': len(rows),
+            'newly_queued': queued,
+        },
+    )
+    return result
+
+@app.post("/api/temperature-calibrations/{sn}/sync")
+def sync_temperature_calibrations(
+    sn: str,
+    request: Request,
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    retry_failed: int = Query(1),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    end_text = end_date or datetime.now().strftime("%Y-%m-%d")
+    start_text = start_date or (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    start, end = parse_date_range(start_text, end_text)
+    mark_device_watched(real_sn, username=username, priority=5)
+    rows = get_device_log_files_in_range(real_sn, start, end)
+    queued = queue_temperature_calibration_scans(real_sn, rows, retry_failed=bool(retry_failed))
+    started = kick_temperature_calibration_scan(real_sn) if queued else False
+    result = temperature_calibration_payload(real_sn, start, end, rows)
+    result.update({'newly_queued': queued, 'worker_started': started})
+    log_event(
+        username,
+        'temperature_calibration_sync',
+        request,
+        sn=real_sn,
+        detail={
+            'start_date': start_text,
+            'end_date': end_text,
+            'package_count': len(rows),
+            'newly_queued': queued,
+            'retry_failed': bool(retry_failed),
+        },
+    )
+    return result
 
 @app.get("/api/thermal-knowledge")
 def thermal_knowledge(

@@ -1838,9 +1838,90 @@
         </div>
 	        </section>
 
+            <section v-if="data" v-show="activeTab === 'temperatureCalibration'">
+                <div class="card mb-3">
+                    <div class="card-header">日志数据范围</div>
+                    <div class="card-body">
+                        <div class="row g-2 align-items-end">
+                            <div class="col-lg-3 col-md-6">
+                                <label class="filter-label">开始日期</label>
+                                <input type="date" class="form-control form-control-sm" v-model="temperatureCalibration.startDate">
+                            </div>
+                            <div class="col-lg-3 col-md-6">
+                                <label class="filter-label">结束日期</label>
+                                <input type="date" class="form-control form-control-sm" v-model="temperatureCalibration.endDate">
+                            </div>
+                            <div class="col-lg-3 col-md-6">
+                                <label class="filter-label">结果关键字</label>
+                                <input class="form-control form-control-sm" v-model="temperatureCalibration.keyword" placeholder="原始日志 / 文件名">
+                            </div>
+                            <div class="col-lg-3 col-md-6 d-flex gap-2 flex-wrap">
+                                <button class="btn btn-sm btn-primary" @click="loadTemperatureCalibrations(true)" :disabled="temperatureCalibration.loading">
+                                    {{ temperatureCalibration.loading ? '读取中' : '查询校正记录' }}
+                                </button>
+                                <button class="btn btn-sm btn-outline-primary" @click="syncTemperatureCalibrations" :disabled="temperatureCalibration.syncing">
+                                    {{ temperatureCalibration.syncing ? '正在补齐' : '补齐缺失日志' }}
+                                </button>
+                            </div>
+                        </div>
+                        <div class="history-meta mt-2">
+                            查询会先读云端本地事件库；未扫描的日志包自动进入后台队列。校正检索不依赖菜谱或生产作业匹配，因此不会因“匹配作业失败”丢失校准动作。
+                        </div>
+                    </div>
+                </div>
+
+                <div v-if="temperatureCalibration.error" class="alert alert-danger">{{ temperatureCalibration.error }}</div>
+                <template v-if="temperatureCalibration.result">
+                    <div class="row g-3 mb-3">
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.event_count || 0 }}</div><div class="admin-metric-label">校正相关证据</div></div></div>
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.completed_event_count || 0 }}</div><div class="admin-metric-label">确认完成记录</div></div></div>
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.completed_packages || 0 }}/{{ temperatureCalibration.result.summary.package_count || 0 }}</div><div class="admin-metric-label">已扫描日志包</div></div></div>
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.queued_packages || 0 }}</div><div class="admin-metric-label">等待后台扫描</div></div></div>
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.scanning_packages || 0 }}</div><div class="admin-metric-label">正在扫描</div></div></div>
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.failed_packages || 0 }}</div><div class="admin-metric-label">扫描失败</div></div></div>
+                    </div>
+
+                    <div v-if="temperatureCalibration.result.summary.queued_packages || temperatureCalibration.result.summary.scanning_packages" class="alert alert-info">
+                        后台正在补齐：等待 {{ temperatureCalibration.result.summary.queued_packages || 0 }} 包，正在扫描 {{ temperatureCalibration.result.summary.scanning_packages || 0 }} 包。页面会自动刷新，已完成结果可立即查看。
+                    </div>
+                    <div v-if="temperatureCalibration.result.failed_packages && temperatureCalibration.result.failed_packages.length" class="alert alert-warning">
+                        部分日志包失败，不影响其他结果。
+                        <span v-for="item in temperatureCalibration.result.failed_packages" :key="item.source_file_id" class="d-inline-block me-2">
+                            {{ item.package_name || item.source_file_id }}（{{ item.error || '扫描失败' }}）
+                        </span>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <span>温度校正事件</span>
+                            <span class="history-meta">显示 {{ filteredTemperatureCalibrationEvents.length }} 条</span>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-striped mb-0">
+                                <thead><tr><th>时间</th><th>类型</th><th>匹配字段</th><th>日志文件</th><th>原始证据</th></tr></thead>
+                                <tbody>
+                                    <tr v-for="event in filteredTemperatureCalibrationEvents" :key="event.id">
+                                        <td class="text-nowrap">{{ event.event_time || '-' }}</td>
+                                        <td><span class="badge bg-primary">{{ event.event_label }}</span></td>
+                                        <td>{{ event.matched_keyword || '-' }}</td>
+                                        <td class="text-break">{{ event.package_name || event.source_log_name || '-' }}</td>
+                                        <td class="text-break">{{ event.raw_log_excerpt || '-' }}</td>
+                                    </tr>
+                                    <tr v-if="!filteredTemperatureCalibrationEvents.length">
+                                        <td colspan="5" class="text-center text-muted py-4">
+                                            {{ temperatureCalibration.result.summary.completed_packages < temperatureCalibration.result.summary.package_count ? '仍在扫描日志，完成后会自动显示；当前已扫描范围内暂未发现温度校正记录。' : '当前日期范围内未发现温度校正记录。' }}
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </template>
+            </section>
+
 	        <section v-if="data" v-show="activeTab === 'cookTemperature'">
 	            <div class="card mb-3">
-	                <div class="card-header">结构化作业库</div>
+	                <div class="card-header">第一步：读取已有结构化作业</div>
 	                <div class="card-body">
 	                    <div class="row g-3 align-items-end">
 	                        <div class="col-xl-3 col-md-6">
@@ -1861,16 +1942,16 @@
 	                        </div>
 	                        <div class="col-xl-3 col-md-6 d-flex gap-2 flex-wrap">
 	                            <button class="btn btn-sm btn-primary" @click="loadStructuredCookTemperature" :disabled="structuredTemperature.loading">
-	                                {{ structuredTemperature.loading ? '读取中' : '读入库数据' }}
+	                                {{ structuredTemperature.loading ? '读取中' : '读取已有结果' }}
 	                            </button>
-	                            <button class="btn btn-sm btn-outline-primary" @click="watchStructuredDevice">关注并排队解析</button>
+	                            <button class="btn btn-sm btn-outline-primary" @click="watchStructuredDevice">补齐最近日志</button>
 	                        </div>
 	                    </div>
 	                    <div class="history-meta mt-2">
 	                        覆盖范围：{{ data.structured_summary && data.structured_summary.coverage_start ? data.structured_summary.coverage_start : '-' }}
 	                        ~ {{ data.structured_summary && data.structured_summary.coverage_end ? data.structured_summary.coverage_end : '-' }}；
 	                        最近入库：{{ data.structured_summary && data.structured_summary.last_stored_at ? data.structured_summary.last_stored_at : '-' }}。
-	                        默认先读云端本地结构化库；缺数据时再用下面的日志包解析补齐。
+	                        “读取已有结果”只查询云端本地数据库，不下载日志、不创建解析任务。当天缺数据时，再进入第二步补齐原始日志。
 	                    </div>
 	                    <div v-if="structuredTemperature.error" class="alert alert-warning mt-2">{{ structuredTemperature.error }}</div>
 	                    <div v-if="data.structured_summary && (data.structured_summary.recent_errors || []).length" class="mt-2">
@@ -1881,7 +1962,7 @@
 	                </div>
 	            </div>
 	            <div class="card mb-3">
-	                <div class="card-header">日志包补齐解析</div>
+	                <div class="card-header">第二步：缺失时补齐原始日志</div>
 	                <div class="card-body">
 	                    <div class="row g-2 align-items-start mb-2">
                             <div class="col-xl-7">
@@ -1896,13 +1977,18 @@
                                 </div>
                             </div>
                             <div class="col-xl-5 d-flex gap-2 align-items-start flex-wrap">
-                                <button class="btn btn-sm btn-primary" @click="loadCookTemperature" :disabled="cookTemperatureLoading || !selectedCookTemperatureFiles.length || cookTemperatureEstimate.overHardLimit">解析温度</button>
+                                <button class="btn btn-sm btn-primary" @click="loadCookTemperature" :disabled="cookTemperatureLoading || !selectedCookTemperatureFiles.length || cookTemperatureEstimate.overHardLimit || selectedTemperatureFilesBusy">
+                                    {{ selectedTemperatureFilesStored ? '读取已入库结果' : '解析并入库' }}
+                                </button>
                                 <button class="btn btn-sm btn-outline-secondary" @click="selectRecentTemperatureLogs(3)" :disabled="cookTemperatureLoading">选最近3包</button>
                                 <button class="btn btn-sm btn-outline-secondary" @click="selectedCookTemperatureFileIds = []" :disabled="cookTemperatureLoading">清空选择</button>
                                 <a v-if="selectedLogFileMeta && selectedLogFileMeta.downloadable" class="btn btn-sm btn-outline-success" :href="`/api/device-log-download/${selectedLogFileMeta.id}?token=${encodeURIComponent(auth.token)}`" target="_blank">下载首选</a>
                                 <div class="selection-summary w-100">
                                     首选：{{ selectedLogFileMeta ? (selectedLogFileMeta.log_time_hint || selectedLogFileMeta.create_time || '-') : '-' }}；
                                     缓存：{{ cookTemperatureCacheSummary }}
+                                </div>
+                                <div v-if="selectedTemperatureFilesBusy" class="selection-summary w-100 text-primary">
+                                    所选日志正在后台排队或解析，请等待状态刷新；不要重复提交同一个包。
                                 </div>
                             </div>
 	                    </div>
@@ -3230,6 +3316,17 @@
                     error: '',
                     lastLoadedDay: '',
                 },
+                temperatureCalibration: {
+                    startDate: '',
+                    endDate: '',
+                    keyword: '',
+                    loading: false,
+                    syncing: false,
+                    error: '',
+                    result: null,
+                    pollTimer: null,
+                    pollCount: 0,
+                },
                 cookTemperatureProgress: {
                     status: 'idle',
                     stepIndex: 0,
@@ -3258,7 +3355,7 @@
 		                monthLoading: '',
 		                monthDetails: {},
 				                activeTab: 'home',
-	                appVersion: '2026.06.07-thermal-knowledge1',
+		                appVersion: '2026.06.11-temperature-calibration1',
 		                navGroups: [
 		                    { title: '工作台', tabs: [
 		                        { id: 'home', label: '工作台', icon: '⌂', desc: '搜索、历史、入口' },
@@ -3275,6 +3372,7 @@
 		                    { title: '日志诊断', tabs: [
 		                        { id: 'logAnalysis', label: '日志结论', icon: 'D', desc: '故障、油路、证据' },
 		                        { id: 'cookTemperature', label: '温度诊断', icon: 'T', desc: '单次锅体温度' },
+                                { id: 'temperatureCalibration', label: '温度校正', icon: 'C', desc: '校准动作、时间、证据' },
 		                        { id: 'powerDiagnosis', label: '功率诊断', icon: 'P', desc: '指令、输出、能量' },
 		                        { id: 'thermalModel', label: '热过程分析', icon: 'H', desc: '能量、投料、预测' },
 		                    ]},
@@ -3384,6 +3482,7 @@
 	            this.loadSavedRecipeQueries();
 	            this.initRecipeSearchDates();
 	            this.initStructuredTemperatureDate();
+                this.initTemperatureCalibrationDates();
 	        },
 	        computed: {
 		            pageTitle() {
@@ -3398,6 +3497,7 @@
 		                    thermalKnowledge: '热物性库',
 		                    logAnalysis: '日志结论',
 		                    cookTemperature: '温度诊断',
+                            temperatureCalibration: '温度校正',
 		                    powerDiagnosis: '功率诊断',
 		                    thermalModel: '热过程分析',
 		                    oilThermal: '温控样例',
@@ -3415,6 +3515,7 @@
 		                if (this.activeTab === 'thermalKnowledge') return '维护食材分类、比热容、升温能量和燃烧参考温度，供热过程模型调用';
 		                if (this.activeTab === 'logAnalysis') return '按日志包解析故障码、油路、温控和原始证据';
 		                if (this.activeTab === 'cookTemperature') return '对齐单次烹饪的菜谱步骤、真实动作和锅体温度';
+                        if (this.activeTab === 'temperatureCalibration') return '按设备和日期范围检索自动温度校正动作及原始日志证据';
 		                if (this.activeTab === 'powerDiagnosis') return '对齐指令功率、实际输出功率、温度和能量值';
 		                if (this.activeTab === 'thermalModel') return '把单道菜的能量输入、投料吸热、理论锅温和实测偏差放到同一张图里';
 		                if (this.activeTab === 'admin') return '查看账号、缓存、导出和系统使用审计';
@@ -3441,7 +3542,7 @@
 	                return this.activeGroup ? this.activeGroup.tabs : [];
 	            },
 		            isDeviceTab() {
-		                return ['overview', 'recipes', 'intervals', 'logs', 'logAnalysis', 'cookTemperature', 'powerDiagnosis', 'thermalModel'].includes(this.activeTab);
+		                return ['overview', 'recipes', 'intervals', 'logs', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'powerDiagnosis', 'thermalModel'].includes(this.activeTab);
 		            },
 	            showDeviceSearch() {
 	                return this.isDeviceTab;
@@ -3458,6 +3559,7 @@
 		                if (this.activeTab === 'thermalKnowledge') return '热物性库是工程底座，数值需要用实验和实测持续校准。';
 		                if (this.activeTab === 'logAnalysis') return '先选日志包，再生成诊断证据。';
 		                if (this.activeTab === 'cookTemperature') return '温度诊断依赖日志包，缺口会提示。';
+                        if (this.activeTab === 'temperatureCalibration') return '先读本地事件库，未扫描日志由后台自动补齐。';
 		                if (this.activeTab === 'powerDiagnosis') return '功率诊断复用日志解析缓存。';
 		                if (this.activeTab === 'thermalModel') return '第一版是可解释工程近似，真实安全判断仍要结合日志、视频和人工复核。';
 		                if (this.activeTab === 'safetyOverview') return '安全总览基于本地已入库的作业数据，建议先同步或解析更多日志包。';
@@ -3534,6 +3636,20 @@
                                     { id: 'selectRecentLogs', label: '选最近3包', primary: true },
                                     { id: 'logs', label: '日志包' },
                                     { id: 'logAnalysis', label: '日志结论' },
+                                ],
+                            },
+                            temperatureCalibration: {
+                                title: '在长时间范围内定位设备温度校正动作',
+                                text: '用于研发和售后确认设备何时执行过温度校准、校正或标定。结果独立于菜谱匹配，日志包只扫描一次并长期复用。',
+                                meta: [
+                                    this.temperatureCalibration.result ? `${this.temperatureCalibration.result.summary.event_count || 0} 条记录` : '等待查询',
+                                    this.temperatureCalibration.result ? `${this.temperatureCalibration.result.summary.completed_packages || 0}/${this.temperatureCalibration.result.summary.package_count || 0} 包已扫描` : '本地事件库优先',
+                                    '缺失自动补齐',
+                                ],
+                                actions: [
+                                    { id: 'loadTemperatureCalibration', label: '查询当前范围', primary: true },
+                                    { id: 'cookTemperature', label: '温度诊断' },
+                                    { id: 'logs', label: '日志包' },
                                 ],
                             },
                             powerDiagnosis: {
@@ -4020,6 +4136,25 @@
                 const selected = new Set((this.selectedCookTemperatureFileIds || []).map(String));
                 return this.logAnalysisOptions.filter(log => selected.has(String(log.id)));
             },
+            selectedTemperatureFilesBusy() {
+                return this.selectedCookTemperatureFiles.some(log => ['queued', 'parsing'].includes(log.parse_status));
+            },
+            selectedTemperatureFilesStored() {
+                return this.selectedCookTemperatureFiles.length > 0
+                    && this.selectedCookTemperatureFiles.every(log => log.storage_status === 'stored');
+            },
+            filteredTemperatureCalibrationEvents() {
+                const rows = (this.temperatureCalibration.result && this.temperatureCalibration.result.events) || [];
+                const keyword = String(this.temperatureCalibration.keyword || '').trim().toLowerCase();
+                if (!keyword) return rows;
+                return rows.filter(row => [
+                    row.event_label,
+                    row.matched_keyword,
+                    row.package_name,
+                    row.source_log_name,
+                    row.raw_log_excerpt,
+                ].join(' ').toLowerCase().includes(keyword));
+            },
             cookTemperatureEstimate() {
                 const files = this.selectedCookTemperatureFiles;
                 const totalMb = files.reduce((sum, log) => sum + this.logSizeMb(log), 0);
@@ -4196,6 +4331,89 @@
 	            initStructuredTemperatureDate() {
 	                this.structuredTemperature.date = this.formatDateInput(new Date());
 	            },
+                initTemperatureCalibrationDates() {
+                    const end = new Date();
+                    const start = new Date(end.getTime() - 41 * 24 * 3600 * 1000);
+                    this.temperatureCalibration.startDate = this.formatDateInput(start);
+                    this.temperatureCalibration.endDate = this.formatDateInput(end);
+                },
+                stopTemperatureCalibrationPolling() {
+                    if (this.temperatureCalibration.pollTimer) clearTimeout(this.temperatureCalibration.pollTimer);
+                    this.temperatureCalibration.pollTimer = null;
+                },
+                scheduleTemperatureCalibrationPolling() {
+                    this.stopTemperatureCalibrationPolling();
+                    const summary = (this.temperatureCalibration.result || {}).summary || {};
+                    if (!(summary.queued_packages || summary.scanning_packages) || this.temperatureCalibration.pollCount >= 120) return;
+                    this.temperatureCalibration.pollTimer = setTimeout(async () => {
+                        this.temperatureCalibration.pollCount += 1;
+                        await this.loadTemperatureCalibrations(false, true);
+                    }, 5000);
+                },
+                async loadTemperatureCalibrations(autoQueue = true, silent = false) {
+                    if (!this.data) return;
+                    if (!this.temperatureCalibration.startDate || !this.temperatureCalibration.endDate) {
+                        this.temperatureCalibration.error = '请选择开始和结束日期。';
+                        return;
+                    }
+                    if (!silent) this.temperatureCalibration.loading = true;
+                    this.temperatureCalibration.error = '';
+                    try {
+                        const params = new URLSearchParams({
+                            start_date: this.temperatureCalibration.startDate,
+                            end_date: this.temperatureCalibration.endDate,
+                            auto_queue: autoQueue ? '1' : '0',
+                        });
+                        const res = await fetch(`/api/temperature-calibrations/${this.data.stats.sn}?${params.toString()}`, { headers: this.authHeaders() });
+                        if (res.status === 401) {
+                            this.logout();
+                            return;
+                        }
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                            this.temperatureCalibration.error = payload.detail || '温度校正记录读取失败。';
+                            return;
+                        }
+                        this.temperatureCalibration.result = payload;
+                        this.scheduleTemperatureCalibrationPolling();
+                    } catch (e) {
+                        this.temperatureCalibration.error = '温度校正记录读取失败，请稍后重试。';
+                    } finally {
+                        if (!silent) this.temperatureCalibration.loading = false;
+                    }
+                },
+                async syncTemperatureCalibrations() {
+                    if (!this.data) return;
+                    this.temperatureCalibration.syncing = true;
+                    this.temperatureCalibration.error = '';
+                    this.temperatureCalibration.pollCount = 0;
+                    try {
+                        const params = new URLSearchParams({
+                            start_date: this.temperatureCalibration.startDate,
+                            end_date: this.temperatureCalibration.endDate,
+                            retry_failed: '1',
+                        });
+                        const res = await fetch(`/api/temperature-calibrations/${this.data.stats.sn}/sync?${params.toString()}`, {
+                            method: 'POST',
+                            headers: this.authHeaders(),
+                        });
+                        if (res.status === 401) {
+                            this.logout();
+                            return;
+                        }
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                            this.temperatureCalibration.error = payload.detail || '日志补齐任务提交失败。';
+                            return;
+                        }
+                        this.temperatureCalibration.result = payload;
+                        this.scheduleTemperatureCalibrationPolling();
+                    } catch (e) {
+                        this.temperatureCalibration.error = '日志补齐任务提交失败，请稍后重试。';
+                    } finally {
+                        this.temperatureCalibration.syncing = false;
+                    }
+                },
 	            structuredStatusClass(status) {
 	                const value = status || '';
 	                if (value === '已入库') return 'bg-success';
@@ -4603,8 +4821,12 @@
             runPageGuideAction(action) {
                 if (!action || !action.id) return;
                 const id = action.id;
-                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'powerDiagnosis', 'thermalModel', 'thermalKnowledge', 'versionStats', 'admin', 'emergency'].includes(id)) {
+                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'powerDiagnosis', 'thermalModel', 'thermalKnowledge', 'versionStats', 'admin', 'emergency'].includes(id)) {
                     this.setActiveTab(id);
+                    return;
+                }
+                if (id === 'loadTemperatureCalibration') {
+                    this.loadTemperatureCalibrations(true);
                     return;
                 }
                 if (id === 'recipeSearchModeTop') {
@@ -4642,6 +4864,7 @@
                 if (tabId === 'safetyOverview') this.loadSafetyOverview();
                 if (tabId === 'safetyAlerts') this.loadSafetyAlerts();
                 if (tabId === 'logAnalysis') this.prepareLogAnalysis();
+                if (tabId === 'temperatureCalibration' && this.data) this.loadTemperatureCalibrations(true);
                 if ((tabId === 'cookTemperature' || tabId === 'powerDiagnosis') && this.data && !this.selectedCookTemperatureFileIds.length && this.logAnalysisOptions.length) {
                     this.selectedCookTemperatureFileIds = [String(this.logAnalysisOptions[0].id)];
                     this.syncPrimaryTemperatureLog();
@@ -5360,7 +5583,8 @@
                 if (!log) return '';
                 const time = log.log_time_hint || log.create_time || '-';
                 const size = this.formatLogSize(log);
-                const status = log.analytics_status || (log.downloadable === false || log.cos_deleted ? '不可下载' : '可下载');
+                const rawStatus = log.analytics_status || (log.downloadable === false || log.cos_deleted ? '不可下载' : '可下载');
+                const status = rawStatus === '排队中' ? '等待后台解析' : rawStatus;
                 const name = log.file_name || `日志 ${log.id}`;
                 return `${time}｜${size}｜${status}｜${name}`;
             },
@@ -5783,6 +6007,10 @@
                     this.cookTemperatureError = '本次选择超过 90MB，建议拆成多次分析，避免浏览器和服务器同时超时。';
                     return;
                 }
+                if (this.selectedTemperatureFilesBusy) {
+                    this.cookTemperatureError = '所选日志包正在后台等待或解析，请稍后刷新状态，不要重复提交。';
+                    return;
+                }
                 this.selectedLogFileId = ids[0] || '';
                 this.cookTemperatureLoading = true;
                 this.cookTemperatureError = '';
@@ -6107,6 +6335,9 @@
                 this.cookTemperature = null;
                 this.selectedCookTemperatureIndex = 0;
                 this.cookTemperatureError = '';
+                this.stopTemperatureCalibrationPolling();
+                this.temperatureCalibration.result = null;
+                this.temperatureCalibration.error = '';
                 this.processIntervals();
                 this.saveHistoryItem();
                 if (persist) this.saveReportCache(report);
@@ -6116,8 +6347,8 @@
                         this.selectedCookTemperatureFileIds = [String(this.logAnalysisOptions[0].id)];
                         this.syncPrimaryTemperatureLog();
                     }
-                    this.loadCookTemperature();
                 }
+                if (this.activeTab === 'temperatureCalibration') this.loadTemperatureCalibrations(true);
             },
             reportCacheKey(sn) {
                 return `zhiku_device_report_v4_${sn}`;
