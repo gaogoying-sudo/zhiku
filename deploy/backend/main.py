@@ -75,6 +75,8 @@ DEVICE_LOOKUP_CACHE = {}
 VERSION_STATS_CACHE = {}
 LOG_ANALYSIS_VERSION = 2
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+LOG_EVIDENCE_FILE_CACHE_DIR = CACHE_DIR / 'log_evidence_files'
+LOG_EVIDENCE_FILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 AUDIT_DB_PATH = CACHE_DIR / 'zhiku_audit.sqlite3'
 AUDIT_LOCK = threading.Lock()
 ANALYTICS_DB_READY = False
@@ -86,7 +88,7 @@ AUTO_PARSE_INTERVAL_SECONDS = int(os.getenv('AUTO_PARSE_INTERVAL_SECONDS', '90')
 AUTO_PARSE_MAX_PACKAGES_PER_CYCLE = int(os.getenv('AUTO_PARSE_MAX_PACKAGES_PER_CYCLE', '2'))
 STRUCTURED_DAY_DETAIL_LIMIT = int(os.getenv('STRUCTURED_DAY_DETAIL_LIMIT', '20'))
 AUTO_PARSE_STALE_MINUTES = int(os.getenv('AUTO_PARSE_STALE_MINUTES', '12'))
-LOG_EVENT_SCAN_VERSION = 2
+LOG_EVENT_SCAN_VERSION = 3
 LOG_EVENT_SCAN_WORKERS = {}
 LOG_EVENT_SCAN_WORKERS_LOCK = threading.Lock()
 
@@ -789,7 +791,10 @@ def init_analytics_db():
                         event_time DATETIME NULL,
                         matched_keyword VARCHAR(120) NULL,
                         source_log_name VARCHAR(255) NULL,
+                        line_no INT NULL,
+                        line_hash CHAR(64) NULL,
                         raw_log_excerpt TEXT NULL,
+                        evidence_level VARCHAR(16) NOT NULL DEFAULT '中',
                         event_hash CHAR(64) NOT NULL,
                         scan_version INT NOT NULL,
                         created_at DATETIME NOT NULL,
@@ -799,6 +804,16 @@ def init_analytics_db():
                         INDEX idx_device_event_package(sn, source_file_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
+                for stmt in [
+                    "ALTER TABLE device_log_events ADD COLUMN line_no INT NULL AFTER source_log_name",
+                    "ALTER TABLE device_log_events ADD COLUMN line_hash CHAR(64) NULL AFTER line_no",
+                    "ALTER TABLE device_log_events ADD COLUMN evidence_level VARCHAR(16) NOT NULL DEFAULT '中' AFTER raw_log_excerpt",
+                    "ALTER TABLE device_log_events ADD INDEX idx_device_event_line_hash(line_hash)",
+                ]:
+                    try:
+                        cur.execute(stmt)
+                    except Exception:
+                        pass
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS ingredient_thermal_properties (
                         id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -2317,6 +2332,7 @@ def kick_temperature_calibration_scan(sn):
         return True
 
 def temperature_calibration_payload(sn, start, end, rows):
+    device_meta = get_log_evidence_device_meta(sn)
     package_ids = [int(row['id']) for row in rows if row.get('id')]
     scans = []
     if package_ids:
@@ -2337,7 +2353,7 @@ def temperature_calibration_payload(sn, start, end, rows):
     event_rows = fetch_all(
         """
         SELECT id, source_file_id, event_type, event_label, event_time, matched_keyword,
-               source_log_name, raw_log_excerpt
+               source_log_name, line_no, line_hash, raw_log_excerpt, evidence_level, event_hash
         FROM device_log_events
         WHERE sn=%s AND event_category='temperature_calibration'
           AND event_time >= %s AND event_time < %s
@@ -2346,6 +2362,22 @@ def temperature_calibration_payload(sn, start, end, rows):
         """,
         (sn, start, end),
     )
+    job_rows = []
+    if package_ids:
+        placeholders = ','.join(['%s'] * len(package_ids))
+        job_rows = fetch_all(
+            f"""
+            SELECT id, source_file_id, cook_start_time, cook_end_time
+            FROM cook_jobs
+            WHERE sn=%s AND source_file_id IN ({placeholders})
+              AND cook_start_time < %s AND cook_end_time >= %s
+            ORDER BY cook_start_time
+            """,
+            tuple([sn] + package_ids + [end, start]),
+        )
+    jobs_by_package = defaultdict(list)
+    for job in job_rows:
+        jobs_by_package[int(job.get('source_file_id') or 0)].append(job)
     deduped = []
     seen = set()
     for event in event_rows:
@@ -2357,6 +2389,27 @@ def temperature_calibration_payload(sn, start, end, rows):
             continue
         seen.add(key)
         package = package_map.get(int(event.get('source_file_id') or 0), {})
+        event['source_zip'] = package.get('file_name')
+        event['source_file'] = event.get('source_log_name')
+        event['timestamp'] = event.get('event_time')
+        event['date'] = str(event.get('event_time') or '')[:10] or None
+        event['raw_line'] = event.get('raw_log_excerpt')
+        event['line_hash'] = event.get('line_hash') or event.get('event_hash')
+        event['event_type'] = event.get('event_type') or 'temperature_calibration_event'
+        event['evidence_level'] = event.get('evidence_level') or ('高' if event.get('line_no') else '中')
+        event_time = to_mysql_dt(event.get('event_time'))
+        matched_job_id = None
+        if event_time:
+            for job in jobs_by_package.get(int(event.get('source_file_id') or 0), []):
+                job_start = to_mysql_dt(job.get('cook_start_time'))
+                job_end = to_mysql_dt(job.get('cook_end_time'))
+                if job_start and job_end and job_start - timedelta(minutes=2) <= event_time <= job_end + timedelta(minutes=2):
+                    matched_job_id = job.get('id')
+                    break
+        event['matched_job_id'] = matched_job_id
+        event['sn'] = sn
+        event['customer'] = device_meta['customer']
+        event['region'] = device_meta['region']
         event['package_name'] = package.get('file_name')
         deduped.append(event)
     status_counts = Counter((row.get('scan_status') or 'pending') for row in scans)
@@ -2460,6 +2513,134 @@ def text_from_zip_member(zf, info, max_bytes=8 * 1024 * 1024):
     else:
         data = zf.read(info)
     return data.decode('utf-8', errors='ignore')
+
+def get_log_evidence_device_meta(sn, robot=None):
+    device = robot or {}
+    if not device:
+        device = fetch_one(
+            "SELECT company_id FROM sop_robot WHERE machinecode=%s LIMIT 1",
+            (sn,),
+            source=True,
+            database='btyc',
+        ) or {}
+    company = get_company_info(device.get('company_id'))
+    return {
+        'customer': company.get('common_name') or company.get('company_name') or '未知',
+        'region': company.get('geo_cityname') or company.get('geo_pname') or company.get('area_code') or '未知',
+    }
+
+def resolve_log_package_source(sn, source_file_id=None, source_zip=''):
+    if source_file_id:
+        row = fetch_one(
+            "SELECT id, sn, file_name, file_length, pic AS url, create_time, cos_deleted "
+            "FROM machine_ftp WHERE id=%s AND sn=%s LIMIT 1",
+            (int(source_file_id), sn),
+            source=True,
+            database='btyc',
+        )
+    elif source_zip:
+        row = fetch_one(
+            "SELECT id, sn, file_name, file_length, pic AS url, create_time, cos_deleted "
+            "FROM machine_ftp WHERE sn=%s AND file_name=%s ORDER BY id DESC LIMIT 1",
+            (sn, source_zip),
+            source=True,
+            database='btyc',
+        )
+    else:
+        raise HTTPException(status_code=400, detail="缺少 source_file_id 或 source_zip，无法定位日志包")
+    if not row:
+        raise HTTPException(status_code=404, detail="未找到来源日志包，请先补齐或重新同步该设备日志")
+    if row.get('cos_deleted') or not row.get('url'):
+        raise HTTPException(status_code=409, detail="来源日志包不可下载或已被删除，请先补齐日志包")
+    return row
+
+def load_log_evidence_file(sn, source_file_id=None, source_zip='', source_file=''):
+    package = resolve_log_package_source(sn, source_file_id=source_file_id, source_zip=source_zip)
+    cache_key = hashlib.sha256(
+        f"{sn}|{int(package['id'])}|{source_file}".encode('utf-8')
+    ).hexdigest()
+    cache_path = LOG_EVIDENCE_FILE_CACHE_DIR / f"{cache_key}.log"
+    cache_name_path = LOG_EVIDENCE_FILE_CACHE_DIR / f"{cache_key}.name"
+    if cache_path.exists() and cache_name_path.exists():
+        actual_source_file = cache_name_path.read_text(encoding='utf-8').strip() or source_file
+        text = cache_path.read_text(encoding='utf-8', errors='ignore')
+        return package, actual_source_file, text.splitlines()
+    try:
+        zip_bytes = download_log_zip(package['url'])
+        zf = zipfile.ZipFile(BytesIO(zip_bytes))
+    except HTTPException:
+        raise
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=422, detail="来源日志包不是有效 ZIP，无法读取原始证据") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"来源日志包下载失败：{str(exc)[:180]}") from exc
+    with zf:
+        candidates = [
+            info for info in zf.infolist()
+            if not info.is_dir() and (
+                info.filename == source_file
+                or Path(info.filename).name == Path(source_file or '').name
+            )
+        ]
+        if not candidates:
+            raise HTTPException(status_code=404, detail="日志包中未找到来源日志文件，请重新扫描该日志包")
+        info = candidates[0]
+        text = text_from_zip_member(zf, info, max_bytes=32 * 1024 * 1024)
+        actual_source_file = info.filename
+    try:
+        cache_path.write_text(text, encoding='utf-8')
+        cache_name_path.write_text(actual_source_file, encoding='utf-8')
+    except OSError:
+        pass
+    del zip_bytes
+    gc.collect()
+    return package, actual_source_file, text.splitlines()
+
+def find_matched_job_id(sn, source_file_id, timestamp):
+    event_time = to_mysql_dt(timestamp)
+    if not event_time:
+        return None
+    row = fetch_one(
+        """
+        SELECT id
+        FROM cook_jobs
+        WHERE sn=%s AND source_file_id=%s
+          AND cook_start_time IS NOT NULL AND cook_end_time IS NOT NULL
+          AND %s BETWEEN DATE_SUB(cook_start_time, INTERVAL 2 MINUTE)
+                     AND DATE_ADD(cook_end_time, INTERVAL 2 MINUTE)
+        ORDER BY ABS(TIMESTAMPDIFF(SECOND, cook_start_time, %s))
+        LIMIT 1
+        """,
+        (sn, int(source_file_id), event_time, event_time),
+    )
+    return row.get('id') if row else None
+
+def locate_log_target_line(sn, source_file_id, source_file, lines, line_hash='', line_no=None, timestamp='', raw_line=''):
+    if line_hash:
+        for idx, line in enumerate(lines):
+            candidate = build_log_line_hash(sn, source_file_id, source_file, idx + 1, line)
+            if hmac.compare_digest(candidate, line_hash):
+                return idx
+    if line_no and 1 <= int(line_no) <= len(lines):
+        return int(line_no) - 1
+    if raw_line:
+        normalized = re.sub(r'\s+', ' ', str(raw_line).strip())
+        for idx, line in enumerate(lines):
+            if re.sub(r'\s+', ' ', line.strip()) == normalized:
+                return idx
+    target_time = to_mysql_dt(timestamp)
+    if target_time:
+        nearest = None
+        for idx, line in enumerate(lines):
+            parsed = parse_log_ts(line)
+            if not parsed:
+                continue
+            delta = abs((parsed - target_time).total_seconds())
+            if nearest is None or delta < nearest[0]:
+                nearest = (delta, idx)
+        if nearest and nearest[0] <= 300:
+            return nearest[1]
+    return None
 
 def classify_log_file(name):
     base = Path(name).name
@@ -2884,6 +3065,10 @@ def is_temperature_log_name(name):
     base = (name or '').lower()
     return base.startswith('temperature') and base.endswith('.log')
 
+def build_log_line_hash(sn, source_file_id, source_file, line_no, raw_line):
+    payload = f"{sn}|{int(source_file_id)}|{source_file}|{int(line_no)}|{raw_line}"
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
 TEMPERATURE_CALIBRATION_PATTERNS = [
     re.compile(r'温度.{0,16}(?:校准|校正|矫正|标定|修正)', re.I),
     re.compile(r'(?:校准|校正|矫正|标定|修正).{0,16}温度', re.I),
@@ -2929,14 +3114,15 @@ def classify_temperature_calibration_line(line):
         'matched_keyword': matched[:120],
     }
 
-def scan_temperature_calibration_text(text, source_log_name, fallback_time=None):
+def scan_temperature_calibration_text(text, source_log_name, sn, source_file_id, fallback_time=None):
     events = []
     seen = set()
-    for line in str(text or '').splitlines():
+    for line_no, line in enumerate(str(text or '').splitlines(), start=1):
         classification = classify_temperature_calibration_line(line)
         if not classification:
             continue
-        ts = parse_log_ts(line) or fallback_time
+        parsed_ts = parse_log_ts(line)
+        ts = parsed_ts or fallback_time
         raw = line.strip()[:1200]
         dedupe_key = (ts.isoformat() if ts else '', re.sub(r'\s+', ' ', raw))
         if dedupe_key in seen:
@@ -2946,7 +3132,10 @@ def scan_temperature_calibration_text(text, source_log_name, fallback_time=None)
             **classification,
             'event_time': ts,
             'source_log_name': source_log_name,
+            'line_no': line_no,
+            'line_hash': build_log_line_hash(sn, source_file_id, source_log_name, line_no, line),
             'raw_log_excerpt': raw,
+            'evidence_level': '高' if parsed_ts else '中',
         })
     return events
 
@@ -2968,14 +3157,16 @@ def persist_device_log_events(sn, source_file_id, scan_type, events):
         payload.append((
             sn, int(source_file_id), scan_type, event.get('event_type') or 'event',
             event.get('event_label') or '日志事件', event_time, event.get('matched_keyword'),
-            event.get('source_log_name'), raw, event_hash, LOG_EVENT_SCAN_VERSION, now,
+            event.get('source_log_name'), event.get('line_no'), event.get('line_hash'), raw,
+            event.get('evidence_level') or '中', event_hash, LOG_EVENT_SCAN_VERSION, now,
         ))
     executemany_local(
         """
         INSERT IGNORE INTO device_log_events(
             sn, source_file_id, event_category, event_type, event_label, event_time,
-            matched_keyword, source_log_name, raw_log_excerpt, event_hash, scan_version, created_at
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            matched_keyword, source_log_name, line_no, line_hash, raw_log_excerpt,
+            evidence_level, event_hash, scan_version, created_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         payload,
     )
@@ -3006,7 +3197,13 @@ def scan_temperature_calibration_package(sn, source_file_id):
             if not is_android_log_name(base):
                 continue
             text = text_from_zip_member(zf, info, max_bytes=16 * 1024 * 1024)
-            events.extend(scan_temperature_calibration_text(text, base, fallback_time=fallback_time))
+            events.extend(scan_temperature_calibration_text(
+                text,
+                info.filename,
+                sn,
+                source_file_id,
+                fallback_time=fallback_time,
+            ))
     deduped = {}
     for event in events:
         key = (
@@ -6812,6 +7009,167 @@ def sync_temperature_calibrations(
         },
     )
     return result
+
+@app.get("/api/logs/detail")
+def log_evidence_detail(
+    request: Request,
+    sn: str = Query(...),
+    date: str = Query(''),
+    source_file_id: int = Query(None),
+    source_zip: str = Query(''),
+    source_file: str = Query(...),
+    timestamp: str = Query(''),
+    line_hash: str = Query(''),
+    line_no: int = Query(None),
+    context_before: int = Query(20),
+    context_after: int = Query(20),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, robot = resolve_sn(sn)
+    package, actual_source_file, lines = load_log_evidence_file(
+        real_sn,
+        source_file_id=source_file_id,
+        source_zip=source_zip,
+        source_file=source_file,
+    )
+    event = None
+    if line_hash:
+        event = fetch_one(
+            """
+            SELECT id, event_type, event_label, event_time, matched_keyword, source_log_name,
+                   line_no, line_hash, raw_log_excerpt, evidence_level, event_hash
+            FROM device_log_events
+            WHERE sn=%s AND source_file_id=%s AND (line_hash=%s OR event_hash=%s)
+            ORDER BY id DESC LIMIT 1
+            """,
+            (real_sn, int(package['id']), line_hash, line_hash),
+        )
+    effective_line_no = line_no or ((event or {}).get('line_no'))
+    effective_timestamp = timestamp or str((event or {}).get('event_time') or '')
+    raw_line = (event or {}).get('raw_log_excerpt') or ''
+    target_idx = locate_log_target_line(
+        real_sn,
+        int(package['id']),
+        actual_source_file,
+        lines,
+        line_hash=line_hash,
+        line_no=effective_line_no,
+        timestamp=effective_timestamp,
+        raw_line=raw_line,
+    )
+    if target_idx is None:
+        raise HTTPException(
+            status_code=404,
+            detail="日志文件已找到，但未能定位目标原始行；请重新扫描日志包后再试",
+        )
+    before = max(0, min(int(context_before or 20), 200))
+    after = max(0, min(int(context_after or 20), 200))
+    start_idx = max(0, target_idx - before)
+    end_idx = min(len(lines), target_idx + after + 1)
+    context_lines = []
+    for idx in range(start_idx, end_idx):
+        raw = lines[idx]
+        context_lines.append({
+            'line_no': idx + 1,
+            'timestamp': parse_log_ts(raw),
+            'line_hash': build_log_line_hash(real_sn, package['id'], actual_source_file, idx + 1, raw),
+            'raw_line': raw,
+            'is_target': idx == target_idx,
+        })
+    target_line = context_lines[target_idx - start_idx]
+    device_meta = get_log_evidence_device_meta(real_sn, robot=robot)
+    event_type = (event or {}).get('event_type') or 'log_evidence'
+    matched_keyword = (event or {}).get('matched_keyword') or ''
+    matched_job_id = find_matched_job_id(real_sn, package['id'], effective_timestamp)
+    payload = {
+        'meta': {
+            'sn': real_sn,
+            'customer': device_meta['customer'],
+            'region': device_meta['region'],
+            'date': date or str(effective_timestamp)[:10] or None,
+            'timestamp': effective_timestamp or target_line.get('timestamp'),
+            'source_zip': package.get('file_name'),
+            'source_file_id': package.get('id'),
+            'source_file': actual_source_file,
+            'event_type': event_type,
+            'event_label': (event or {}).get('event_label') or '原始日志证据',
+            'matched_job_id': matched_job_id,
+            'matched_job': bool(matched_job_id),
+        },
+        'target_line': {
+            **target_line,
+            'event_type': event_type,
+            'matched_keyword': matched_keyword,
+            'evidence_level': (event or {}).get('evidence_level') or ('高' if effective_line_no else '中'),
+        },
+        'context_lines': context_lines,
+        'source_status': 'available',
+        'matched_keyword': matched_keyword,
+        'event_type': event_type,
+        'evidence_level': (event or {}).get('evidence_level') or ('高' if effective_line_no else '中'),
+    }
+    log_event(
+        username,
+        'log_evidence_detail',
+        request,
+        sn=real_sn,
+        detail={'source_file_id': package.get('id'), 'source_file': actual_source_file, 'line_no': target_idx + 1},
+    )
+    return payload
+
+@app.get("/api/logs/search-in-file")
+def search_log_evidence_file(
+    request: Request,
+    sn: str = Query(...),
+    source_file_id: int = Query(None),
+    source_zip: str = Query(''),
+    source_file: str = Query(...),
+    keyword: str = Query(...),
+    limit: int = Query(200),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    clean_keyword = str(keyword or '').strip()
+    if not clean_keyword:
+        raise HTTPException(status_code=400, detail="请输入当前日志文件内的搜索关键词")
+    package, actual_source_file, lines = load_log_evidence_file(
+        real_sn,
+        source_file_id=source_file_id,
+        source_zip=source_zip,
+        source_file=source_file,
+    )
+    safe_limit = max(1, min(int(limit or 200), 500))
+    needle = clean_keyword.lower()
+    matched_lines = []
+    total = 0
+    for idx, raw in enumerate(lines):
+        if needle not in raw.lower():
+            continue
+        total += 1
+        if len(matched_lines) < safe_limit:
+            matched_lines.append({
+                'line_no': idx + 1,
+                'timestamp': parse_log_ts(raw),
+                'line_hash': build_log_line_hash(real_sn, package['id'], actual_source_file, idx + 1, raw),
+                'raw_line': raw,
+            })
+    log_event(
+        username,
+        'log_evidence_search',
+        request,
+        sn=real_sn,
+        detail={'source_file_id': package.get('id'), 'source_file': actual_source_file, 'keyword': clean_keyword, 'count': total},
+    )
+    return {
+        'matched_lines': matched_lines,
+        'count': total,
+        'returned_count': len(matched_lines),
+        'source_status': 'available',
+        'source_zip': package.get('file_name'),
+        'source_file': actual_source_file,
+    }
 
 @app.get("/api/thermal-knowledge")
 def thermal_knowledge(

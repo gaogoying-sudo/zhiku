@@ -264,6 +264,12 @@
         .clickable-row { cursor: pointer; }
         .clickable-row:hover td { background: #edf6ff !important; }
         .inline-detail { background: #fbfdff; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+        .log-evidence-meta { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+        .log-evidence-line { display: grid; grid-template-columns: 72px 170px minmax(0, 1fr); gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--line-soft); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+        .log-evidence-line.target { background: #fff3a6; border-left: 4px solid var(--accent); font-weight: 700; }
+        .log-evidence-raw { white-space: pre-wrap; overflow-wrap: anywhere; }
+        .log-search-result { cursor: pointer; }
+        .log-search-result:hover td { background: #edf6ff !important; }
         @media (max-width: 1200px) {
             .search-line { grid-template-columns: minmax(240px, 1fr) repeat(3, auto); }
             .search-line .btn-outline-danger { margin-left: 0 !important; }
@@ -295,6 +301,9 @@
             .search-line .form-control { min-width: 100%; }
             .filter-bar { top: 0; position: static; }
             .global-busy { right: 14px; bottom: 14px; }
+            .log-evidence-meta { grid-template-columns: 1fr; }
+            .log-evidence-line { grid-template-columns: 58px minmax(0, 1fr); }
+            .log-evidence-line .log-evidence-time { display: none; }
         }
     </style>
 </head>
@@ -1838,6 +1847,81 @@
         </div>
 	        </section>
 
+            <section v-if="data" v-show="activeTab === 'logEvidence'">
+                <div class="d-flex justify-content-between align-items-center gap-2 mb-3">
+                    <button class="btn btn-sm btn-outline-primary" @click="backToTemperatureCalibration">返回温度校正</button>
+                    <span class="history-meta">日志基础层 / 原始证据详情</span>
+                </div>
+                <div v-if="logEvidence.loading" class="alert alert-info">正在读取原始日志及上下文...</div>
+                <div v-if="logEvidence.error" class="alert alert-danger">{{ logEvidence.error }}</div>
+                <template v-if="logEvidence.detail">
+                    <div class="card">
+                        <div class="card-header">基础信息</div>
+                        <div class="card-body log-evidence-meta">
+                            <div class="detail-card"><strong>SN</strong><div>{{ logEvidence.detail.meta.sn }}</div></div>
+                            <div class="detail-card"><strong>客户</strong><div>{{ logEvidence.detail.meta.customer || '未知' }}</div></div>
+                            <div class="detail-card"><strong>区域</strong><div>{{ logEvidence.detail.meta.region || '未知' }}</div></div>
+                            <div class="detail-card"><strong>日期</strong><div>{{ logEvidence.detail.meta.date || '-' }}</div></div>
+                            <div class="detail-card"><strong>来源日志包</strong><div class="text-break">{{ logEvidence.detail.meta.source_zip || '-' }}</div></div>
+                            <div class="detail-card"><strong>来源日志文件</strong><div class="text-break">{{ logEvidence.detail.meta.source_file || '-' }}</div></div>
+                            <div class="detail-card"><strong>当前定位时间</strong><div>{{ logEvidence.detail.meta.timestamp || '-' }}</div></div>
+                            <div class="detail-card"><strong>事件 / 作业</strong><div>{{ logEvidence.detail.meta.event_label || logEvidence.detail.meta.event_type }} / {{ logEvidence.detail.meta.matched_job ? `作业 ${logEvidence.detail.meta.matched_job_id}` : '未匹配作业' }}</div></div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">当前命中原始日志行</div>
+                        <div class="card-body">
+                            <div class="d-flex gap-2 flex-wrap mb-2">
+                                <span class="badge bg-primary">{{ logEvidence.detail.target_line.event_type }}</span>
+                                <span class="badge bg-success">证据 {{ logEvidence.detail.target_line.evidence_level }}</span>
+                                <span class="badge bg-secondary">行 {{ logEvidence.detail.target_line.line_no || '-' }}</span>
+                                <span class="resource-chip">{{ logEvidence.detail.target_line.matched_keyword || '无关键词' }}</span>
+                            </div>
+                            <div class="log-evidence-line target">
+                                <span>{{ logEvidence.detail.target_line.line_no }}</span>
+                                <span class="log-evidence-time">{{ logEvidence.detail.target_line.timestamp || '-' }}</span>
+                                <span class="log-evidence-raw">{{ logEvidence.detail.target_line.raw_line }}</span>
+                            </div>
+                            <div class="history-meta mt-2">line_hash：{{ logEvidence.detail.target_line.line_hash }}</div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">当前文件内搜索</div>
+                        <div class="card-body">
+                            <div class="d-flex gap-2">
+                                <input class="form-control form-control-sm" v-model="logEvidence.searchKeyword" @keyup.enter="searchWithinLogFile" placeholder="输入关键词">
+                                <button class="btn btn-sm btn-primary" @click="searchWithinLogFile" :disabled="logEvidence.searching">{{ logEvidence.searching ? '搜索中' : '搜索' }}</button>
+                            </div>
+                            <div v-if="logEvidence.searchError" class="text-danger mt-2">{{ logEvidence.searchError }}</div>
+                            <div v-if="logEvidence.searchResults.length" class="table-responsive mt-3">
+                                <table class="table table-sm mb-0">
+                                    <thead><tr><th>行号</th><th>时间</th><th>原始日志</th></tr></thead>
+                                    <tbody>
+                                        <tr v-for="line in logEvidence.searchResults" :key="line.line_hash" class="log-search-result" @click="openEvidenceSearchResult(line)">
+                                            <td>{{ line.line_no }}</td><td>{{ line.timestamp || '-' }}</td><td class="text-break">{{ line.raw_line }}</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div v-else-if="logEvidence.searched" class="history-meta mt-2">当前文件未命中该关键词。</div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">上下文日志（命中行前后各 20 行）</div>
+                        <div class="card-body p-0 detail-scroll">
+                            <div v-for="line in logEvidence.detail.context_lines" :key="line.line_hash" class="log-evidence-line" :class="{target: line.is_target}">
+                                <span>{{ line.line_no }}</span>
+                                <span class="log-evidence-time">{{ line.timestamp || '-' }}</span>
+                                <span class="log-evidence-raw">{{ line.raw_line }}</span>
+                            </div>
+                        </div>
+                    </div>
+                </template>
+            </section>
+
             <section v-if="data" v-show="activeTab === 'temperatureCalibration'">
                 <div class="card mb-3">
                     <div class="card-header">日志数据范围</div>
@@ -1900,7 +1984,7 @@
                             <table class="table table-sm table-striped mb-0">
                                 <thead><tr><th>时间</th><th>类型</th><th>匹配字段</th><th>日志文件</th><th>原始证据</th></tr></thead>
                                 <tbody>
-                                    <tr v-for="event in filteredTemperatureCalibrationEvents" :key="event.id">
+                                    <tr v-for="event in filteredTemperatureCalibrationEvents" :key="event.id" class="clickable-row" @click="openLogEvidence(event)" title="点击查看原始日志详情">
                                         <td class="text-nowrap">{{ event.event_time || '-' }}</td>
                                         <td><span class="badge bg-primary">{{ event.event_label }}</span></td>
                                         <td>{{ event.matched_keyword || '-' }}</td>
@@ -3327,6 +3411,17 @@
                     pollTimer: null,
                     pollCount: 0,
                 },
+                logEvidence: {
+                    route: null,
+                    detail: null,
+                    loading: false,
+                    error: '',
+                    searchKeyword: '',
+                    searchResults: [],
+                    searching: false,
+                    searched: false,
+                    searchError: '',
+                },
                 cookTemperatureProgress: {
                     status: 'idle',
                     stepIndex: 0,
@@ -3355,7 +3450,7 @@
 		                monthLoading: '',
 		                monthDetails: {},
 				                activeTab: 'home',
-		                appVersion: '2026.06.11-temperature-calibration1',
+		                appVersion: '2026.06.11-log-evidence1',
 		                navGroups: [
 		                    { title: '工作台', tabs: [
 		                        { id: 'home', label: '工作台', icon: '⌂', desc: '搜索、历史、入口' },
@@ -3483,6 +3578,7 @@
 	            this.initRecipeSearchDates();
 	            this.initStructuredTemperatureDate();
                 this.initTemperatureCalibrationDates();
+                this.restoreEvidenceRoute();
 	        },
 	        computed: {
 		            pageTitle() {
@@ -3498,6 +3594,7 @@
 		                    logAnalysis: '日志结论',
 		                    cookTemperature: '温度诊断',
                             temperatureCalibration: '温度校正',
+                            logEvidence: '日志详情',
 		                    powerDiagnosis: '功率诊断',
 		                    thermalModel: '热过程分析',
 		                    oilThermal: '温控样例',
@@ -3516,6 +3613,7 @@
 		                if (this.activeTab === 'logAnalysis') return '按日志包解析故障码、油路、温控和原始证据';
 		                if (this.activeTab === 'cookTemperature') return '对齐单次烹饪的菜谱步骤、真实动作和锅体温度';
                         if (this.activeTab === 'temperatureCalibration') return '按设备和日期范围检索自动温度校正动作及原始日志证据';
+                        if (this.activeTab === 'logEvidence') return '查看命中原始日志行、来源文件、日志包及前后上下文';
 		                if (this.activeTab === 'powerDiagnosis') return '对齐指令功率、实际输出功率、温度和能量值';
 		                if (this.activeTab === 'thermalModel') return '把单道菜的能量输入、投料吸热、理论锅温和实测偏差放到同一张图里';
 		                if (this.activeTab === 'admin') return '查看账号、缓存、导出和系统使用审计';
@@ -3533,7 +3631,9 @@
 	                    .filter(group => group.tabs.length);
 	            },
 	            activeGroup() {
-	                return this.visibleNavGroups.find(group => group.tabs.some(tab => tab.id === this.activeTab)) || null;
+	                return this.visibleNavGroups.find(group => group.tabs.some(tab => tab.id === this.activeTab))
+                        || (this.activeTab === 'logEvidence' ? this.visibleNavGroups.find(group => group.title === '日志诊断') : null)
+                        || null;
 	            },
 	            activeGroupTitle() {
 	                return this.activeGroup ? this.activeGroup.title : '';
@@ -3542,7 +3642,7 @@
 	                return this.activeGroup ? this.activeGroup.tabs : [];
 	            },
 		            isDeviceTab() {
-		                return ['overview', 'recipes', 'intervals', 'logs', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'powerDiagnosis', 'thermalModel'].includes(this.activeTab);
+		                return ['overview', 'recipes', 'intervals', 'logs', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'logEvidence', 'powerDiagnosis', 'thermalModel'].includes(this.activeTab);
 		            },
 	            showDeviceSearch() {
 	                return this.isDeviceTab;
@@ -3560,6 +3660,7 @@
 		                if (this.activeTab === 'logAnalysis') return '先选日志包，再生成诊断证据。';
 		                if (this.activeTab === 'cookTemperature') return '温度诊断依赖日志包，缺口会提示。';
                         if (this.activeTab === 'temperatureCalibration') return '先读本地事件库，未扫描日志由后台自动补齐。';
+                        if (this.activeTab === 'logEvidence') return '原始证据查看独立于作业匹配，缺包或缺文件会明确提示。';
 		                if (this.activeTab === 'powerDiagnosis') return '功率诊断复用日志解析缓存。';
 		                if (this.activeTab === 'thermalModel') return '第一版是可解释工程近似，真实安全判断仍要结合日志、视频和人工复核。';
 		                if (this.activeTab === 'safetyOverview') return '安全总览基于本地已入库的作业数据，建议先同步或解析更多日志包。';
@@ -3649,6 +3750,19 @@
                                 actions: [
                                     { id: 'loadTemperatureCalibration', label: '查询当前范围', primary: true },
                                     { id: 'cookTemperature', label: '温度诊断' },
+                                    { id: 'logs', label: '日志包' },
+                                ],
+                            },
+                            logEvidence: {
+                                title: '从诊断事件回到原始日志证据',
+                                text: '日志详情属于通用基础层，展示来源包、来源文件、命中行、可信度与上下文，不依赖作业匹配成功。',
+                                meta: [
+                                    this.logEvidence.detail ? `行 ${this.logEvidence.detail.target_line.line_no || '-'}` : '等待定位',
+                                    this.logEvidence.detail ? `证据 ${this.logEvidence.detail.evidence_level}` : '原始日志优先',
+                                    this.logEvidence.detail && this.logEvidence.detail.meta.matched_job ? '已匹配作业' : '作业可为空',
+                                ],
+                                actions: [
+                                    { id: 'temperatureCalibration', label: '返回温度校正', primary: true },
                                     { id: 'logs', label: '日志包' },
                                 ],
                             },
@@ -4337,6 +4451,167 @@
                     this.temperatureCalibration.startDate = this.formatDateInput(start);
                     this.temperatureCalibration.endDate = this.formatDateInput(end);
                 },
+                evidenceRouteParams(route = this.logEvidence.route) {
+                    const params = new URLSearchParams();
+                    if (!route) return params;
+                    Object.entries(route).forEach(([key, value]) => {
+                        if (value !== null && value !== undefined && value !== '') params.set(key, String(value));
+                    });
+                    return params;
+                },
+                restoreEvidenceRoute() {
+                    const params = new URLSearchParams(window.location.search);
+                    const view = params.get('view');
+                    if (!['log-evidence', 'temperature-calibration'].includes(view)) return;
+                    const route = {
+                        view,
+                        sn: params.get('sn') || '',
+                        date: params.get('date') || '',
+                        source_file_id: params.get('source_file_id') || '',
+                        source_zip: params.get('source_zip') || '',
+                        source_file: params.get('source_file') || '',
+                        timestamp: params.get('timestamp') || '',
+                        line_hash: params.get('line_hash') || '',
+                        line_no: params.get('line_no') || '',
+                        matched_keyword: params.get('matched_keyword') || '',
+                        event_type: params.get('event_type') || '',
+                        from: params.get('from') || 'temperature-calibration',
+                        start_date: params.get('start_date') || this.temperatureCalibration.startDate,
+                        end_date: params.get('end_date') || this.temperatureCalibration.endDate,
+                        query_keyword: params.get('query_keyword') || '',
+                    };
+                    this.snInput = route.sn;
+                    this.temperatureCalibration.startDate = route.start_date;
+                    this.temperatureCalibration.endDate = route.end_date;
+                    this.temperatureCalibration.keyword = route.query_keyword;
+                    if (view === 'log-evidence') {
+                        this.activeTab = 'logEvidence';
+                        this.logEvidence.route = route;
+                        this.logEvidence.searchKeyword = route.matched_keyword || route.query_keyword;
+                    } else {
+                        this.activeTab = 'temperatureCalibration';
+                    }
+                    if (this.auth.token && route.sn) this.search(false);
+                },
+                openLogEvidence(event) {
+                    if (!event || !this.data) return;
+                    const route = {
+                        view: 'log-evidence',
+                        sn: event.sn || this.data.stats.sn,
+                        date: event.date || String(event.event_time || '').slice(0, 10),
+                        source_file_id: event.source_file_id,
+                        source_zip: event.source_zip || event.package_name,
+                        source_file: event.source_file || event.source_log_name,
+                        timestamp: event.timestamp || event.event_time,
+                        line_hash: event.line_hash || event.event_hash,
+                        line_no: event.line_no || '',
+                        matched_keyword: event.matched_keyword || '',
+                        event_type: event.event_type || '',
+                        from: 'temperature-calibration',
+                        start_date: this.temperatureCalibration.startDate,
+                        end_date: this.temperatureCalibration.endDate,
+                        query_keyword: this.temperatureCalibration.keyword,
+                    };
+                    this.logEvidence.route = route;
+                    this.logEvidence.searchKeyword = route.matched_keyword || route.query_keyword;
+                    this.logEvidence.searchResults = [];
+                    this.logEvidence.searched = false;
+                    this.activeTab = 'logEvidence';
+                    window.history.pushState({}, '', `${window.location.pathname}?${this.evidenceRouteParams(route).toString()}`);
+                    this.loadLogEvidenceDetail();
+                },
+                async loadLogEvidenceDetail() {
+                    const route = this.logEvidence.route;
+                    if (!route || !route.sn || !route.source_file) return;
+                    this.logEvidence.loading = true;
+                    this.logEvidence.error = '';
+                    try {
+                        const params = this.evidenceRouteParams({ ...route, context_before: 20, context_after: 20 });
+                        params.delete('view');
+                        params.delete('from');
+                        params.delete('start_date');
+                        params.delete('end_date');
+                        params.delete('query_keyword');
+                        params.delete('matched_keyword');
+                        params.delete('event_type');
+                        const res = await fetch(`/api/logs/detail?${params.toString()}`, { headers: this.authHeaders() });
+                        if (res.status === 401) {
+                            this.logout();
+                            return;
+                        }
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                            this.logEvidence.error = payload.detail || '原始日志详情读取失败。';
+                            this.logEvidence.detail = null;
+                            return;
+                        }
+                        this.logEvidence.detail = payload;
+                    } catch (e) {
+                        this.logEvidence.error = '原始日志详情读取失败，请稍后重试。';
+                    } finally {
+                        this.logEvidence.loading = false;
+                    }
+                },
+                async searchWithinLogFile() {
+                    const route = this.logEvidence.route;
+                    const keyword = String(this.logEvidence.searchKeyword || '').trim();
+                    if (!route || !keyword) {
+                        this.logEvidence.searchError = '请输入搜索关键词。';
+                        return;
+                    }
+                    this.logEvidence.searching = true;
+                    this.logEvidence.searchError = '';
+                    this.logEvidence.searched = false;
+                    try {
+                        const params = new URLSearchParams({
+                            sn: route.sn,
+                            source_file_id: route.source_file_id || '',
+                            source_zip: route.source_zip || '',
+                            source_file: route.source_file,
+                            keyword,
+                        });
+                        const res = await fetch(`/api/logs/search-in-file?${params.toString()}`, { headers: this.authHeaders() });
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                            this.logEvidence.searchError = payload.detail || '当前文件搜索失败。';
+                            return;
+                        }
+                        this.logEvidence.searchResults = payload.matched_lines || [];
+                        this.logEvidence.searched = true;
+                    } catch (e) {
+                        this.logEvidence.searchError = `当前文件搜索失败：${e && e.message ? e.message : '请稍后重试'}`;
+                    } finally {
+                        this.logEvidence.searching = false;
+                    }
+                },
+                openEvidenceSearchResult(line) {
+                    if (!line || !this.logEvidence.route) return;
+                    this.logEvidence.route = {
+                        ...this.logEvidence.route,
+                        date: String(line.timestamp || '').slice(0, 10) || this.logEvidence.route.date,
+                        timestamp: line.timestamp || '',
+                        line_hash: line.line_hash,
+                        line_no: line.line_no,
+                    };
+                    window.history.pushState({}, '', `${window.location.pathname}?${this.evidenceRouteParams().toString()}`);
+                    this.loadLogEvidenceDetail();
+                },
+                backToTemperatureCalibration() {
+                    const route = this.logEvidence.route || {};
+                    this.temperatureCalibration.startDate = route.start_date || this.temperatureCalibration.startDate;
+                    this.temperatureCalibration.endDate = route.end_date || this.temperatureCalibration.endDate;
+                    this.temperatureCalibration.keyword = route.query_keyword || '';
+                    this.activeTab = 'temperatureCalibration';
+                    const params = this.evidenceRouteParams({
+                        view: 'temperature-calibration',
+                        sn: route.sn || (this.data && this.data.stats.sn),
+                        start_date: this.temperatureCalibration.startDate,
+                        end_date: this.temperatureCalibration.endDate,
+                        query_keyword: this.temperatureCalibration.keyword,
+                    });
+                    window.history.pushState({}, '', `${window.location.pathname}?${params.toString()}`);
+                    this.loadTemperatureCalibrations(false);
+                },
                 stopTemperatureCalibrationPolling() {
                     if (this.temperatureCalibration.pollTimer) clearTimeout(this.temperatureCalibration.pollTimer);
                     this.temperatureCalibration.pollTimer = null;
@@ -4776,6 +5051,7 @@
 	                this.auth = await res.json();
 	                this.loginForm.password = '';
 	                localStorage.setItem('zhiku_auth', JSON.stringify(this.auth));
+                    this.restoreEvidenceRoute();
 	            },
             logout() {
                 this.auth = { token: '', username: '', role: '', profile: null };
@@ -4821,7 +5097,7 @@
             runPageGuideAction(action) {
                 if (!action || !action.id) return;
                 const id = action.id;
-                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'powerDiagnosis', 'thermalModel', 'thermalKnowledge', 'versionStats', 'admin', 'emergency'].includes(id)) {
+                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'logEvidence', 'powerDiagnosis', 'thermalModel', 'thermalKnowledge', 'versionStats', 'admin', 'emergency'].includes(id)) {
                     this.setActiveTab(id);
                     return;
                 }
@@ -4865,6 +5141,7 @@
                 if (tabId === 'safetyAlerts') this.loadSafetyAlerts();
                 if (tabId === 'logAnalysis') this.prepareLogAnalysis();
                 if (tabId === 'temperatureCalibration' && this.data) this.loadTemperatureCalibrations(true);
+                if (tabId === 'logEvidence' && this.data) this.loadLogEvidenceDetail();
                 if ((tabId === 'cookTemperature' || tabId === 'powerDiagnosis') && this.data && !this.selectedCookTemperatureFileIds.length && this.logAnalysisOptions.length) {
                     this.selectedCookTemperatureFileIds = [String(this.logAnalysisOptions[0].id)];
                     this.syncPrimaryTemperatureLog();
@@ -6349,6 +6626,7 @@
                     }
                 }
                 if (this.activeTab === 'temperatureCalibration') this.loadTemperatureCalibrations(true);
+                if (this.activeTab === 'logEvidence') this.loadLogEvidenceDetail();
             },
             reportCacheKey(sn) {
                 return `zhiku_device_report_v4_${sn}`;
