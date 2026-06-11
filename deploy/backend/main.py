@@ -86,6 +86,9 @@ AUTO_PARSE_INTERVAL_SECONDS = int(os.getenv('AUTO_PARSE_INTERVAL_SECONDS', '90')
 AUTO_PARSE_MAX_PACKAGES_PER_CYCLE = int(os.getenv('AUTO_PARSE_MAX_PACKAGES_PER_CYCLE', '2'))
 STRUCTURED_DAY_DETAIL_LIMIT = int(os.getenv('STRUCTURED_DAY_DETAIL_LIMIT', '20'))
 AUTO_PARSE_STALE_MINUTES = int(os.getenv('AUTO_PARSE_STALE_MINUTES', '12'))
+LOG_EVENT_SCAN_VERSION = 2
+LOG_EVENT_SCAN_WORKERS = {}
+LOG_EVENT_SCAN_WORKERS_LOCK = threading.Lock()
 
 LOG_KIND_DEFS = {
     'oildrum_board': {
@@ -753,6 +756,171 @@ def init_analytics_db():
                         created_at DATETIME NOT NULL,
                         INDEX idx_power_cook(cook_job_id, offset_seconds),
                         INDEX idx_power_sn_time(sn, event_time)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS device_log_event_scans (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NOT NULL,
+                        scan_type VARCHAR(64) NOT NULL,
+                        scan_status VARCHAR(32) NOT NULL DEFAULT 'queued',
+                        scan_version INT NOT NULL DEFAULT 0,
+                        event_count INT NOT NULL DEFAULT 0,
+                        error_message TEXT NULL,
+                        attempts INT NOT NULL DEFAULT 0,
+                        queued_at DATETIME NULL,
+                        started_at DATETIME NULL,
+                        finished_at DATETIME NULL,
+                        updated_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_device_log_event_scan(sn, source_file_id, scan_type),
+                        INDEX idx_event_scan_queue(scan_type, scan_status, queued_at),
+                        INDEX idx_event_scan_sn(sn, scan_type, scan_status)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS device_log_events (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NOT NULL,
+                        event_category VARCHAR(64) NOT NULL,
+                        event_type VARCHAR(64) NOT NULL,
+                        event_label VARCHAR(120) NOT NULL,
+                        event_time DATETIME NULL,
+                        matched_keyword VARCHAR(120) NULL,
+                        source_log_name VARCHAR(255) NULL,
+                        raw_log_excerpt TEXT NULL,
+                        event_hash CHAR(64) NOT NULL,
+                        scan_version INT NOT NULL,
+                        created_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_device_log_event(event_hash),
+                        INDEX idx_device_event_sn_time(sn, event_time),
+                        INDEX idx_device_event_category(event_category, event_time),
+                        INDEX idx_device_event_package(sn, source_file_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS ingredient_thermal_properties (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        source_ingredient_id VARCHAR(128) NULL,
+                        canonical_name VARCHAR(255) NOT NULL,
+                        aliases_json TEXT NULL,
+                        category VARCHAR(64) NOT NULL DEFAULT '未分类',
+                        source_category_1 VARCHAR(128) NULL,
+                        source_category_2 VARCHAR(128) NULL,
+                        ingredient_type VARCHAR(32) NULL,
+                        automatic VARCHAR(32) NULL,
+                        specific_heat_kj_kg_c DECIMAL(8,3) NULL,
+                        water_fraction DECIMAL(5,3) NULL,
+                        oil_fraction DECIMAL(5,3) NULL,
+                        boiling_c DECIMAL(8,2) NULL,
+                        smoke_point_c DECIMAL(8,2) NULL,
+                        flash_point_c DECIMAL(8,2) NULL,
+                        autoignition_c DECIMAL(8,2) NULL,
+                        hazard_class VARCHAR(64) NOT NULL DEFAULT '待归类',
+                        confidence VARCHAR(32) NOT NULL DEFAULT '低',
+                        source_note VARCHAR(255) NOT NULL DEFAULT '规则推断',
+                        recipe_usage_count INT NOT NULL DEFAULT 0,
+                        recipe_count INT NOT NULL DEFAULT 0,
+                        total_amount_g DECIMAL(18,3) NOT NULL DEFAULT 0,
+                        total_amount_ml DECIMAL(18,3) NOT NULL DEFAULT 0,
+                        last_seen_recipe_id BIGINT NULL,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_ingredient_source(source_ingredient_id),
+                        INDEX idx_ingredient_name(canonical_name),
+                        INDEX idx_ingredient_category(category, hazard_class),
+                        INDEX idx_ingredient_usage(recipe_usage_count)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                for stmt in [
+                    "ALTER TABLE ingredient_thermal_properties MODIFY specific_heat_kj_kg_c DECIMAL(8,3) NULL",
+                    "ALTER TABLE ingredient_thermal_properties MODIFY water_fraction DECIMAL(5,3) NULL",
+                    "ALTER TABLE ingredient_thermal_properties MODIFY oil_fraction DECIMAL(5,3) NULL",
+                ]:
+                    try:
+                        cur.execute(stmt)
+                    except Exception:
+                        pass
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS ingredient_thermal_sync_runs (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        sync_type VARCHAR(64) NOT NULL,
+                        status VARCHAR(32) NOT NULL,
+                        base_rows INT NOT NULL DEFAULT 0,
+                        recipe_rows INT NOT NULL DEFAULT 0,
+                        ingredient_rows INT NOT NULL DEFAULT 0,
+                        error_message TEXT NULL,
+                        created_by VARCHAR(64) NULL,
+                        started_at DATETIME NOT NULL,
+                        finished_at DATETIME NULL,
+                        INDEX idx_thermal_sync_time(started_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS safety_scan_runs (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        scan_type VARCHAR(64) NOT NULL DEFAULT 'full',
+                        status VARCHAR(32) NOT NULL DEFAULT 'RUNNING',
+                        total_jobs INT NOT NULL DEFAULT 0,
+                        high_temp_jobs INT NOT NULL DEFAULT 0,
+                        delay_risk_jobs INT NOT NULL DEFAULT 0,
+                        sensor_gap_jobs INT NOT NULL DEFAULT 0,
+                        total_alerts INT NOT NULL DEFAULT 0,
+                        error_message TEXT NULL,
+                        started_at DATETIME NOT NULL,
+                        finished_at DATETIME NULL,
+                        INDEX idx_safety_scan_time(started_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS safety_scan_alerts (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        scan_run_id BIGINT NULL,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NULL,
+                        cook_job_id BIGINT NULL,
+                        recipe_name VARCHAR(255) NULL,
+                        cook_start_time DATETIME NULL,
+                        cook_end_time DATETIME NULL,
+                        duration_seconds INT NULL,
+                        rule_key VARCHAR(64) NOT NULL,
+                        rule_label VARCHAR(120) NOT NULL,
+                        risk_level VARCHAR(16) NOT NULL DEFAULT 'medium',
+                        severity_score INT NOT NULL DEFAULT 0,
+                        max_pot_temp DECIMAL(8,2) NULL,
+                        avg_pot_temp DECIMAL(8,2) NULL,
+                        actual_energy_kwh DECIMAL(10,4) NULL,
+                        oil_to_food_interval INT NULL,
+                        detail_json TEXT NULL,
+                        dismissed TINYINT NOT NULL DEFAULT 0,
+                        dismissed_by VARCHAR(64) NULL,
+                        dismissed_at DATETIME NULL,
+                        created_at DATETIME NOT NULL,
+                        INDEX idx_alert_sn(sn, created_at),
+                        INDEX idx_alert_rule(rule_key, risk_level),
+                        INDEX idx_alert_level(risk_level, dismissed, created_at),
+                        INDEX idx_alert_cook(cook_job_id),
+                        INDEX idx_alert_scan(scan_run_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS safety_daily_stats (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        stat_date DATE NOT NULL,
+                        sn VARCHAR(64) NOT NULL,
+                        total_jobs INT NOT NULL DEFAULT 0,
+                        high_temp_300c INT NOT NULL DEFAULT 0,
+                        high_temp_330c INT NOT NULL DEFAULT 0,
+                        oil_delay_60s INT NOT NULL DEFAULT 0,
+                        sensor_gap INT NOT NULL DEFAULT 0,
+                        max_temp_reached DECIMAL(8,2) NULL,
+                        avg_temp_across_jobs DECIMAL(8,2) NULL,
+                        total_energy_kwh DECIMAL(12,4) NULL,
+                        created_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_stat_date_sn(stat_date, sn),
+                        INDEX idx_stat_date(stat_date),
+                        INDEX idx_stat_sn(sn)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
             conn.commit()
@@ -2003,6 +2171,237 @@ def queue_recent_log_packages_for_device(sn, limit=3):
         )
     return len(rows)
 
+def parse_date_range(start_date, end_date, max_days=370):
+    try:
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+    except Exception:
+        raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD")
+    if end <= start:
+        raise HTTPException(status_code=400, detail="结束日期不能早于开始日期")
+    if (end - start).days > max_days:
+        raise HTTPException(status_code=400, detail=f"单次查询最多支持 {max_days} 天")
+    return start, end
+
+def get_device_log_files_in_range(sn, start, end, limit=1000):
+    rows = fetch_all(
+        "SELECT id, sn, file_length, file_name, pic AS url, type, create_time, update_time, cos_deleted "
+        "FROM machine_ftp WHERE sn=%s ORDER BY create_time DESC LIMIT %s",
+        (sn, max(1, min(int(limit or 1000), 2000))),
+        source=True,
+        database='btyc',
+    )
+    selected = []
+    for row in rows:
+        row['file_size_label'] = format_bytes(row.get('file_length'))
+        row['downloadable'] = bool(row.get('url')) and not bool(row.get('cos_deleted'))
+        row['log_time_hint'] = infer_log_time_from_filename(row.get('file_name'))
+        package_time = to_mysql_dt(row.get('log_time_hint')) or to_mysql_dt(row.get('create_time'))
+        if package_time and start <= package_time < end:
+            selected.append(row)
+    upsert_log_package_index(sn, selected)
+    attach_log_package_statuses(sn, selected)
+    return selected
+
+def queue_temperature_calibration_scans(sn, rows, retry_failed=False):
+    if not rows or not ensure_analytics_db():
+        return 0
+    now = datetime.now().replace(microsecond=0)
+    queued = 0
+    for row in rows:
+        if not row.get('downloadable') or parse_mb_value(row.get('file_length')) in (None, 0):
+            continue
+        file_id = int(row['id'])
+        existing = fetch_one(
+            "SELECT scan_status, scan_version, attempts FROM device_log_event_scans "
+            "WHERE sn=%s AND source_file_id=%s AND scan_type='temperature_calibration'",
+            (sn, file_id),
+        )
+        if existing:
+            status = existing.get('scan_status')
+            current_version = int(existing.get('scan_version') or 0)
+            attempts = int(existing.get('attempts') or 0)
+            if status == 'completed' and current_version == LOG_EVENT_SCAN_VERSION:
+                continue
+            if status in ('queued', 'scanning'):
+                continue
+            if status == 'failed' and (not retry_failed or attempts >= 4):
+                continue
+            execute_local(
+                """
+                UPDATE device_log_event_scans
+                SET scan_status='queued', error_message=NULL, queued_at=%s, updated_at=%s
+                WHERE sn=%s AND source_file_id=%s AND scan_type='temperature_calibration'
+                """,
+                (now, now, sn, file_id),
+            )
+        else:
+            execute_local(
+                """
+                INSERT INTO device_log_event_scans(
+                    sn, source_file_id, scan_type, scan_status, scan_version,
+                    event_count, queued_at, updated_at
+                ) VALUES (%s,%s,'temperature_calibration','queued',0,0,%s,%s)
+                """,
+                (sn, file_id, now, now),
+            )
+        queued += 1
+    return queued
+
+def temperature_calibration_scan_worker(sn):
+    try:
+        while True:
+            row = fetch_one(
+                """
+                SELECT source_file_id
+                FROM device_log_event_scans
+                WHERE sn=%s AND scan_type='temperature_calibration' AND scan_status='queued'
+                ORDER BY queued_at ASC, source_file_id ASC
+                LIMIT 1
+                """,
+                (sn,),
+            )
+            if not row:
+                break
+            file_id = int(row['source_file_id'])
+            now = datetime.now().replace(microsecond=0)
+            execute_local(
+                """
+                UPDATE device_log_event_scans
+                SET scan_status='scanning', started_at=%s, attempts=attempts+1,
+                    error_message=NULL, updated_at=%s
+                WHERE sn=%s AND source_file_id=%s AND scan_type='temperature_calibration'
+                """,
+                (now, now, sn, file_id),
+            )
+            try:
+                event_count = scan_temperature_calibration_package(sn, file_id)
+                finished = datetime.now().replace(microsecond=0)
+                execute_local(
+                    """
+                    UPDATE device_log_event_scans
+                    SET scan_status='completed', scan_version=%s, event_count=%s,
+                        finished_at=%s, updated_at=%s
+                    WHERE sn=%s AND source_file_id=%s AND scan_type='temperature_calibration'
+                    """,
+                    (LOG_EVENT_SCAN_VERSION, event_count, finished, finished, sn, file_id),
+                )
+            except Exception as exc:
+                finished = datetime.now().replace(microsecond=0)
+                execute_local(
+                    """
+                    UPDATE device_log_event_scans
+                    SET scan_status='failed', error_message=%s, finished_at=%s, updated_at=%s
+                    WHERE sn=%s AND source_file_id=%s AND scan_type='temperature_calibration'
+                    """,
+                    (str(exc)[:1000], finished, finished, sn, file_id),
+                )
+            gc.collect()
+    finally:
+        with LOG_EVENT_SCAN_WORKERS_LOCK:
+            LOG_EVENT_SCAN_WORKERS.pop(sn, None)
+
+def kick_temperature_calibration_scan(sn):
+    with LOG_EVENT_SCAN_WORKERS_LOCK:
+        running = LOG_EVENT_SCAN_WORKERS.get(sn)
+        if running and running.is_alive():
+            return False
+        thread = threading.Thread(
+            target=temperature_calibration_scan_worker,
+            args=(sn,),
+            name=f"zhiku-calibration-scan-{sn[-6:]}",
+            daemon=True,
+        )
+        LOG_EVENT_SCAN_WORKERS[sn] = thread
+        thread.start()
+        return True
+
+def temperature_calibration_payload(sn, start, end, rows):
+    package_ids = [int(row['id']) for row in rows if row.get('id')]
+    scans = []
+    if package_ids:
+        placeholders = ','.join(['%s'] * len(package_ids))
+        scans = fetch_all(
+            f"""
+            SELECT source_file_id, scan_status, event_count, error_message, attempts,
+                   queued_at, started_at, finished_at
+            FROM device_log_event_scans
+            WHERE sn=%s AND scan_type='temperature_calibration'
+              AND source_file_id IN ({placeholders})
+            ORDER BY COALESCE(finished_at, started_at, queued_at) DESC
+            """,
+            tuple([sn] + package_ids),
+        )
+    scan_map = {int(row['source_file_id']): row for row in scans}
+    package_map = {int(row['id']): row for row in rows if row.get('id')}
+    event_rows = fetch_all(
+        """
+        SELECT id, source_file_id, event_type, event_label, event_time, matched_keyword,
+               source_log_name, raw_log_excerpt
+        FROM device_log_events
+        WHERE sn=%s AND event_category='temperature_calibration'
+          AND event_time >= %s AND event_time < %s
+        ORDER BY event_time DESC, id DESC
+        LIMIT 1000
+        """,
+        (sn, start, end),
+    )
+    deduped = []
+    seen = set()
+    for event in event_rows:
+        key = (
+            event.get('event_time'),
+            re.sub(r'\s+', ' ', str(event.get('raw_log_excerpt') or '')),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        package = package_map.get(int(event.get('source_file_id') or 0), {})
+        event['package_name'] = package.get('file_name')
+        deduped.append(event)
+    status_counts = Counter((row.get('scan_status') or 'pending') for row in scans)
+    pending_count = max(0, len(package_ids) - len(scans))
+    failed_rows = [
+        {
+            'source_file_id': row.get('source_file_id'),
+            'package_name': (package_map.get(int(row.get('source_file_id') or 0)) or {}).get('file_name'),
+            'error': row.get('error_message'),
+        }
+        for row in scans if row.get('scan_status') == 'failed'
+    ][:12]
+    event_days = {str(row.get('event_time'))[:10] for row in deduped if row.get('event_time')}
+    event_type_counts = Counter(row.get('event_type') or 'unknown' for row in deduped)
+    return {
+        'sn': sn,
+        'range': {
+            'start_date': start.strftime("%Y-%m-%d"),
+            'end_date': (end - timedelta(days=1)).strftime("%Y-%m-%d"),
+        },
+        'summary': {
+            'event_count': len(deduped),
+            'completed_event_count': int(event_type_counts.get('temperature_calibration_completed', 0)),
+            'failed_event_count': int(event_type_counts.get('temperature_calibration_failed', 0)),
+            'parameter_event_count': int(event_type_counts.get('temperature_calibration_parameter', 0)),
+            'status_event_count': int(event_type_counts.get('temperature_calibration_status', 0)),
+            'event_day_count': len(event_days),
+            'package_count': len(package_ids),
+            'completed_packages': int(status_counts.get('completed', 0)),
+            'queued_packages': int(status_counts.get('queued', 0)),
+            'scanning_packages': int(status_counts.get('scanning', 0)),
+            'failed_packages': int(status_counts.get('failed', 0)),
+            'pending_packages': pending_count,
+            'completion_rate': round(status_counts.get('completed', 0) * 100 / len(package_ids), 1) if package_ids else 0,
+        },
+        'events': deduped,
+        'failed_packages': failed_rows,
+        'status_explanation': {
+            'completed': '已扫描并写入本地事件库，后续查询不再下载该日志包。',
+            'queued': '等待后台轻量扫描，只提取校准事件，不依赖菜谱匹配。',
+            'scanning': '正在下载并扫描日志包。',
+            'failed': '该日志包扫描失败，可重新补齐；其他包不受影响。',
+        },
+    }
+
 def recover_stale_parsing_packages(sn=None):
     if not ensure_analytics_db():
         return 0
@@ -2484,6 +2883,143 @@ def is_android_log_name(name):
 def is_temperature_log_name(name):
     base = (name or '').lower()
     return base.startswith('temperature') and base.endswith('.log')
+
+TEMPERATURE_CALIBRATION_PATTERNS = [
+    re.compile(r'温度.{0,16}(?:校准|校正|矫正|标定|修正)', re.I),
+    re.compile(r'(?:校准|校正|矫正|标定|修正).{0,16}温度', re.I),
+    re.compile(r'(?:temperature|temp).{0,20}(?:calibrat|correct|adjust)', re.I),
+    re.compile(r'(?:calibrat|correct|adjust).{0,20}(?:temperature|temp)', re.I),
+]
+
+def classify_temperature_calibration_line(line):
+    text = str(line or '').strip()
+    matched = None
+    for pattern in TEMPERATURE_CALIBRATION_PATTERNS:
+        hit = pattern.search(text)
+        if hit:
+            matched = hit.group(0)
+            break
+    if not matched:
+        return None
+    if re.search(r'操作结果[：:]\s*false|失败|异常|取消|fail|error|cancel', text, re.I):
+        event_type = 'temperature_calibration_failed'
+        event_label = '温度校正失败'
+    elif re.search(r'操作结果[：:]\s*true', text, re.I) or re.search(r'["\']opType["\']\s*:\s*["\']TempCalibrate', text, re.I):
+        event_type = 'temperature_calibration_completed'
+        event_label = '温度校正完成'
+    elif re.search(r'最近.{0,8}(?:校准|校正|矫正|标定|修正).{0,8}时间', text, re.I):
+        event_type = 'temperature_calibration_status'
+        event_label = '校正状态读取'
+    elif re.search(r'设置.{0,12}(?:参数|标定温度)|tempCoefficient', text, re.I):
+        event_type = 'temperature_calibration_parameter'
+        event_label = '校正参数设置'
+    elif re.search(r'完成|成功|结束|完毕|finish|complete|success', text, re.I):
+        event_type = 'temperature_calibration_completed'
+        event_label = '温度校正完成'
+    elif re.search(r'开始|启动|进入|start|begin', text, re.I):
+        event_type = 'temperature_calibration_started'
+        event_label = '温度校正开始'
+    else:
+        event_type = 'temperature_calibration_event'
+        event_label = '温度校正动作'
+    return {
+        'event_category': 'temperature_calibration',
+        'event_type': event_type,
+        'event_label': event_label,
+        'matched_keyword': matched[:120],
+    }
+
+def scan_temperature_calibration_text(text, source_log_name, fallback_time=None):
+    events = []
+    seen = set()
+    for line in str(text or '').splitlines():
+        classification = classify_temperature_calibration_line(line)
+        if not classification:
+            continue
+        ts = parse_log_ts(line) or fallback_time
+        raw = line.strip()[:1200]
+        dedupe_key = (ts.isoformat() if ts else '', re.sub(r'\s+', ' ', raw))
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        events.append({
+            **classification,
+            'event_time': ts,
+            'source_log_name': source_log_name,
+            'raw_log_excerpt': raw,
+        })
+    return events
+
+def persist_device_log_events(sn, source_file_id, scan_type, events):
+    if not ensure_analytics_db():
+        return 0
+    now = datetime.now().replace(microsecond=0)
+    execute_local(
+        "DELETE FROM device_log_events WHERE sn=%s AND source_file_id=%s AND event_category=%s",
+        (sn, int(source_file_id), scan_type),
+    )
+    payload = []
+    for event in events or []:
+        raw = str(event.get('raw_log_excerpt') or '')
+        event_time = to_mysql_dt(event.get('event_time'))
+        event_hash = hashlib.sha256(
+            f"{sn}|{int(source_file_id)}|{scan_type}|{event_time}|{raw}".encode('utf-8')
+        ).hexdigest()
+        payload.append((
+            sn, int(source_file_id), scan_type, event.get('event_type') or 'event',
+            event.get('event_label') or '日志事件', event_time, event.get('matched_keyword'),
+            event.get('source_log_name'), raw, event_hash, LOG_EVENT_SCAN_VERSION, now,
+        ))
+    executemany_local(
+        """
+        INSERT IGNORE INTO device_log_events(
+            sn, source_file_id, event_category, event_type, event_label, event_time,
+            matched_keyword, source_log_name, raw_log_excerpt, event_hash, scan_version, created_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+        """,
+        payload,
+    )
+    return len(payload)
+
+def scan_temperature_calibration_package(sn, source_file_id):
+    file_row = fetch_one(
+        "SELECT id, sn, file_name, file_length, pic AS url, create_time, cos_deleted "
+        "FROM machine_ftp WHERE id=%s AND sn=%s LIMIT 1",
+        (int(source_file_id), sn),
+        source=True,
+        database='btyc',
+    )
+    if not file_row or not file_row.get('url') or file_row.get('cos_deleted'):
+        raise ValueError('日志包不可下载或已被删除')
+    zip_bytes = download_log_zip(file_row['url'])
+    try:
+        zf = zipfile.ZipFile(BytesIO(zip_bytes))
+    except zipfile.BadZipFile as exc:
+        raise ValueError('下载内容不是有效 ZIP') from exc
+    fallback_time = to_mysql_dt(infer_log_time_from_filename(file_row.get('file_name'))) or to_mysql_dt(file_row.get('create_time'))
+    events = []
+    with zf:
+        for info in zf.infolist():
+            if info.is_dir():
+                continue
+            base = Path(info.filename).name
+            if not is_android_log_name(base):
+                continue
+            text = text_from_zip_member(zf, info, max_bytes=16 * 1024 * 1024)
+            events.extend(scan_temperature_calibration_text(text, base, fallback_time=fallback_time))
+    deduped = {}
+    for event in events:
+        key = (
+            event.get('event_time'),
+            re.sub(r'\s+', ' ', str(event.get('raw_log_excerpt') or '')),
+        )
+        deduped[key] = event
+    return persist_device_log_events(
+        sn,
+        source_file_id,
+        'temperature_calibration',
+        sorted(deduped.values(), key=lambda item: item.get('event_time') or datetime.min),
+    )
 
 def parse_android_pot_temperature_series(text, max_points=300000):
     temp_re = re.compile(r'温度:_?(-?\d+)_(-?\d+)_(-?\d+)')
@@ -4568,6 +5104,710 @@ def normalized_amount(value, unit):
         return raw
     return None
 
+THERMAL_RULES = [
+    {'category': '自定义/待确认', 'keywords': ['自定义', '未知', '测试', '默认', '其他', '手动捞出'], 'specific_heat': None, 'water_fraction': None, 'oil_fraction': None, 'hazard_class': '待人工归类', 'confidence': '低'},
+    {'category': '水/汤汁', 'keywords': ['水', '清水', '饮用水', '开水', '冷水', '热水', '冰水', '高汤', '汤', '汤汁', '汤底', 'water', '水淀粉', '淀粉水', '生粉水'], 'specific_heat': 4.0, 'water_fraction': 0.9, 'oil_fraction': 0.0, 'boiling_c': 100, 'hazard_class': '低风险含水液体', 'confidence': '中'},
+    {'category': '液体调料', 'keywords': ['酱油', '醬油', 'soy sauce', '生抽', '老抽', '醋', '米醋', '陈醋', '香醋', '料酒', '黄酒', '米酒', '白酒', '啤酒', '蚝油', '蠔油', '耗油', '素蠔油', '鱼露', '豉油', '东古', '美极', '一品鲜', '酱汁', '调味汁', '鲜味汁', '辣鲜露', '蒸鱼豉油', 'white sauce', 'squid sauce', 'sweet and sour sauce', '다크소스', '汁', '液'], 'specific_heat': 3.7, 'water_fraction': 0.75, 'oil_fraction': 0.02, 'boiling_c': 100, 'hazard_class': '含水液体调料', 'confidence': '低'},
+    {'category': '酱料/发酵调料', 'keywords': ['豆瓣酱', '辣酱', '甜面酱', '黄豆酱', '柱侯酱', '海鲜酱', '芝麻酱', '沙茶酱', '酱料', '酱包', '豆豉', '豆䜴', '黑豆豉', 'black bean', 'black beans', '磨豉酱', '剁椒', '泡椒', '鲜椒酱', '脆椒酱', '淳牌酱', '干锅酱', '酱椒酱', 'pasta sauce', '小炒料', '鲜上鲜', '复合', '湖洋', '底料'], 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.08, 'hazard_class': '复合调料/需复核', 'confidence': '低'},
+    {'category': '油脂', 'keywords': ['oil', 'aliejus', '猪油', '牛油', '鸡油', '鸭油', '黄油', 'butter', '色拉油', '沙拉油', '菜籽油', '花生油', '大豆油', '玉米油', '调和油', '混合油', '植物油', '食用油', '香油', '麻油', '芝麻油', '葱油', '花椒油', '辣椒油', '油辣子', '红油', '明油', '料油', '熟油', '油脂', '油桶'], 'exclude_keywords': ['酱油', '醬油', 'soy sauce', '蚝油', '蠔油', '耗油', '豉油'], 'specific_heat': 2.0, 'water_fraction': 0.0, 'oil_fraction': 1.0, 'smoke_point_c': None, 'flash_point_c': None, 'autoignition_c': None, 'hazard_class': '可燃油脂/温度待校准', 'confidence': '低'},
+    {'category': '香辛料/干货', 'keywords': ['干辣椒', '辣椒干', '干椒', '辣椒粉', '辣椒面', '刀口辣椒', '胡椒', '胡椒粉', 'black pepper', '花椒', '麻椒', '藤椒', '八角', '八角粉', '桂皮', '香叶', '孜然', '孜然粉', '芝麻', '白芝麻', '黑芝麻', '花生米', '十三香', '五香粉', '咖喱粉', '香料', '丁香', '草果', '白芷', '山奈', '良姜', '陈皮', '香茅', '甘草', '沙姜', '肉蔻'], 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.08, 'hazard_class': '可燃干货/燃点待测', 'confidence': '低'},
+    {'category': '鲜椒/蔬菜', 'keywords': ['小米辣', '小米椒', '美人椒', '野山椒', '子天椒', '指天椒', '贡椒', '黄贡椒', '软皮椒', '二荆条', '土辣椒', '手锤红辣椒', '塌辣子', '辣椒', '辣椒片', '辣椒圈', '辣椒段', '辣椒碎', '青椒', '红椒', '尖椒', '线椒', '螺丝椒', '杭椒', 'capsicum', 'mix pepper', 'chili sliced', 'pepper', '菜', '葱', '䓤', '蔥', '姜', '薑', '蒜', '마늘', 'garlic', '笋', '土豆', '萝卜', '罗卜', '豆角', '缸豆', '豇豆', '四季豆', '扁豆', '豆芽', 'bean sprouts', '洋葱', '洋蔥', 'onion', 'courgettes', '茄', '瓜', '芹', '韭', 'leek', '蒜苗', '蒜苔', '莲藕', '藕', '茭白', '花菜', '西蓝花', '包菜', 'cabbage', '白菜', '香菜', '西红柿', '番茄', '玉米粒', 'carrot', 'mixed vege', '藠头', '芥兰', '九层塔', '金不换', '果蔬粒', 'pineapple', '菠萝', '芋头', '甜豆', '兰豆', '红苕尖'], 'specific_heat': 3.7, 'water_fraction': 0.82, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '中'},
+    {'category': '菌菇类', 'keywords': ['菌', '菇', '蘑菇', '香菇', '平菇', '杏鲍菇', '金针菇', '木耳', '银耳'], 'specific_heat': 3.6, 'water_fraction': 0.85, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '中'},
+    {'category': '肉类', 'keywords': ['鸡', 'chicken', '牛', 'beef', '猪', 'pork', '羊', '鸭', '鹅', '肉', '里脊', '排骨', '肥肠', '肥膘', '油渣', '叉烧', '腊肠', '香肠', '火腿', '午餐肉'], 'specific_heat': 3.2, 'water_fraction': 0.62, 'oil_fraction': 0.1, 'hazard_class': '含水可焦化食材', 'confidence': '中'},
+    {'category': '水产类', 'keywords': ['鱼', '虾', 'prawn', '蟹', '贝', '蛤', '鱿鱼', 'squid', '墨鱼', '海参', '鲍鱼', '牛蛙'], 'specific_heat': 3.4, 'water_fraction': 0.72, 'oil_fraction': 0.04, 'hazard_class': '含水可焦化食材', 'confidence': '中'},
+    {'category': '主食/淀粉食材', 'keywords': ['米饭', 'rice', '杂粮饭', '米粉', '河粉', '面条', 'noodles', 'yellow noodle', 'hokkien noodles', 'fettucine', 'fettuccine', 'pasta', '面片', '面疙瘩', '年糕', '粉皮', '粉丝', '粉条', '米线', '饼', '馍', '面筋'], 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.02, 'hazard_class': '淀粉类/可焦化', 'confidence': '低'},
+    {'category': '蛋奶豆制品', 'keywords': ['egg', 'eggs', '蛋', '鸡蛋', '鸭蛋', 'cheese', '奶', 'cream', 'crème', '乳', '豆腐', '豆皮', '腐竹', '香干', '豆干', '千张', '青豆', '杂豆'], 'specific_heat': 3.3, 'water_fraction': 0.68, 'oil_fraction': 0.06, 'hazard_class': '含水可焦化食材', 'confidence': '中'},
+    {'category': '粉类/增稠', 'keywords': ['starch powder', 'cheese powder', '淀粉', '生粉', '面粉', '玉米粉', '土豆粉', '红薯粉', '粉料', '裹粉', '浆粉'], 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.0, 'hazard_class': '粉类/需复核', 'confidence': '低'},
+    {'category': '糖类', 'keywords': ['sugar', '糖', '白糖', '冰糖', '红糖', '砂糖', '二砂', '麦芽糖', '蜂蜜'], 'specific_heat': 1.3, 'water_fraction': 0.02, 'oil_fraction': 0.0, 'hazard_class': '糖类/可焦化', 'confidence': '低'},
+    {'category': '盐味精/基础调味', 'keywords': ['salt', 'msg', 'baking soda', '鹽', '盐', '味精', '鸡精', '鸡粉', '味粉', '调味粉', '增味剂'], 'specific_heat': 0.9, 'water_fraction': 0.02, 'oil_fraction': 0.0, 'hazard_class': '无机/低燃烧风险', 'confidence': '低'},
+]
+
+SOURCE_CATEGORY_RULES = {
+    ('3', '1'): {'category': '鲜椒/蔬菜', 'specific_heat': 3.7, 'water_fraction': 0.82, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('3', '2'): {'category': '菌菇类', 'specific_heat': 3.6, 'water_fraction': 0.85, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('3', '23'): {'category': '鲜椒/蔬菜', 'specific_heat': 3.7, 'water_fraction': 0.82, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('4', '46'): {'category': '油脂', 'specific_heat': 2.0, 'water_fraction': 0.0, 'oil_fraction': 1.0, 'hazard_class': '可燃油脂/温度待校准', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('4', '47'): {'category': '油脂', 'specific_heat': 2.0, 'water_fraction': 0.0, 'oil_fraction': 1.0, 'hazard_class': '可燃油脂/温度待校准', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '33'): {'category': '液体调料', 'specific_heat': 3.7, 'water_fraction': 0.75, 'oil_fraction': 0.02, 'boiling_c': 100, 'hazard_class': '含水液体调料', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '40'): {'category': '酱料/发酵调料', 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.08, 'hazard_class': '复合调料/需复核', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '42'): {'category': '酱料/发酵调料', 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.08, 'hazard_class': '复合调料/需复核', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '43'): {'category': '香辛料/干货', 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.08, 'hazard_class': '可燃干货/燃点待测', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '44'): {'category': '液体调料', 'specific_heat': 3.7, 'water_fraction': 0.75, 'oil_fraction': 0.02, 'boiling_c': 100, 'hazard_class': '含水液体调料', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '45'): {'category': '糖类', 'specific_heat': 1.3, 'water_fraction': 0.02, 'oil_fraction': 0.0, 'hazard_class': '糖类/可焦化', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('6', '48'): {'category': '粉类/增稠', 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.0, 'hazard_class': '粉类/需复核', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('8', '44'): {'category': '盐味精/基础调味', 'specific_heat': 0.9, 'water_fraction': 0.02, 'oil_fraction': 0.0, 'hazard_class': '无机/低燃烧风险', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('1', '22'): {'category': '主食/淀粉食材', 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.02, 'hazard_class': '淀粉类/可焦化', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('10', '5'): {'category': '香辛料/干货', 'specific_heat': 1.6, 'water_fraction': 0.12, 'oil_fraction': 0.08, 'hazard_class': '可燃干货/燃点待测', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('10', '27'): {'category': '酱料/发酵调料', 'specific_heat': 2.6, 'water_fraction': 0.45, 'oil_fraction': 0.08, 'hazard_class': '复合调料/需复核', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('10', '29'): {'category': '鲜椒/蔬菜', 'specific_heat': 3.7, 'water_fraction': 0.82, 'oil_fraction': 0.0, 'hazard_class': '含水低风险食材', 'confidence': '低', 'source_note': '源库分类编码推断'},
+    ('2', '14'): {'category': '蛋奶豆制品', 'specific_heat': 3.3, 'water_fraction': 0.68, 'oil_fraction': 0.06, 'hazard_class': '含水可焦化食材', 'confidence': '低', 'source_note': '源库分类编码推断'},
+}
+
+def infer_thermal_property(name='', category_1='', category_2='', ingredient_type=None):
+    text = ' '.join(str(x or '') for x in [name, category_1, category_2]).lower()
+    if str(ingredient_type or '') == '3':
+        text = f"{text} 液"
+    for rule in THERMAL_RULES:
+        if any(keyword and keyword.lower() in text for keyword in rule.get('exclude_keywords', [])):
+            continue
+        if any(keyword and keyword.lower() in text for keyword in rule['keywords']):
+            result = dict(rule)
+            result.pop('keywords', None)
+            result.pop('exclude_keywords', None)
+            result.setdefault('boiling_c', None)
+            result.setdefault('smoke_point_c', None)
+            result.setdefault('flash_point_c', None)
+            result.setdefault('autoignition_c', None)
+            result['source_note'] = '源库分类+名称关键词推断'
+            return result
+    code_rule = SOURCE_CATEGORY_RULES.get((str(category_1 or ''), str(category_2 or '')))
+    if code_rule:
+        result = dict(code_rule)
+        result.setdefault('boiling_c', None)
+        result.setdefault('smoke_point_c', None)
+        result.setdefault('flash_point_c', None)
+        result.setdefault('autoignition_c', None)
+        return result
+    return {
+        'category': '未分类',
+        'specific_heat': None,
+        'water_fraction': None,
+        'oil_fraction': None,
+        'boiling_c': None,
+        'smoke_point_c': None,
+        'flash_point_c': None,
+        'autoignition_c': None,
+        'hazard_class': '待归类',
+        'confidence': '低',
+        'source_note': '默认兜底/待人工校准',
+    }
+
+def canonical_ingredient_key(ingredient_id, name):
+    raw_id = str(ingredient_id or '').strip()
+    if raw_id:
+        return raw_id
+    return f"name:{str(name or '').strip()}"
+
+def upsert_thermal_ingredient_rows(rows):
+    if not rows:
+        return 0
+    ensure_analytics_db()
+    conn = get_conn()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    sql = """
+        INSERT INTO ingredient_thermal_properties (
+            source_ingredient_id, canonical_name, aliases_json, category, source_category_1, source_category_2,
+            ingredient_type, automatic, specific_heat_kj_kg_c, water_fraction, oil_fraction, boiling_c,
+            smoke_point_c, flash_point_c, autoignition_c, hazard_class, confidence, source_note,
+            recipe_usage_count, recipe_count, total_amount_g, total_amount_ml, last_seen_recipe_id, created_at, updated_at
+        ) VALUES (
+            %(source_ingredient_id)s, %(canonical_name)s, %(aliases_json)s, %(category)s, %(source_category_1)s, %(source_category_2)s,
+            %(ingredient_type)s, %(automatic)s, %(specific_heat_kj_kg_c)s, %(water_fraction)s, %(oil_fraction)s, %(boiling_c)s,
+            %(smoke_point_c)s, %(flash_point_c)s, %(autoignition_c)s, %(hazard_class)s, %(confidence)s, %(source_note)s,
+            %(recipe_usage_count)s, %(recipe_count)s, %(total_amount_g)s, %(total_amount_ml)s, %(last_seen_recipe_id)s, %(created_at)s, %(updated_at)s
+        )
+        ON DUPLICATE KEY UPDATE
+            canonical_name = VALUES(canonical_name),
+            aliases_json = VALUES(aliases_json),
+            category = VALUES(category),
+            source_category_1 = VALUES(source_category_1),
+            source_category_2 = VALUES(source_category_2),
+            ingredient_type = VALUES(ingredient_type),
+            automatic = VALUES(automatic),
+            specific_heat_kj_kg_c = VALUES(specific_heat_kj_kg_c),
+            water_fraction = VALUES(water_fraction),
+            oil_fraction = VALUES(oil_fraction),
+            boiling_c = VALUES(boiling_c),
+            smoke_point_c = VALUES(smoke_point_c),
+            flash_point_c = VALUES(flash_point_c),
+            autoignition_c = VALUES(autoignition_c),
+            hazard_class = VALUES(hazard_class),
+            confidence = VALUES(confidence),
+            source_note = VALUES(source_note),
+            recipe_usage_count = GREATEST(recipe_usage_count, VALUES(recipe_usage_count)),
+            recipe_count = GREATEST(recipe_count, VALUES(recipe_count)),
+            total_amount_g = GREATEST(total_amount_g, VALUES(total_amount_g)),
+            total_amount_ml = GREATEST(total_amount_ml, VALUES(total_amount_ml)),
+            last_seen_recipe_id = COALESCE(VALUES(last_seen_recipe_id), last_seen_recipe_id),
+            updated_at = VALUES(updated_at)
+    """
+    payload = []
+    for row in rows:
+        item = dict(row)
+        for key in ['aliases_json', 'source_category_1', 'source_category_2', 'ingredient_type', 'automatic', 'boiling_c', 'smoke_point_c', 'flash_point_c', 'autoignition_c', 'last_seen_recipe_id']:
+            item.setdefault(key, None)
+        item.setdefault('recipe_usage_count', 0)
+        item.setdefault('recipe_count', 0)
+        item.setdefault('total_amount_g', 0)
+        item.setdefault('total_amount_ml', 0)
+        item['created_at'] = now
+        item['updated_at'] = now
+        payload.append(item)
+    try:
+        with conn.cursor() as cur:
+            cur.executemany(sql, payload)
+        conn.commit()
+        return len(payload)
+    finally:
+        conn.close()
+
+def sync_base_ingredients_to_thermal():
+    rows = fetch_all(
+        "SELECT ingredinent_id, ingredients_name, ingredinent_type, categories_1, categories_2, automatic, lang "
+        "FROM base_ingredients WHERE ingredients_name IS NOT NULL AND ingredients_name != '' "
+        "ORDER BY ingredinent_id, CASE WHEN lang = 'cn' THEN 0 WHEN lang = 'zh' THEN 1 WHEN lang = '' THEN 2 ELSE 3 END",
+        source=True,
+        database='btyc',
+    )
+    best = {}
+    aliases = defaultdict(set)
+    for row in rows:
+        key = str(row.get('ingredinent_id') or '').strip()
+        name = str(row.get('ingredients_name') or '').strip()
+        if not key or not name:
+            continue
+        aliases[key].add(name)
+        if key not in best:
+            best[key] = row
+    payload = []
+    for key, row in best.items():
+        name = str(row.get('ingredients_name') or '').strip()
+        inferred = infer_thermal_property(name, row.get('categories_1'), row.get('categories_2'), row.get('ingredinent_type'))
+        payload.append({
+            'source_ingredient_id': key,
+            'canonical_name': name,
+            'aliases_json': json.dumps(sorted(aliases[key] - {name}), ensure_ascii=False),
+            'category': inferred['category'],
+            'source_category_1': row.get('categories_1'),
+            'source_category_2': row.get('categories_2'),
+            'ingredient_type': row.get('ingredinent_type'),
+            'automatic': row.get('automatic'),
+            'specific_heat_kj_kg_c': inferred['specific_heat'],
+            'water_fraction': inferred['water_fraction'],
+            'oil_fraction': inferred['oil_fraction'],
+            'boiling_c': inferred.get('boiling_c'),
+            'smoke_point_c': inferred.get('smoke_point_c'),
+            'flash_point_c': inferred.get('flash_point_c'),
+            'autoignition_c': inferred.get('autoignition_c'),
+            'hazard_class': inferred['hazard_class'],
+            'confidence': inferred['confidence'],
+            'source_note': inferred['source_note'],
+        })
+    total = 0
+    for i in range(0, len(payload), 1000):
+        total += upsert_thermal_ingredient_rows(payload[i:i + 1000])
+    return {'source_rows': len(rows), 'ingredient_rows': total}
+
+def sync_recipe_ingredients_to_thermal(limit=20000):
+    limit = max(100, min(int(limit or 20000), 100000))
+    rows = fetch_all(
+        "SELECT rd.recipe_id, mr.name AS recipe_name, mr.group_name, rd.cooking_ingredient "
+        "FROM recipe_detail rd JOIN main_recipe mr ON mr.id = rd.recipe_id "
+        "WHERE rd.cooking_ingredient IS NOT NULL AND rd.cooking_ingredient != '' "
+        "ORDER BY rd.recipe_id DESC LIMIT %s",
+        (limit,),
+        source=True,
+        database='manage_backend',
+    )
+    agg = {}
+    recipe_sets = defaultdict(set)
+    ingredient_ids = set()
+    for row in rows:
+        recipe_id = row.get('recipe_id')
+        for item in parse_json_array(row.get('cooking_ingredient')):
+            if not isinstance(item, dict):
+                continue
+            ingredient_id = first_present(item, 'ingredientsId', 'Ingredients_id', 'ingredientId', 'id')
+            name = first_present(item, 'name', 'materialName', 'food_name', 'ingredient_name')
+            key = canonical_ingredient_key(ingredient_id, name)
+            if not key or key == 'name:':
+                continue
+            if ingredient_id:
+                ingredient_ids.add(str(ingredient_id))
+            entry = agg.setdefault(key, {
+                'source_ingredient_id': str(ingredient_id or key),
+                'canonical_name': str(name or '').strip() or str(ingredient_id),
+                'aliases': set(),
+                'recipe_usage_count': 0,
+                'total_amount_g': 0.0,
+                'total_amount_ml': 0.0,
+                'last_seen_recipe_id': recipe_id,
+            })
+            if name:
+                entry['aliases'].add(str(name).strip())
+            entry['recipe_usage_count'] += 1
+            entry['last_seen_recipe_id'] = recipe_id
+            recipe_sets[key].add(recipe_id)
+            unit = first_present(item, 'ingredientsUnit', 'Ingredients_unit', 'unit', 'dosageUnit', 'unit_name')
+            amount = normalized_amount(first_present(item, 'ingredientsDosage', 'Ingredients_dosage', 'dosage', 'weight', 'num', 'amount'), unit)
+            unit_text = str(unit or '').strip().lower()
+            if amount:
+                if unit_text in {'ml', '毫升', 'l', '升'}:
+                    entry['total_amount_ml'] += amount
+                else:
+                    entry['total_amount_g'] += amount
+    meta = fetch_ingredient_name_map(ingredient_ids)
+    payload = []
+    for key, entry in agg.items():
+        m = meta.get(str(entry['source_ingredient_id'])) or {}
+        name = str(m.get('ingredients_name') or entry['canonical_name'] or '').strip()
+        inferred = infer_thermal_property(name, m.get('categories_1'), m.get('categories_2'), m.get('ingredinent_type'))
+        aliases = sorted((entry['aliases'] | {entry['canonical_name']}) - {name})
+        payload.append({
+            'source_ingredient_id': entry['source_ingredient_id'],
+            'canonical_name': name,
+            'aliases_json': json.dumps(aliases, ensure_ascii=False),
+            'category': inferred['category'],
+            'source_category_1': m.get('categories_1'),
+            'source_category_2': m.get('categories_2'),
+            'ingredient_type': m.get('ingredinent_type'),
+            'automatic': m.get('automatic'),
+            'specific_heat_kj_kg_c': inferred['specific_heat'],
+            'water_fraction': inferred['water_fraction'],
+            'oil_fraction': inferred['oil_fraction'],
+            'boiling_c': inferred.get('boiling_c'),
+            'smoke_point_c': inferred.get('smoke_point_c'),
+            'flash_point_c': inferred.get('flash_point_c'),
+            'autoignition_c': inferred.get('autoignition_c'),
+            'hazard_class': inferred['hazard_class'],
+            'confidence': inferred['confidence'],
+            'source_note': '菜谱配料聚合+' + inferred['source_note'],
+            'recipe_usage_count': entry['recipe_usage_count'],
+            'recipe_count': len(recipe_sets[key]),
+            'total_amount_g': round(entry['total_amount_g'], 3),
+            'total_amount_ml': round(entry['total_amount_ml'], 3),
+            'last_seen_recipe_id': entry['last_seen_recipe_id'],
+        })
+    total = 0
+    for i in range(0, len(payload), 1000):
+        total += upsert_thermal_ingredient_rows(payload[i:i + 1000])
+    return {'recipe_rows': len(rows), 'ingredient_rows': total}
+
+def latest_thermal_sync():
+    ensure_analytics_db()
+    rows = fetch_all("SELECT * FROM ingredient_thermal_sync_runs ORDER BY started_at DESC LIMIT 1")
+    return rows[0] if rows else None
+
+def thermal_knowledge_summary():
+    ensure_analytics_db()
+    row = fetch_one(
+        "SELECT COUNT(*) AS total, COUNT(DISTINCT category) AS categories, "
+        "SUM(CASE WHEN category = '油脂' OR oil_fraction >= 0.5 THEN 1 ELSE 0 END) AS oils, "
+        "SUM(CASE WHEN hazard_class LIKE '%%可燃%%' OR hazard_class LIKE '%%油脂%%' OR hazard_class LIKE '%%挥发%%' THEN 1 ELSE 0 END) AS risky, "
+        "SUM(recipe_usage_count) AS usage_count FROM ingredient_thermal_properties"
+    ) or {}
+    cats = fetch_all("SELECT category, COUNT(*) AS count FROM ingredient_thermal_properties GROUP BY category ORDER BY count DESC, category")
+    hazards = fetch_all("SELECT hazard_class, COUNT(*) AS count FROM ingredient_thermal_properties GROUP BY hazard_class ORDER BY count DESC, hazard_class")
+    return {
+        'total': int(row.get('total') or 0),
+        'categories': int(row.get('categories') or 0),
+        'oils': int(row.get('oils') or 0),
+        'risky': int(row.get('risky') or 0),
+        'usage_count': int(row.get('usage_count') or 0),
+        'category_options': cats,
+        'hazard_options': hazards,
+        'last_sync': latest_thermal_sync(),
+    }
+
+# ── Safety Scan Engine ──────────────────────────────────────────────
+
+SAFETY_RULES = [
+    {
+        'key': 'max_temp_high',
+        'label': '实测高温 > 330℃',
+        'level': 'high',
+        'score': 100,
+        'sql_condition': 'max_pot_temp > 330',
+        'description': '锅体最高温度超过330℃，接近油脂自燃风险区',
+    },
+    {
+        'key': 'max_temp_elevated',
+        'label': '实测高温 280-330℃',
+        'level': 'medium',
+        'score': 60,
+        'sql_condition': 'max_pot_temp BETWEEN 280 AND 330',
+        'description': '锅体温度偏高，需关注投料和功率控制',
+    },
+    {
+        'key': 'no_power_samples',
+        'label': '缺功率采样',
+        'level': 'medium',
+        'score': 50,
+        'sql_condition': None,
+        'description': '作业有温度数据但缺少功率采样，测温或通讯可能异常',
+    },
+    {
+        'key': 'no_temp_samples',
+        'label': '缺温度样本',
+        'level': 'medium',
+        'score': 55,
+        'sql_condition': '(sample_count = 0 OR max_pot_temp IS NULL)',
+        'description': '作业窗口内无有效温度样本，传感器可能故障',
+    },
+    {
+        'key': 'recipe_high_freq',
+        'label': '高频高温菜谱',
+        'level': 'info',
+        'score': 30,
+        'sql_condition': None,
+        'description': '该菜谱在全局统计中高温比例偏高',
+    },
+]
+
+
+def run_safety_scan(scan_type='quick'):
+    """Run safety rules against all cook_jobs in local DB. Returns scan run id."""
+    ensure_analytics_db()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    run_id = None
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO safety_scan_runs(scan_type, status, started_at) VALUES (%s, %s, %s)",
+                (scan_type, 'RUNNING', now),
+            )
+            run_id = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+
+    total_alerts = 0
+    stats = {'total_jobs': 0, 'high_temp_jobs': 0, 'delay_risk_jobs': 0, 'sensor_gap_jobs': 0}
+
+    try:
+        # ── Rule 1 & 2: Temperature-based rules ──
+        for rule in SAFETY_RULES:
+            if not rule.get('sql_condition'):
+                continue
+            sql = f"""
+                SELECT cj.id AS cook_job_id, cj.sn, cj.source_file_id, cj.recipe_name,
+                       cj.cook_start_time, cj.cook_end_time, cj.duration_seconds,
+                       cj.max_pot_temp, cj.avg_pot_temp, cj.sample_count,
+                       cj.step_count, cj.android_action_count
+                FROM cook_jobs cj
+                WHERE {rule['sql_condition']}
+                ORDER BY cj.max_pot_temp DESC
+                LIMIT 5000
+            """
+            rows = fetch_all(sql)
+            alerts = []
+            for row in rows:
+                alerts.append((
+                    run_id, row.get('sn'), row.get('source_file_id'), row.get('cook_job_id'),
+                    row.get('recipe_name'), row.get('cook_start_time'), row.get('cook_end_time'),
+                    row.get('duration_seconds'), rule['key'], rule['label'], rule['level'],
+                    rule['score'], row.get('max_pot_temp'), row.get('avg_pot_temp'),
+                    None, None,
+                    json.dumps({'rule': rule['key'], 'condition': rule['sql_condition']}, ensure_ascii=False),
+                    now,
+                ))
+            if alerts:
+                placeholders = ','.join(['(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)'] * len(alerts))
+                flat = [v for tup in alerts for v in tup]
+                execute_local(
+                    f"INSERT INTO safety_scan_alerts(scan_run_id, sn, source_file_id, cook_job_id, recipe_name, cook_start_time, cook_end_time, duration_seconds, rule_key, rule_label, risk_level, severity_score, max_pot_temp, avg_pot_temp, actual_energy_kwh, oil_to_food_interval, detail_json, created_at) VALUES {placeholders}",
+                    flat,
+                )
+                total_alerts += len(alerts)
+                if rule['key'] == 'max_temp_high':
+                    stats['high_temp_jobs'] = len(alerts)
+                if rule['key'] in ('no_power_samples', 'no_temp_samples'):
+                    stats['sensor_gap_jobs'] += len(alerts)
+
+            stats['total_jobs'] = (fetch_one("SELECT COUNT(*) AS cnt FROM cook_jobs") or {}).get('cnt', 0)
+
+        # ── Rule "no_power_samples": jobs with temperature but no power events ──
+        no_power_sql = """
+            SELECT cj.id AS cook_job_id, cj.sn, cj.source_file_id, cj.recipe_name,
+                   cj.cook_start_time, cj.cook_end_time, cj.duration_seconds,
+                   cj.max_pot_temp, cj.avg_pot_temp, cj.sample_count
+            FROM cook_jobs cj
+            LEFT JOIN cook_power_events cpe ON cpe.cook_job_id = cj.id
+            WHERE cj.sample_count > 0 AND cpe.id IS NULL
+            ORDER BY cj.max_pot_temp DESC
+            LIMIT 5000
+        """
+        no_power_rows = fetch_all(no_power_sql)
+        no_power_alerts = []
+        for row in (no_power_rows or []):
+            no_power_alerts.append((
+                run_id, row.get('sn'), row.get('source_file_id'), row.get('cook_job_id'),
+                row.get('recipe_name'), row.get('cook_start_time'), row.get('cook_end_time'),
+                row.get('duration_seconds'), 'no_power_samples', '缺功率采样',
+                'medium', 50, row.get('max_pot_temp'), row.get('avg_pot_temp'),
+                None, None,
+                json.dumps({'sample_count': row.get('sample_count')}, ensure_ascii=False),
+                now,
+            ))
+        if no_power_alerts:
+            placeholders = ','.join(['(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)'] * len(no_power_alerts))
+            flat = [v for tup in no_power_alerts for v in tup]
+            execute_local(
+                f"INSERT INTO safety_scan_alerts(scan_run_id, sn, source_file_id, cook_job_id, recipe_name, cook_start_time, cook_end_time, duration_seconds, rule_key, rule_label, risk_level, severity_score, max_pot_temp, avg_pot_temp, actual_energy_kwh, oil_to_food_interval, detail_json, created_at) VALUES {placeholders}",
+                flat,
+            )
+            total_alerts += len(no_power_alerts)
+            stats['sensor_gap_jobs'] += len(no_power_alerts)
+
+        # ── Rule: Oil-to-food delay (join action_events) ──
+        delay_sql = """
+            SELECT cj.id AS cook_job_id, cj.sn, cj.source_file_id, cj.recipe_name,
+                   cj.cook_start_time, cj.cook_end_time, cj.duration_seconds,
+                   cj.max_pot_temp, cj.avg_pot_temp,
+                   oil.offset_seconds AS oil_offset,
+                   food.offset_seconds AS food_offset,
+                   (food.offset_seconds - oil.offset_seconds) AS oil_to_food_interval
+            FROM cook_jobs cj
+            JOIN cook_action_events oil ON oil.cook_job_id = cj.id AND oil.event_type = 'add_oil'
+            JOIN cook_action_events food ON food.cook_job_id = cj.id
+                AND food.event_type IN ('ingredient', 'stir', 'roll_move', 'pump')
+                AND food.offset_seconds > oil.offset_seconds
+            WHERE (food.offset_seconds - oil.offset_seconds) > 60
+            GROUP BY cj.id, cj.sn, cj.source_file_id, cj.recipe_name,
+                     cj.cook_start_time, cj.cook_end_time, cj.duration_seconds,
+                     cj.max_pot_temp, cj.avg_pot_temp, oil.offset_seconds, food.offset_seconds
+            ORDER BY (food.offset_seconds - oil.offset_seconds) DESC
+            LIMIT 5000
+        """
+        delay_rows = fetch_all(delay_sql)
+        delay_alerts = []
+        for row in delay_rows:
+            interval = int(row.get('oil_to_food_interval') or 0)
+            score = min(100, 40 + interval // 2)
+            level = 'high' if interval > 120 else 'medium'
+            delay_alerts.append((
+                run_id, row.get('sn'), row.get('source_file_id'), row.get('cook_job_id'),
+                row.get('recipe_name'), row.get('cook_start_time'), row.get('cook_end_time'),
+                row.get('duration_seconds'), 'oil_food_delay', '投油到主料间隔过长',
+                level, score, row.get('max_pot_temp'), row.get('avg_pot_temp'),
+                None, interval,
+                json.dumps({'oil_offset': row.get('oil_offset'), 'food_offset': row.get('food_offset'), 'interval_s': interval}, ensure_ascii=False),
+                now,
+            ))
+        if delay_alerts:
+            placeholders = ','.join(['(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)'] * len(delay_alerts))
+            flat = [v for tup in delay_alerts for v in tup]
+            execute_local(
+                f"INSERT INTO safety_scan_alerts(scan_run_id, sn, source_file_id, cook_job_id, recipe_name, cook_start_time, cook_end_time, duration_seconds, rule_key, rule_label, risk_level, severity_score, max_pot_temp, avg_pot_temp, actual_energy_kwh, oil_to_food_interval, detail_json, created_at) VALUES {placeholders}",
+                flat,
+            )
+            total_alerts += len(delay_alerts)
+            stats['delay_risk_jobs'] = len(delay_alerts)
+
+        # ── Update daily stats ──
+        stats_sql = """
+            INSERT INTO safety_daily_stats(stat_date, sn, total_jobs, high_temp_300c, high_temp_330c,
+                oil_delay_60s, sensor_gap, max_temp_reached, avg_temp_across_jobs, total_energy_kwh, created_at)
+            SELECT
+                DATE(cook_start_time) AS stat_date,
+                sn,
+                COUNT(*) AS total_jobs,
+                SUM(CASE WHEN max_pot_temp >= 300 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN max_pot_temp >= 330 THEN 1 ELSE 0 END),
+                0,
+                SUM(CASE WHEN sample_count = 0 OR max_pot_temp IS NULL THEN 1 ELSE 0 END),
+                MAX(max_pot_temp),
+                AVG(avg_pot_temp),
+                NULL,
+                NOW()
+            FROM cook_jobs
+            WHERE cook_start_time IS NOT NULL
+            GROUP BY stat_date, sn
+            ON DUPLICATE KEY UPDATE
+                total_jobs = VALUES(total_jobs),
+                high_temp_300c = VALUES(high_temp_300c),
+                high_temp_330c = VALUES(high_temp_330c),
+                max_temp_reached = VALUES(max_temp_reached),
+                avg_temp_across_jobs = VALUES(avg_temp_across_jobs),
+                created_at = NOW()
+        """
+        execute_local(stats_sql)
+
+        finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        execute_local(
+            "UPDATE safety_scan_runs SET status=%s, total_jobs=%s, high_temp_jobs=%s, delay_risk_jobs=%s, sensor_gap_jobs=%s, total_alerts=%s, finished_at=%s WHERE id=%s",
+            ('COMPLETED', stats['total_jobs'], stats['high_temp_jobs'], stats['delay_risk_jobs'], stats['sensor_gap_jobs'], total_alerts, finished, run_id),
+        )
+        return {'run_id': run_id, 'alerts': total_alerts, 'stats': stats, 'status': 'COMPLETED'}
+
+    except Exception as exc:
+        finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        execute_local(
+            "UPDATE safety_scan_runs SET status=%s, error_message=%s, finished_at=%s WHERE id=%s",
+            ('FAILED', str(exc), finished, run_id),
+        )
+        raise
+
+
+def safety_overview():
+    """Aggregate safety stats for dashboard overview."""
+    ensure_analytics_db()
+    # High-level counts
+    summary = fetch_one("""
+        SELECT
+            COUNT(*) AS total_jobs,
+            SUM(CASE WHEN max_pot_temp >= 330 THEN 1 ELSE 0 END) AS critical_jobs,
+            SUM(CASE WHEN max_pot_temp >= 300 AND max_pot_temp < 330 THEN 1 ELSE 0 END) AS warning_jobs,
+            SUM(CASE WHEN max_pot_temp >= 250 AND max_pot_temp < 300 THEN 1 ELSE 0 END) AS caution_jobs,
+            MAX(max_pot_temp) AS all_time_max_temp,
+            AVG(max_pot_temp) AS all_time_avg_max_temp,
+            COUNT(DISTINCT sn) AS device_count
+        FROM cook_jobs
+        WHERE max_pot_temp IS NOT NULL
+    """) or {}
+
+    # Top risky devices
+    top_devices = fetch_all("""
+        SELECT sn, COUNT(*) AS high_count, MAX(max_pot_temp) AS worst_temp,
+               AVG(max_pot_temp) AS avg_high_temp
+        FROM cook_jobs
+        WHERE max_pot_temp >= 280
+        GROUP BY sn
+        HAVING high_count >= 2
+        ORDER BY high_count DESC, worst_temp DESC
+        LIMIT 20
+    """)
+
+    # Top risky recipes
+    top_recipes = fetch_all("""
+        SELECT recipe_name, COUNT(*) AS high_count, MAX(max_pot_temp) AS worst_temp,
+               AVG(max_pot_temp) AS avg_high_temp
+        FROM cook_jobs
+        WHERE max_pot_temp >= 280
+        GROUP BY recipe_name
+        ORDER BY high_count DESC
+        LIMIT 20
+    """)
+
+    # Temperature distribution
+    temp_dist = fetch_all("""
+        SELECT
+            CASE
+                WHEN max_pot_temp >= 350 THEN '>=350℃'
+                WHEN max_pot_temp >= 300 THEN '300-350℃'
+                WHEN max_pot_temp >= 250 THEN '250-300℃'
+                WHEN max_pot_temp >= 200 THEN '200-250℃'
+                WHEN max_pot_temp >= 150 THEN '150-200℃'
+                WHEN max_pot_temp >= 100 THEN '100-150℃'
+                ELSE '<100℃'
+            END AS band,
+            COUNT(*) AS cnt
+        FROM cook_jobs
+        WHERE max_pot_temp IS NOT NULL
+        GROUP BY band
+        ORDER BY MIN(max_pot_temp) DESC
+    """)
+
+    # Last scan
+    last_scan = fetch_one("SELECT * FROM safety_scan_runs WHERE status='COMPLETED' ORDER BY finished_at DESC LIMIT 1")
+
+    # Active alert counts
+    alert_counts = fetch_one("""
+        SELECT
+            COUNT(*) AS total,
+            SUM(CASE WHEN risk_level='high' AND dismissed=0 THEN 1 ELSE 0 END) AS high_active,
+            SUM(CASE WHEN risk_level='medium' AND dismissed=0 THEN 1 ELSE 0 END) AS medium_active,
+            SUM(CASE WHEN dismissed=1 THEN 1 ELSE 0 END) AS dismissed
+        FROM safety_scan_alerts
+    """) or {}
+
+    return {
+        'summary': {
+            'total_jobs': int(summary.get('total_jobs') or 0),
+            'critical_jobs': int(summary.get('critical_jobs') or 0),
+            'warning_jobs': int(summary.get('warning_jobs') or 0),
+            'caution_jobs': int(summary.get('caution_jobs') or 0),
+            'all_time_max_temp': float(summary.get('all_time_max_temp') or 0),
+            'all_time_avg_max_temp': round(float(summary.get('all_time_avg_max_temp') or 0), 1),
+            'device_count': int(summary.get('device_count') or 0),
+        },
+        'top_devices': [{
+            'sn': r.get('sn'),
+            'high_count': int(r.get('high_count') or 0),
+            'worst_temp': float(r.get('worst_temp') or 0),
+            'avg_high_temp': round(float(r.get('avg_high_temp') or 0), 1),
+        } for r in (top_devices or [])],
+        'top_recipes': [{
+            'recipe_name': r.get('recipe_name'),
+            'high_count': int(r.get('high_count') or 0),
+            'worst_temp': float(r.get('worst_temp') or 0),
+            'avg_high_temp': round(float(r.get('avg_high_temp') or 0), 1),
+        } for r in (top_recipes or [])],
+        'temp_distribution': [{
+            'band': r.get('band'),
+            'cnt': int(r.get('cnt') or 0),
+        } for r in (temp_dist or [])],
+        'last_scan': {
+            'scan_type': last_scan.get('scan_type') if last_scan else None,
+            'status': last_scan.get('status') if last_scan else None,
+            'total_alerts': int(last_scan.get('total_alerts') or 0) if last_scan else 0,
+            'finished_at': last_scan.get('finished_at').strftime("%Y-%m-%d %H:%M:%S") if last_scan and last_scan.get('finished_at') else None,
+        } if last_scan else None,
+        'alert_counts': {
+            'total': int(alert_counts.get('total') or 0),
+            'high_active': int(alert_counts.get('high_active') or 0),
+            'medium_active': int(alert_counts.get('medium_active') or 0),
+            'dismissed': int(alert_counts.get('dismissed') or 0),
+        },
+    }
+
+
+def safety_alerts_query(risk_level=None, rule_key=None, sn=None, dismissed=None, limit=200, offset=0):
+    """Paginated safety alerts query."""
+    ensure_analytics_db()
+    conditions = []
+    args = []
+    if risk_level:
+        conditions.append("risk_level = %s")
+        args.append(risk_level)
+    if rule_key:
+        conditions.append("rule_key = %s")
+        args.append(rule_key)
+    if sn:
+        conditions.append("sn = %s")
+        args.append(sn)
+    if dismissed is not None:
+        conditions.append("dismissed = %s")
+        args.append(int(dismissed))
+
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    total_row = fetch_one(f"SELECT COUNT(*) AS total FROM safety_scan_alerts {where_sql}", tuple(args))
+    rows = fetch_all(
+        f"SELECT * FROM safety_scan_alerts {where_sql} ORDER BY severity_score DESC, created_at DESC LIMIT %s OFFSET %s",
+        tuple(args + [limit, offset]),
+    )
+
+    items = []
+    for row in (rows or []):
+        item = dict(row)
+        for dt_field in ('cook_start_time', 'cook_end_time', 'created_at', 'dismissed_at'):
+            if item.get(dt_field) and hasattr(item[dt_field], 'strftime'):
+                item[dt_field] = item[dt_field].strftime("%Y-%m-%d %H:%M:%S")
+        if item.get('detail_json') and isinstance(item.get('detail_json'), str):
+            try:
+                item['detail'] = json.loads(item['detail_json'])
+            except Exception:
+                item['detail'] = {}
+        else:
+            item['detail'] = item.get('detail_json') or {}
+        items.append(item)
+
+    rule_counts = fetch_all("""
+        SELECT rule_key, rule_label, risk_level, COUNT(*) AS cnt
+        FROM safety_scan_alerts WHERE dismissed=0
+        GROUP BY rule_key, rule_label, risk_level ORDER BY cnt DESC
+    """)
+
+    return {
+        'total': int(total_row.get('total') or 0),
+        'limit': limit,
+        'offset': offset,
+        'items': items,
+        'rule_counts': [dict(r) for r in (rule_counts or [])],
+    }
+
 def step_type_label(value):
     labels = {
         '1': '投料',
@@ -5475,13 +6715,7 @@ def cook_temperature_structured(sn: str, request: Request, day: str = Query(None
     mark_device_watched(real_sn, username=username, priority=25)
     target_day = day or datetime.now().strftime("%Y-%m-%d")
     result = structured_cook_temperature_by_day(real_sn, target_day, limit=limit)
-    try:
-        queued = queue_recent_log_packages_for_device(real_sn, limit=2)
-        if queued:
-            kick_auto_parse_once()
-        result['structured_summary'] = device_structured_summary(real_sn)
-    except Exception as exc:
-        print(f"structured read queue wake failed: {exc}")
+    result['structured_summary'] = device_structured_summary(real_sn)
     log_event(
         username,
         'cook_temperature_structured',
@@ -5507,6 +6741,274 @@ def watch_structured_device(sn: str, request: Request, authorization: str = Head
     summary = device_structured_summary(real_sn)
     log_event(username, 'structured_watch', request, sn=real_sn, detail={'queued': queued, 'log_count': len(logs)})
     return {'sn': real_sn, 'queued': queued, 'summary': summary}
+
+@app.get("/api/temperature-calibrations/{sn}")
+def temperature_calibrations(
+    sn: str,
+    request: Request,
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    auto_queue: int = Query(1),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    end_text = end_date or datetime.now().strftime("%Y-%m-%d")
+    start_text = start_date or (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    start, end = parse_date_range(start_text, end_text)
+    mark_device_watched(real_sn, username=username, priority=15)
+    rows = get_device_log_files_in_range(real_sn, start, end)
+    queued = queue_temperature_calibration_scans(real_sn, rows, retry_failed=False) if auto_queue else 0
+    if queued:
+        kick_temperature_calibration_scan(real_sn)
+    result = temperature_calibration_payload(real_sn, start, end, rows)
+    result['newly_queued'] = queued
+    log_event(
+        username,
+        'temperature_calibration_search',
+        request,
+        sn=real_sn,
+        detail={
+            'start_date': start_text,
+            'end_date': end_text,
+            'event_count': result.get('summary', {}).get('event_count'),
+            'package_count': len(rows),
+            'newly_queued': queued,
+        },
+    )
+    return result
+
+@app.post("/api/temperature-calibrations/{sn}/sync")
+def sync_temperature_calibrations(
+    sn: str,
+    request: Request,
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    retry_failed: int = Query(1),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    end_text = end_date or datetime.now().strftime("%Y-%m-%d")
+    start_text = start_date or (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    start, end = parse_date_range(start_text, end_text)
+    mark_device_watched(real_sn, username=username, priority=5)
+    rows = get_device_log_files_in_range(real_sn, start, end)
+    queued = queue_temperature_calibration_scans(real_sn, rows, retry_failed=bool(retry_failed))
+    started = kick_temperature_calibration_scan(real_sn) if queued else False
+    result = temperature_calibration_payload(real_sn, start, end, rows)
+    result.update({'newly_queued': queued, 'worker_started': started})
+    log_event(
+        username,
+        'temperature_calibration_sync',
+        request,
+        sn=real_sn,
+        detail={
+            'start_date': start_text,
+            'end_date': end_text,
+            'package_count': len(rows),
+            'newly_queued': queued,
+            'retry_failed': bool(retry_failed),
+        },
+    )
+    return result
+
+@app.get("/api/thermal-knowledge")
+def thermal_knowledge(
+    request: Request,
+    keyword: str = Query(''),
+    category: str = Query(''),
+    hazard: str = Query(''),
+    limit: int = Query(300),
+    offset: int = Query(0),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    ensure_analytics_db()
+    limit = max(20, min(int(limit or 300), 1000))
+    offset = max(0, int(offset or 0))
+    where = []
+    args = []
+    if keyword.strip():
+        like = f"%{keyword.strip()}%"
+        where.append("(canonical_name LIKE %s OR aliases_json LIKE %s OR source_category_1 LIKE %s OR source_category_2 LIKE %s OR hazard_class LIKE %s)")
+        args.extend([like, like, like, like, like])
+    if category.strip():
+        where.append("category = %s")
+        args.append(category.strip())
+    if hazard.strip():
+        where.append("hazard_class = %s")
+        args.append(hazard.strip())
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ''
+    total_row = fetch_one(f"SELECT COUNT(*) AS total FROM ingredient_thermal_properties {where_sql}", tuple(args)) or {}
+    rows = fetch_all(
+        f"""
+        SELECT id, source_ingredient_id, canonical_name, aliases_json, category, source_category_1, source_category_2,
+               ingredient_type, automatic, specific_heat_kj_kg_c, water_fraction, oil_fraction, boiling_c,
+               smoke_point_c, flash_point_c, autoignition_c, hazard_class, confidence, source_note,
+               recipe_usage_count, recipe_count, total_amount_g, total_amount_ml, last_seen_recipe_id, updated_at
+        FROM ingredient_thermal_properties
+        {where_sql}
+        ORDER BY recipe_usage_count DESC, recipe_count DESC, canonical_name
+        LIMIT %s OFFSET %s
+        """,
+        tuple(args + [limit, offset]),
+    )
+    items = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item['aliases'] = json.loads(item.get('aliases_json') or '[]')
+        except Exception:
+            item['aliases'] = []
+        items.append(item)
+    summary = thermal_knowledge_summary()
+    log_event(username, 'thermal_knowledge_query', request, detail={'keyword': keyword, 'category': category, 'hazard': hazard, 'limit': limit, 'offset': offset, 'total': total_row.get('total')})
+    return {
+        'summary': summary,
+        'total': int(total_row.get('total') or 0),
+        'limit': limit,
+        'offset': offset,
+        'items': items,
+    }
+
+@app.post("/api/thermal-knowledge/sync")
+def sync_thermal_knowledge(request: Request, recipe_limit: int = Query(20000), authorization: str = Header(None)):
+    username = require_admin(authorization=authorization)
+    ensure_analytics_db()
+    started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    run_id = None
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO ingredient_thermal_sync_runs(sync_type, status, created_by, started_at) VALUES (%s, %s, %s, %s)",
+                ('manual_source_sync', 'RUNNING', username, started),
+            )
+            run_id = cur.lastrowid
+        conn.commit()
+    finally:
+        conn.close()
+    try:
+        base = sync_base_ingredients_to_thermal()
+        recipe = sync_recipe_ingredients_to_thermal(limit=recipe_limit)
+        finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        execute_local(
+            "UPDATE ingredient_thermal_sync_runs SET status=%s, base_rows=%s, recipe_rows=%s, ingredient_rows=%s, finished_at=%s WHERE id=%s",
+            ('COMPLETED', base.get('source_rows', 0), recipe.get('recipe_rows', 0), base.get('ingredient_rows', 0) + recipe.get('ingredient_rows', 0), finished, run_id),
+        )
+        result = {'run_id': run_id, 'base': base, 'recipe': recipe, 'summary': thermal_knowledge_summary()}
+        log_event(username, 'thermal_knowledge_sync', request, detail=result)
+        return result
+    except Exception as exc:
+        finished = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        execute_local(
+            "UPDATE ingredient_thermal_sync_runs SET status=%s, error_message=%s, finished_at=%s WHERE id=%s",
+            ('FAILED', str(exc), finished, run_id),
+        )
+        raise HTTPException(status_code=500, detail=f"热物性库同步失败：{exc}")
+
+# ── Safety Scan APIs ──────────────────────────────────────────────
+
+@app.get("/api/safety/overview")
+def safety_overview_api(request: Request, authorization: str = Header(None)):
+    username = require_auth(authorization=authorization)
+    ensure_analytics_db()
+    try:
+        result = safety_overview()
+        log_event(username, 'safety_overview', request, detail={'summary': result.get('summary')})
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"安全总览查询失败：{exc}")
+
+
+@app.get("/api/safety/alerts")
+def safety_alerts_api(
+    request: Request,
+    risk_level: str = Query(None),
+    rule_key: str = Query(None),
+    sn: str = Query(None),
+    dismissed: int = Query(None),
+    limit: int = Query(200),
+    offset: int = Query(0),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    ensure_analytics_db()
+    try:
+        result = safety_alerts_query(
+            risk_level=risk_level, rule_key=rule_key, sn=sn,
+            dismissed=dismissed, limit=limit, offset=offset,
+        )
+        log_event(username, 'safety_alerts_query', request, detail={
+            'risk_level': risk_level, 'rule_key': rule_key, 'sn': sn, 'total': result.get('total'),
+        })
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"安全告警查询失败：{exc}")
+
+
+@app.post("/api/safety/scan")
+def trigger_safety_scan(request: Request, scan_type: str = Query('quick'), authorization: str = Header(None)):
+    username = require_admin(authorization=authorization)
+    ensure_analytics_db()
+    try:
+        result = run_safety_scan(scan_type=scan_type)
+        log_event(username, 'safety_scan', request, detail=result)
+        return result
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"安全扫描失败：{exc}")
+
+
+@app.post("/api/safety/alerts/{alert_id}/dismiss")
+def dismiss_safety_alert(alert_id: int, request: Request, authorization: str = Header(None)):
+    username = require_admin(authorization=authorization)
+    ensure_analytics_db()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    affected = execute_local(
+        "UPDATE safety_scan_alerts SET dismissed=1, dismissed_by=%s, dismissed_at=%s WHERE id=%s AND dismissed=0",
+        (username, now, alert_id),
+    )
+    if not affected:
+        raise HTTPException(status_code=404, detail="告警不存在或已处理")
+    log_event(username, 'safety_alert_dismiss', request, detail={'alert_id': alert_id})
+    return {'dismissed': True, 'alert_id': alert_id}
+
+
+@app.get("/api/safety/trends")
+def safety_trends_api(
+    request: Request,
+    days: int = Query(7),
+    sn: str = Query(None),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    ensure_analytics_db()
+    try:
+        sn_filter = "WHERE sn = %s" if sn else ""
+        args = (sn,) if sn else ()
+        trends = fetch_all(
+            f"""
+            SELECT stat_date, SUM(total_jobs) AS total_jobs,
+                   SUM(high_temp_300c) AS high_temp_300c,
+                   SUM(high_temp_330c) AS high_temp_330c,
+                   MAX(max_temp_reached) AS max_temp_reached,
+                   AVG(avg_temp_across_jobs) AS avg_temp_across_jobs
+            FROM safety_daily_stats
+            {sn_filter} {'AND' if sn else 'WHERE'} stat_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+            GROUP BY stat_date ORDER BY stat_date ASC
+            """,
+            args + (days,),
+        )
+        log_event(username, 'safety_trends', request, detail={'days': days, 'sn': sn, 'rows': len(trends or [])})
+        return {
+            'days': days,
+            'sn': sn,
+            'trends': [{**dict(r), 'stat_date': r['stat_date'].strftime('%Y-%m-%d') if hasattr(r['stat_date'], 'strftime') else str(r['stat_date'])} for r in (trends or [])],
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"安全趋势查询失败：{exc}")
+
 
 @app.get("/api/recipe-search")
 def recipe_search(

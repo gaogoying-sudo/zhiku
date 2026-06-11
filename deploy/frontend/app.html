@@ -47,6 +47,9 @@
         .alert { border-radius: 3px; font-size: 13px; }
         .alert-danger { background: #fff2ed; border-color: #ffcfbd; color: #8a2b12; }
         .resource-chip { display: inline-block; margin: 2px 4px 2px 0; padding: 2px 8px; border-radius: 999px; background: #eef3fb; color: #475569; font-size: 12px; border: 1px solid #dbe4f0; }
+        .resource-chip.danger-chip { background: #fff1f2; color: #b42318; border-color: #fecdd3; }
+        .resource-chip.warning-chip { background: #fff7ed; color: #b45309; border-color: #fed7aa; }
+        .resource-chip.safe-chip { background: #f0fdf4; color: #15803d; border-color: #bbf7d0; }
         .recipe-row { cursor: pointer; }
         .recipe-row:hover td { background: #f1f7ff; }
         .detail-panel { background: #fbfdff; border-left: 3px solid var(--brand); }
@@ -201,6 +204,11 @@
         .weekday-count { font-size: 18px; font-weight: 700; margin-top: 2px; }
         .thermal-chart { position: relative; border: 1px solid var(--line); border-radius: 3px; background: #fff; padding: 12px; }
         .thermal-chart svg { width: 100%; height: 280px; display: block; }
+        .knowledge-energy-grid { display: grid; grid-template-columns: repeat(5, minmax(90px, 1fr)); gap: 8px; }
+        .knowledge-energy-cell { border: 1px solid var(--line); border-radius: 3px; background: #fff; padding: 8px 10px; min-height: 58px; }
+        .knowledge-energy-temp { color: var(--muted); font-size: 12px; }
+        .knowledge-energy-value { font-weight: 700; margin-top: 2px; }
+        @media (max-width: 900px) { .knowledge-energy-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
         .chart-hover-card { position: absolute; top: 52px; right: 18px; z-index: 5; min-width: 220px; border: 1px solid #cfe1ff; background: rgba(255,255,255,.96); box-shadow: 0 8px 20px rgba(15,23,42,.12); border-radius: 4px; padding: 8px 10px; font-size: 12px; pointer-events: none; }
         .chart-hover-title { font-weight: 700; margin-bottom: 4px; }
         .segmented-control { display: inline-flex; border: 1px solid #d5dce8; border-radius: 3px; overflow: hidden; background: #fff; }
@@ -405,18 +413,160 @@
                     <span class="context-pill"><span>生产</span><strong>{{ data.stats.total_logs || 0 }} 次</strong></span>
                     <span class="context-pill"><span>日志</span><strong>{{ (data.device_logs || []).length }} 包</strong></span>
                 </div>
-                <div class="content-wrap" v-if="isDeviceTab && !data">
-                    <div class="empty-state">
-                        <div class="empty-state-title">先选择一台设备</div>
-                        <div>输入 SN 可直接进入设备；输入客户、门店或地区关键词会先匹配候选设备。</div>
-                        <div class="mt-3">
+	                <div class="content-wrap" v-if="isDeviceTab && !data">
+	                    <div class="empty-state">
+	                        <div class="empty-state-title">先选择一台设备</div>
+	                        <div>输入 SN 可直接进入设备；输入客户、门店或地区关键词会先匹配候选设备。</div>
+	                        <div class="mt-3">
                             <button class="btn btn-primary" @click="smartDeviceEntry">查询</button>
                             <button class="btn btn-outline-primary ms-2" @click="searchDevices(false)">只匹配</button>
                         </div>
-                    </div>
-                </div>
+	                    </div>
+	                </div>
 
-            <div class="content-wrap" v-if="activeTab === 'home'">
+	            <div class="content-wrap" v-if="activeTab === 'safetyOverview'">
+	                <div class="d-flex gap-2 mb-3 align-items-center">
+	                    <button class="btn btn-primary btn-sm" @click="triggerSafetyScan" :disabled="safetyDashboard.scanLoading || !isAdmin">
+	                        {{ safetyDashboard.scanLoading ? '扫描中...' : '运行安全扫描' }}
+	                    </button>
+	                    <button class="btn btn-outline-secondary btn-sm" @click="loadSafetyOverview" :disabled="safetyDashboard.overviewLoading">刷新总览</button>
+	                    <span v-if="safetyDashboard.scanResult" class="text-success small">最近扫描：{{ safetyDashboard.scanResult.alerts }} 条告警</span>
+	                    <span v-if="safetyDashboard.overview && safetyDashboard.overview.last_scan" class="text-muted small">上次扫描：{{ safetyDashboard.overview.last_scan.finished_at }}</span>
+	                </div>
+	                <div v-if="safetyDashboard.overviewLoading" class="text-muted text-center py-4">正在加载安全总览...</div>
+	                <div v-if="safetyDashboard.overviewError" class="alert alert-danger">{{ safetyDashboard.overviewError }}</div>
+	                <template v-if="safetyDashboard.overview && safetyDashboard.overview.summary">
+	                    <div class="row g-3 mb-3">
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ safetyDashboard.overview.summary.total_jobs || 0 }}</div><div class="admin-metric-label">已入库作业</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric" style="border-left: 3px solid var(--danger);"><div class="admin-metric-value text-danger">{{ safetyDashboard.overview.summary.critical_jobs || 0 }}</div><div class="admin-metric-label">临界高温作业</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric" style="border-left: 3px solid var(--accent);"><div class="admin-metric-value text-warning">{{ safetyDashboard.overview.summary.warning_jobs || 0 }}</div><div class="admin-metric-label">警示作业</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ safetyDashboard.overview.summary.all_time_max_temp || '-' }}℃</div><div class="admin-metric-label">历史最高锅温</div></div></div>
+	                    </div>
+	                    <div class="row g-3 mb-3">
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ safetyDashboard.overview.summary.device_count || 0 }}</div><div class="admin-metric-label">涉及设备</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ (safetyDashboard.overview.alert_counts || {}).high_active || 0 }}</div><div class="admin-metric-label">活跃高危告警</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ (safetyDashboard.overview.alert_counts || {}).medium_active || 0 }}</div><div class="admin-metric-label">活跃中危告警</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ safetyDashboard.overview.summary.all_time_avg_max_temp || '-' }}℃</div><div class="admin-metric-label">平均最高锅温</div></div></div>
+	                    </div>
+	                    <div class="card mb-3">
+	                        <div class="card-header">温度分布</div>
+	                        <div class="card-body">
+	                            <div v-if="safetyDashboard.overview.temp_distribution && safetyDashboard.overview.temp_distribution.length" class="d-flex align-items-end gap-2" style="height:160px;">
+	                                <div v-for="item in safetyDashboard.overview.temp_distribution" :key="item.band" class="text-center flex-grow-1">
+	                                    <div :style="{height: Math.max(4, Math.min(140, item.cnt / (safetyDashboard.overview.summary.total_jobs || 1) * 300)) + 'px', background: item.band.includes('350') ? '#d93026' : item.band.includes('300') ? '#ff7a1a' : item.band.includes('250') ? '#f5c842' : item.band.includes('200') ? '#12a150' : '#6b7280', borderRadius: '4px 4px 0 0', minWidth: '40px'}"></div>
+	                                    <div class="small mt-1">{{ item.cnt }}</div>
+	                                    <div class="small text-muted">{{ item.band }}</div>
+	                                </div>
+	                            </div>
+	                            <div v-else class="text-muted">暂无温度分布数据。</div>
+	                        </div>
+	                    </div>
+	                    <div class="row g-3">
+	                        <div class="col-lg-6">
+	                            <div class="card">
+	                                <div class="card-header">高温设备排行</div>
+	                                <table class="table table-sm table-striped mb-0">
+	                                    <thead><tr><th>SN</th><th>次数</th><th>最高温</th><th>平均高温</th></tr></thead>
+	                                    <tbody>
+	                                        <tr v-for="d in (safetyDashboard.overview.top_devices || []).slice(0, 10)" :key="d.sn" class="recipe-row" @click="snInput = d.sn; search();">
+	                                            <td class="fw-bold">{{ d.sn }}</td><td>{{ d.high_count }}</td><td>{{ d.worst_temp }}℃</td><td>{{ d.avg_high_temp }}℃</td>
+	                                        </tr>
+	                                    </tbody>
+	                                </table>
+	                                <div v-if="!(safetyDashboard.overview.top_devices || []).length" class="p-3 text-muted">暂无高温设备记录。</div>
+	                            </div>
+	                        </div>
+	                        <div class="col-lg-6">
+	                            <div class="card">
+	                                <div class="card-header">高温菜谱排行</div>
+	                                <table class="table table-sm table-striped mb-0">
+	                                    <thead><tr><th>菜谱</th><th>次数</th><th>最高温</th><th>平均高温</th></tr></thead>
+	                                    <tbody>
+	                                        <tr v-for="r in (safetyDashboard.overview.top_recipes || []).slice(0, 10)" :key="r.recipe_name">
+	                                            <td>{{ r.recipe_name || '(未命名菜谱)' }}</td><td>{{ r.high_count }}</td><td>{{ r.worst_temp }}℃</td><td>{{ r.avg_high_temp }}℃</td>
+	                                        </tr>
+	                                    </tbody>
+	                                </table>
+	                                <div v-if="!(safetyDashboard.overview.top_recipes || []).length" class="p-3 text-muted">暂无高温菜谱记录。</div>
+	                            </div>
+	                        </div>
+	                    </div>
+	                </template>
+	                <div v-if="safetyDashboard.overview && !safetyDashboard.overview.summary && !safetyDashboard.overviewLoading && !safetyDashboard.overviewError" class="alert alert-warning">安全总览接口已返回，但数据结构不完整，请刷新或重新运行安全扫描。</div>
+	                <div v-if="!safetyDashboard.overview && !safetyDashboard.overviewLoading && !safetyDashboard.overviewError" class="text-center py-5 text-muted">暂无安全数据。请先解析一些日志包，或点击运行安全扫描。</div>
+	            </div>
+
+	            <div class="content-wrap" v-if="activeTab === 'safetyAlerts'">
+	                <div class="row g-2 mb-3 align-items-end">
+	                    <div class="col-md-2">
+	                        <label class="filter-label">风险等级</label>
+	                        <select class="form-select form-select-sm" v-model="safetyDashboard.alertsFilters.riskLevel" @change="loadSafetyAlerts(0)">
+	                            <option value="">全部</option>
+	                            <option value="high">高危</option>
+	                            <option value="medium">中危</option>
+	                            <option value="info">信息</option>
+	                        </select>
+	                    </div>
+	                    <div class="col-md-2">
+	                        <label class="filter-label">规则</label>
+	                        <select class="form-select form-select-sm" v-model="safetyDashboard.alertsFilters.ruleKey" @change="loadSafetyAlerts(0)">
+	                            <option value="">全部</option>
+	                            <option value="max_temp_high">实测高温>330℃</option>
+	                            <option value="max_temp_elevated">高温280-330℃</option>
+	                            <option value="oil_food_delay">投油间隔</option>
+	                            <option value="no_power_samples">缺功率采样</option>
+	                            <option value="no_temp_samples">缺温度样本</option>
+	                        </select>
+	                    </div>
+	                    <div class="col-md-2">
+	                        <label class="filter-label">状态</label>
+	                        <select class="form-select form-select-sm" v-model="safetyDashboard.alertsFilters.dismissed" @change="loadSafetyAlerts(0)">
+	                            <option value="">全部</option>
+	                            <option value="0">活跃</option>
+	                            <option value="1">已处理</option>
+	                        </select>
+	                    </div>
+	                    <div class="col-md-2">
+	                        <label class="filter-label">设备 SN</label>
+	                        <input class="form-control form-control-sm" v-model="safetyDashboard.alertsFilters.sn" placeholder="可选过滤" @keyup.enter="loadSafetyAlerts(0)">
+	                    </div>
+	                    <div class="col-md-4 d-flex gap-2">
+	                        <button class="btn btn-sm btn-primary" @click="loadSafetyAlerts(0)">查询</button>
+	                        <button class="btn btn-sm btn-outline-secondary" @click="resetSafetyAlertsFilters">重置</button>
+	                        <button class="btn btn-sm btn-outline-success" @click="triggerSafetyScan" :disabled="safetyDashboard.scanLoading || !isAdmin" v-if="isAdmin">{{ safetyDashboard.scanLoading ? '扫描中...' : '重新扫描' }}</button>
+	                    </div>
+	                </div>
+	                <div v-if="safetyDashboard.alertsLoading" class="text-muted text-center py-4">正在加载告警...</div>
+	                <div v-if="safetyDashboard.alertsError" class="alert alert-danger">{{ safetyDashboard.alertsError }}</div>
+	                <template v-if="safetyDashboard.alerts && safetyDashboard.alerts.items">
+	                    <div class="d-flex justify-content-between align-items-center mb-2">
+	                        <small class="text-muted">共 {{ safetyDashboard.alerts.total }} 条告警</small>
+	                        <div class="d-flex gap-1">
+	                            <button class="btn btn-sm btn-outline-secondary" :disabled="safetyDashboard.alertsPage <= 0" @click="loadSafetyAlerts((safetyDashboard.alertsPage - 1) * 200)">上一页</button>
+	                            <button class="btn btn-sm btn-outline-secondary" :disabled="(safetyDashboard.alertsPage + 1) * 200 >= (safetyDashboard.alerts.total || 0)" @click="loadSafetyAlerts((safetyDashboard.alertsPage + 1) * 200)">下一页</button>
+	                        </div>
+	                    </div>
+	                    <div class="card" v-for="alert in safetyDashboard.alerts.items" :key="alert.id" style="margin-bottom: 6px;" :style="{borderLeft: alert.risk_level === 'high' ? '3px solid #d93026' : alert.risk_level === 'medium' ? '3px solid #ff7a1a' : '3px solid #6b7280'}">
+	                        <div class="card-body py-2 px-3">
+	                            <div class="d-flex justify-content-between align-items-start flex-wrap">
+	                                <div><span class="badge me-2" :class="safetyRiskBadgeClass(alert.risk_level)">{{ alert.risk_level === 'high' ? '高危' : alert.risk_level === 'medium' ? '中危' : '信息' }}</span><strong>{{ alert.rule_label }}</strong><span class="text-muted ms-2 small">{{ alert.recipe_name || '(未命名菜谱)' }}</span></div>
+	                                <div class="d-flex gap-2 align-items-center"><small class="text-muted">{{ alert.created_at }}</small><button v-if="isAdmin && !alert.dismissed" class="btn btn-sm btn-outline-secondary" @click="dismissSafetyAlert(alert.id)">忽略</button></div>
+	                            </div>
+	                            <div class="row g-2 mt-1 small">
+	                                <div class="col-md-2"><span class="text-muted">SN:</span> <a href="#" @click.prevent="jumpToDeviceFromAlert(alert)" class="fw-bold">{{ alert.sn }}</a></div>
+	                                <div class="col-md-2"><span class="text-muted">最高锅温:</span> <span :class="alert.max_pot_temp > 300 ? 'text-danger fw-bold' : ''">{{ alert.max_pot_temp || '-' }}℃</span></div>
+	                                <div class="col-md-2"><span class="text-muted">平均锅温:</span> {{ alert.avg_pot_temp || '-' }}℃</div>
+	                                <div class="col-md-2"><span class="text-muted">时长:</span> {{ alert.duration_seconds || '-' }}s</div>
+	                                <div class="col-md-4"><span class="text-muted">烹饪时间:</span> {{ alert.cook_start_time || '-' }}</div>
+	                            </div>
+	                        </div>
+	                    </div>
+	                    <div v-if="!safetyDashboard.alerts.items.length" class="text-center py-5 text-muted">暂无匹配告警。</div>
+	                </template>
+	                <div v-if="!safetyDashboard.alerts && !safetyDashboard.alertsLoading && !safetyDashboard.alertsError" class="text-center py-5 text-muted">暂无告警数据。请先运行安全扫描。</div>
+	            </div>
+
+	            <div class="content-wrap" v-if="activeTab === 'home'">
                 <div class="workbench-hero">
                     <div class="command-panel">
                         <div class="command-title">今天查什么？</div>
@@ -1141,6 +1291,135 @@
 	        </div>
 	    </div>
 
+	    <div class="content-wrap" v-if="activeTab === 'thermalKnowledge'">
+	        <div class="card mb-3">
+	            <div class="card-header">食材热物性知识库</div>
+	            <div class="card-body">
+	                <div class="row g-3 align-items-end">
+	                    <div class="col-xl-3 col-md-6">
+	                        <label class="filter-label">关键词</label>
+	                        <input class="form-control form-control-sm" v-model="thermalKnowledgeFilters.keyword" placeholder="食材/别名/类别/风险">
+	                    </div>
+	                    <div class="col-xl-2 col-md-3">
+	                        <label class="filter-label">食材分类</label>
+	                        <select class="form-select form-select-sm" v-model="thermalKnowledgeFilters.category">
+	                            <option value="">全部分类</option>
+	                            <option v-for="c in thermalKnowledgeCategories" :key="c" :value="c">{{ c }}</option>
+	                        </select>
+	                    </div>
+	                    <div class="col-xl-2 col-md-3">
+	                        <label class="filter-label">燃烧风险</label>
+	                        <select class="form-select form-select-sm" v-model="thermalKnowledgeFilters.hazard">
+	                            <option value="">全部风险</option>
+	                            <option v-for="h in thermalKnowledgeHazards" :key="h" :value="h">{{ h }}</option>
+	                        </select>
+	                    </div>
+	                    <div class="col-xl-2 col-md-4">
+	                        <label class="filter-label">计算质量 g</label>
+	                        <input type="number" min="1" class="form-control form-control-sm" v-model.number="thermalKnowledgeFilters.massG">
+	                    </div>
+	                    <div class="col-xl-1 col-md-4">
+	                        <label class="filter-label">初温 ℃</label>
+	                        <input type="number" class="form-control form-control-sm" v-model.number="thermalKnowledgeFilters.roomTemp">
+	                    </div>
+	                    <div class="col-xl-2 col-md-4">
+	                        <label class="filter-label">目标温度 ℃</label>
+	                        <input type="number" class="form-control form-control-sm" v-model.number="thermalKnowledgeFilters.targetTemp">
+	                    </div>
+	                    <div class="col-xl-2 col-md-4">
+	                        <label class="filter-label">能量单位</label>
+	                        <select class="form-select form-select-sm" v-model="powerEnergyUnit">
+	                            <option value="kj">kJ 千焦</option>
+	                            <option value="kwh">kWh 千瓦时</option>
+	                            <option value="kws">kW·s 千瓦秒</option>
+	                        </select>
+	                    </div>
+	                    <div class="col-xl-4 col-md-12 d-flex gap-2 flex-wrap">
+	                        <button class="btn btn-sm btn-primary" @click="loadThermalKnowledge(0)" :disabled="thermalKnowledge.loading">查询底座</button>
+	                        <button v-if="isAdmin" class="btn btn-sm btn-outline-primary" @click="syncThermalKnowledge" :disabled="thermalKnowledge.syncLoading">{{ thermalKnowledge.syncLoading ? '同步中' : '同步源库' }}</button>
+	                        <button class="btn btn-sm btn-outline-secondary" @click="resetThermalKnowledgeFilters" :disabled="thermalKnowledge.loading">清筛选</button>
+	                    </div>
+	                </div>
+	                <div class="history-meta mt-3">
+	                    当前优先读取本地数据库底座；未同步时使用前端种子库兜底。比热、烟点、闪点、自燃点用于模型解释和风险筛选，不作为最终安全阈值。
+	                </div>
+	                <div v-if="thermalKnowledge.loading" class="text-muted mt-2">正在读取热物性底座...</div>
+	                <div v-if="thermalKnowledge.error" class="alert alert-danger mt-2">{{ thermalKnowledge.error }}</div>
+	                <div v-if="thermalKnowledge.result?.summary?.last_sync" class="history-meta mt-2">
+	                    最近同步：{{ thermalKnowledge.result.summary.last_sync.started_at }} · {{ thermalKnowledge.result.summary.last_sync.status }} · 食材 {{ thermalKnowledge.result.summary.total }} 条 · 菜谱配料引用 {{ thermalKnowledge.result.summary.usage_count || 0 }} 次
+	                </div>
+	            </div>
+	        </div>
+
+	        <div class="row g-3 mb-3">
+	            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKnowledgeSummary.total }}</div><div class="admin-metric-label">物料条目</div></div></div>
+	            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKnowledgeSummary.categories }}</div><div class="admin-metric-label">分类数量</div></div></div>
+	            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKnowledgeSummary.oils }}</div><div class="admin-metric-label">油脂/液态油</div></div></div>
+	            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKnowledgeSummary.risky }}</div><div class="admin-metric-label">需重点复核</div></div></div>
+	        </div>
+
+	        <div class="card mb-3">
+	            <div class="card-header">升温能量速查</div>
+	            <div class="card-body">
+	                <div class="knowledge-energy-grid">
+	                    <div v-for="temp in [60, 100, 150, 180, 220]" :key="`energy-temp-${temp}`" class="knowledge-energy-cell">
+	                        <div class="knowledge-energy-temp">{{ thermalKnowledgeFilters.massG || 100 }}g 从 {{ thermalKnowledgeFilters.roomTemp || 25 }}℃ 到 {{ temp }}℃</div>
+	                        <div class="knowledge-energy-value">{{ thermalKnowledgeAverageEnergyLabel(temp) }}</div>
+	                    </div>
+	                </div>
+	                <div class="history-meta mt-2">上方按当前筛选结果的平均比热粗算，单项精确值以明细表为准。</div>
+	            </div>
+	        </div>
+
+	        <div class="card">
+	            <div class="card-header">物性与燃烧参考明细</div>
+	            <div class="card-body p-0">
+	                <table class="table table-sm table-striped mb-0">
+	                    <thead>
+	                        <tr>
+	                            <th>食材/物料</th>
+	                            <th>分类</th>
+	                            <th>比热 kJ/kg℃</th>
+	                            <th>当前目标吸热</th>
+	                            <th>水分/油脂</th>
+	                            <th>烟点/沸点</th>
+	                            <th>闪点</th>
+	                            <th>自燃点</th>
+	                            <th>风险分类</th>
+	                            <th>置信度</th>
+	                        </tr>
+	                    </thead>
+	                    <tbody>
+	                        <tr v-for="item in filteredThermalKnowledgeItems" :key="item.id">
+	                            <td>
+	                                <strong>{{ item.name || item.canonical_name }}</strong>
+	                                <div v-if="item.source_ingredient_id" class="history-meta">ID {{ item.source_ingredient_id }} · 菜谱 {{ item.recipe_count || 0 }} 款 · 引用 {{ item.recipe_usage_count || 0 }} 次</div>
+	                                <div class="history-meta">{{ (item.aliases || []).join(' / ') || '-' }}</div>
+	                            </td>
+	                            <td>{{ item.category }}</td>
+	                            <td>{{ item.specific_heat || item.specific_heat_kj_kg_c || '待校准' }}</td>
+	                            <td>{{ thermalKnowledgeEnergyLabel(item, thermalKnowledgeFilters.targetTemp) }}</td>
+	                            <td>{{ thermalFractionLabel(item) }}</td>
+	                            <td>{{ item.smoke_point_c ? `${item.smoke_point_c}℃ 烟点` : (item.boiling_c ? `${item.boiling_c}℃ 沸点` : '待校准') }}</td>
+	                            <td>{{ item.flash_point_c ? `${item.flash_point_c}℃` : '待校准' }}</td>
+	                            <td>{{ item.autoignition_c ? `${item.autoignition_c}℃` : '待校准' }}</td>
+	                            <td><span class="resource-chip" :class="thermalHazardClass(item.hazard_class)">{{ item.hazard_class }}</span></td>
+	                            <td>{{ item.confidence }}<div class="history-meta">{{ item.source || item.source_note }}</div></td>
+	                        </tr>
+	                        <tr v-if="!filteredThermalKnowledgeItems.length"><td colspan="10" class="text-muted">没有匹配的物料。</td></tr>
+	                    </tbody>
+	                </table>
+	            </div>
+	            <div class="card-body d-flex justify-content-between align-items-center">
+	                <div class="history-meta">当前显示 {{ filteredThermalKnowledgeItems.length }} / {{ thermalKnowledge.result?.total || thermalKnowledgeSummary.total }} 条</div>
+	                <div class="d-flex gap-2">
+	                    <button class="btn btn-sm btn-outline-secondary" @click="loadThermalKnowledge(Math.max(0, (thermalKnowledge.result?.offset || 0) - (thermalKnowledge.result?.limit || 300)))" :disabled="thermalKnowledge.loading || !(thermalKnowledge.result?.offset)">上一页</button>
+	                    <button class="btn btn-sm btn-outline-secondary" @click="loadThermalKnowledge((thermalKnowledge.result?.offset || 0) + (thermalKnowledge.result?.limit || 300))" :disabled="thermalKnowledge.loading || !thermalKnowledge.result || ((thermalKnowledge.result.offset || 0) + (thermalKnowledge.result.limit || 300) >= thermalKnowledge.result.total)">下一页</button>
+	                </div>
+	            </div>
+	        </div>
+	    </div>
+
 	    <div class="content-wrap" v-if="activeTab === 'versionStats'">
 	        <div class="card mb-3">
 	            <div class="card-header">设备软件版本分布</div>
@@ -1559,9 +1838,90 @@
         </div>
 	        </section>
 
+            <section v-if="data" v-show="activeTab === 'temperatureCalibration'">
+                <div class="card mb-3">
+                    <div class="card-header">日志数据范围</div>
+                    <div class="card-body">
+                        <div class="row g-2 align-items-end">
+                            <div class="col-lg-3 col-md-6">
+                                <label class="filter-label">开始日期</label>
+                                <input type="date" class="form-control form-control-sm" v-model="temperatureCalibration.startDate">
+                            </div>
+                            <div class="col-lg-3 col-md-6">
+                                <label class="filter-label">结束日期</label>
+                                <input type="date" class="form-control form-control-sm" v-model="temperatureCalibration.endDate">
+                            </div>
+                            <div class="col-lg-3 col-md-6">
+                                <label class="filter-label">结果关键字</label>
+                                <input class="form-control form-control-sm" v-model="temperatureCalibration.keyword" placeholder="原始日志 / 文件名">
+                            </div>
+                            <div class="col-lg-3 col-md-6 d-flex gap-2 flex-wrap">
+                                <button class="btn btn-sm btn-primary" @click="loadTemperatureCalibrations(true)" :disabled="temperatureCalibration.loading">
+                                    {{ temperatureCalibration.loading ? '读取中' : '查询校正记录' }}
+                                </button>
+                                <button class="btn btn-sm btn-outline-primary" @click="syncTemperatureCalibrations" :disabled="temperatureCalibration.syncing">
+                                    {{ temperatureCalibration.syncing ? '正在补齐' : '补齐缺失日志' }}
+                                </button>
+                            </div>
+                        </div>
+                        <div class="history-meta mt-2">
+                            查询会先读云端本地事件库；未扫描的日志包自动进入后台队列。校正检索不依赖菜谱或生产作业匹配，因此不会因“匹配作业失败”丢失校准动作。
+                        </div>
+                    </div>
+                </div>
+
+                <div v-if="temperatureCalibration.error" class="alert alert-danger">{{ temperatureCalibration.error }}</div>
+                <template v-if="temperatureCalibration.result">
+                    <div class="row g-3 mb-3">
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.event_count || 0 }}</div><div class="admin-metric-label">校正相关证据</div></div></div>
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.completed_event_count || 0 }}</div><div class="admin-metric-label">确认完成记录</div></div></div>
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.completed_packages || 0 }}/{{ temperatureCalibration.result.summary.package_count || 0 }}</div><div class="admin-metric-label">已扫描日志包</div></div></div>
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.queued_packages || 0 }}</div><div class="admin-metric-label">等待后台扫描</div></div></div>
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.scanning_packages || 0 }}</div><div class="admin-metric-label">正在扫描</div></div></div>
+                        <div class="col-xl-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ temperatureCalibration.result.summary.failed_packages || 0 }}</div><div class="admin-metric-label">扫描失败</div></div></div>
+                    </div>
+
+                    <div v-if="temperatureCalibration.result.summary.queued_packages || temperatureCalibration.result.summary.scanning_packages" class="alert alert-info">
+                        后台正在补齐：等待 {{ temperatureCalibration.result.summary.queued_packages || 0 }} 包，正在扫描 {{ temperatureCalibration.result.summary.scanning_packages || 0 }} 包。页面会自动刷新，已完成结果可立即查看。
+                    </div>
+                    <div v-if="temperatureCalibration.result.failed_packages && temperatureCalibration.result.failed_packages.length" class="alert alert-warning">
+                        部分日志包失败，不影响其他结果。
+                        <span v-for="item in temperatureCalibration.result.failed_packages" :key="item.source_file_id" class="d-inline-block me-2">
+                            {{ item.package_name || item.source_file_id }}（{{ item.error || '扫描失败' }}）
+                        </span>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header d-flex justify-content-between align-items-center">
+                            <span>温度校正事件</span>
+                            <span class="history-meta">显示 {{ filteredTemperatureCalibrationEvents.length }} 条</span>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="table table-sm table-striped mb-0">
+                                <thead><tr><th>时间</th><th>类型</th><th>匹配字段</th><th>日志文件</th><th>原始证据</th></tr></thead>
+                                <tbody>
+                                    <tr v-for="event in filteredTemperatureCalibrationEvents" :key="event.id">
+                                        <td class="text-nowrap">{{ event.event_time || '-' }}</td>
+                                        <td><span class="badge bg-primary">{{ event.event_label }}</span></td>
+                                        <td>{{ event.matched_keyword || '-' }}</td>
+                                        <td class="text-break">{{ event.package_name || event.source_log_name || '-' }}</td>
+                                        <td class="text-break">{{ event.raw_log_excerpt || '-' }}</td>
+                                    </tr>
+                                    <tr v-if="!filteredTemperatureCalibrationEvents.length">
+                                        <td colspan="5" class="text-center text-muted py-4">
+                                            {{ temperatureCalibration.result.summary.completed_packages < temperatureCalibration.result.summary.package_count ? '仍在扫描日志，完成后会自动显示；当前已扫描范围内暂未发现温度校正记录。' : '当前日期范围内未发现温度校正记录。' }}
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </template>
+            </section>
+
 	        <section v-if="data" v-show="activeTab === 'cookTemperature'">
 	            <div class="card mb-3">
-	                <div class="card-header">结构化作业库</div>
+	                <div class="card-header">第一步：读取已有结构化作业</div>
 	                <div class="card-body">
 	                    <div class="row g-3 align-items-end">
 	                        <div class="col-xl-3 col-md-6">
@@ -1582,16 +1942,16 @@
 	                        </div>
 	                        <div class="col-xl-3 col-md-6 d-flex gap-2 flex-wrap">
 	                            <button class="btn btn-sm btn-primary" @click="loadStructuredCookTemperature" :disabled="structuredTemperature.loading">
-	                                {{ structuredTemperature.loading ? '读取中' : '读入库数据' }}
+	                                {{ structuredTemperature.loading ? '读取中' : '读取已有结果' }}
 	                            </button>
-	                            <button class="btn btn-sm btn-outline-primary" @click="watchStructuredDevice">关注并排队解析</button>
+	                            <button class="btn btn-sm btn-outline-primary" @click="watchStructuredDevice">补齐最近日志</button>
 	                        </div>
 	                    </div>
 	                    <div class="history-meta mt-2">
 	                        覆盖范围：{{ data.structured_summary && data.structured_summary.coverage_start ? data.structured_summary.coverage_start : '-' }}
 	                        ~ {{ data.structured_summary && data.structured_summary.coverage_end ? data.structured_summary.coverage_end : '-' }}；
 	                        最近入库：{{ data.structured_summary && data.structured_summary.last_stored_at ? data.structured_summary.last_stored_at : '-' }}。
-	                        默认先读云端本地结构化库；缺数据时再用下面的日志包解析补齐。
+	                        “读取已有结果”只查询云端本地数据库，不下载日志、不创建解析任务。当天缺数据时，再进入第二步补齐原始日志。
 	                    </div>
 	                    <div v-if="structuredTemperature.error" class="alert alert-warning mt-2">{{ structuredTemperature.error }}</div>
 	                    <div v-if="data.structured_summary && (data.structured_summary.recent_errors || []).length" class="mt-2">
@@ -1602,7 +1962,7 @@
 	                </div>
 	            </div>
 	            <div class="card mb-3">
-	                <div class="card-header">日志包补齐解析</div>
+	                <div class="card-header">第二步：缺失时补齐原始日志</div>
 	                <div class="card-body">
 	                    <div class="row g-2 align-items-start mb-2">
                             <div class="col-xl-7">
@@ -1617,13 +1977,18 @@
                                 </div>
                             </div>
                             <div class="col-xl-5 d-flex gap-2 align-items-start flex-wrap">
-                                <button class="btn btn-sm btn-primary" @click="loadCookTemperature" :disabled="cookTemperatureLoading || !selectedCookTemperatureFiles.length || cookTemperatureEstimate.overHardLimit">解析温度</button>
+                                <button class="btn btn-sm btn-primary" @click="loadCookTemperature" :disabled="cookTemperatureLoading || !selectedCookTemperatureFiles.length || cookTemperatureEstimate.overHardLimit || selectedTemperatureFilesBusy">
+                                    {{ selectedTemperatureFilesStored ? '读取已入库结果' : '解析并入库' }}
+                                </button>
                                 <button class="btn btn-sm btn-outline-secondary" @click="selectRecentTemperatureLogs(3)" :disabled="cookTemperatureLoading">选最近3包</button>
                                 <button class="btn btn-sm btn-outline-secondary" @click="selectedCookTemperatureFileIds = []" :disabled="cookTemperatureLoading">清空选择</button>
                                 <a v-if="selectedLogFileMeta && selectedLogFileMeta.downloadable" class="btn btn-sm btn-outline-success" :href="`/api/device-log-download/${selectedLogFileMeta.id}?token=${encodeURIComponent(auth.token)}`" target="_blank">下载首选</a>
                                 <div class="selection-summary w-100">
                                     首选：{{ selectedLogFileMeta ? (selectedLogFileMeta.log_time_hint || selectedLogFileMeta.create_time || '-') : '-' }}；
                                     缓存：{{ cookTemperatureCacheSummary }}
+                                </div>
+                                <div v-if="selectedTemperatureFilesBusy" class="selection-summary w-100 text-primary">
+                                    所选日志正在后台排队或解析，请等待状态刷新；不要重复提交同一个包。
                                 </div>
                             </div>
 	                    </div>
@@ -1744,8 +2109,8 @@
 	                                                        <span><span class="legend-dot" style="background:#12a150"></span>实际输出功率 (右轴, kW)</span>
 	                                                        <span v-if="item.summary && item.summary.actual_energy_kwh !== undefined" class="ms-2 px-2 py-1 bg-light border rounded text-dark">
 	                                                            <strong>能量值：</strong>
-	                                                            实际: <strong>{{ item.summary.actual_energy_kwh }}</strong> kWh /
-	                                                            指令: <strong>{{ item.summary.command_energy_kwh }}</strong> kWh
+	                                                            实际: <strong>{{ energyValueLabel(item.summary.actual_energy_kwh) }}</strong> /
+	                                                            指令: <strong>{{ energyValueLabel(item.summary.command_energy_kwh) }}</strong>
 	                                                            <span v-if="item.summary.actual_energy_kwh && item.summary.command_energy_kwh" class="text-muted">
 	                                                                (跟随率: {{ round2((item.summary.actual_energy_kwh / item.summary.command_energy_kwh) * 100) }}%)
 	                                                            </span>
@@ -1941,7 +2306,7 @@
 	                            </div>
 	                        </div>
 	                    </div>
-	                    <div class="history-meta">安卓日志功率字段按“指令功率/实际输出功率”拆列，W 转 kW；能量按相邻采样时间差积分为 kWh。这里复用温度诊断的日志下载、解压和服务器缓存。</div>
+	                    <div class="history-meta">安卓日志功率字段按“指令功率/实际输出功率”拆列，W 转 kW；能量按相邻采样时间差积分，并按当前选择单位展示。这里复用温度诊断的日志下载、解压和服务器缓存。</div>
 	                    <div v-if="cookTemperatureLoading" class="text-muted mt-2">正在下载并解析日志包...</div>
 	                    <div v-if="cookTemperatureLoading || cookTemperatureProgress.status === 'failed'" class="progress-steps">
 	                        <div v-for="(step, idx) in cookTemperatureProgress.steps" :key="`power-${step.name}`" class="progress-step" :class="{active: cookTemperatureProgress.status === 'running' && cookTemperatureProgress.stepIndex === idx, done: cookTemperatureProgress.stepIndex > idx && cookTemperatureProgress.status !== 'failed', failed: cookTemperatureProgress.status === 'failed' && cookTemperatureProgress.stepIndex === idx}">
@@ -1982,12 +2347,13 @@
 	                            </div>
 	                            <div class="col-xl-3 col-md-6">
 	                                <label class="filter-label">实际能量不低于（{{ energyUnitLabel }}）</label>
-	                                <input type="number" step="0.001" class="form-control form-control-sm" v-model.number="powerDiagnosisFilters.minEnergy" placeholder="例如 0.05">
+	                                <input type="number" step="0.001" class="form-control form-control-sm" v-model.number="powerDiagnosisFilters.minEnergy" placeholder="按当前单位输入">
 	                            </div>
 	                            <div class="col-xl-3 col-md-12">
 	                                <div class="filter-label">能量单位</div>
 	                                <div class="d-flex gap-2 align-items-center flex-wrap">
 	                                    <span class="segmented-control">
+	                                        <button :class="{active: powerEnergyUnit === 'kj'}" @click="powerEnergyUnit = 'kj'">kJ</button>
 	                                        <button :class="{active: powerEnergyUnit === 'kwh'}" @click="powerEnergyUnit = 'kwh'">kWh</button>
 	                                        <button :class="{active: powerEnergyUnit === 'kws'}" @click="powerEnergyUnit = 'kws'">kW·s</button>
 	                                    </span>
@@ -2131,12 +2497,238 @@
 	                    </div>
 	                </div>
 	            </template>
+		            <div v-else class="card">
+		                <div class="card-body text-muted">先选择一个或多个日志包，点击“解析功率”。系统会复用温度诊断解析链路，解析成功后展示单道菜功率曲线和分步骤能量。</div>
+		            </div>
+		        </section>
+
+	        <section v-if="data" v-show="activeTab === 'thermalModel'">
+	            <div class="card mb-3">
+	                <div class="card-header">单菜热过程分析</div>
+	                <div class="card-body">
+	                    <div class="row g-3 align-items-end">
+	                        <div class="col-xl-5 col-md-12">
+	                            <label class="filter-label">日志包（可多选，先解析出单次作业）</label>
+	                            <select class="form-select form-select-sm log-file-select" v-model="selectedCookTemperatureFileIds" multiple @change="syncPrimaryTemperatureLog">
+	                                <option v-for="log in logAnalysisOptions" :key="`thermal-log-${log.id}`" :value="String(log.id)">
+	                                    {{ formatLogFileOption(log) }}
+	                                </option>
+	                            </select>
+	                            <div class="selection-summary mt-2">
+	                                已选 {{ selectedCookTemperatureFiles.length }} 个包 · 预估 {{ cookTemperatureEstimate.totalMbLabel }} · {{ cookTemperatureEstimate.timeLabel }}
+	                            </div>
+	                        </div>
+	                        <div class="col-xl-4 col-md-8">
+	                            <label class="filter-label">选择一道菜 / 一次作业</label>
+	                            <select class="form-select form-select-sm" v-model="thermalModel.selectedCookKey" @change="ensureThermalCookVisible">
+	                                <option value="">跟随当前选中作业</option>
+	                                <option v-for="c in thermalCookOptions" :key="c.key" :value="c.key">{{ c.label }}</option>
+	                            </select>
+	                            <div class="history-meta mt-2">建议先在温度/功率诊断里解析日志；本页复用同一份结构化结果。</div>
+	                        </div>
+	                        <div class="col-xl-3 col-md-4 d-flex gap-2 align-items-end flex-wrap">
+	                            <button class="btn btn-sm btn-primary" @click="loadCookTemperature" :disabled="cookTemperatureLoading || !selectedCookTemperatureFiles.length || cookTemperatureEstimate.overHardLimit">
+	                                {{ cookTemperatureLoading ? '解析中' : '解析热过程' }}
+	                            </button>
+	                            <button class="btn btn-sm btn-outline-secondary" @click="selectRecentTemperatureLogs(3)" :disabled="cookTemperatureLoading">选最近3包</button>
+	                            <button class="btn btn-sm btn-outline-secondary" @click="selectedCookTemperatureFileIds = []" :disabled="cookTemperatureLoading">清空</button>
+	                        </div>
+	                    </div>
+	                    <div class="history-meta mt-3">
+	                        第一版口径：实际输出功率优先，缺失时用指令功率；能量按 kW × 秒积分；投料热负载按文本重量和默认比热容估算；外部润锅关联表接入前，仅识别当前作业窗口内的热锅/润锅动作。
+	                    </div>
+	                    <div v-if="cookTemperatureLoading" class="text-muted mt-2">正在下载并解析日志包...</div>
+	                    <div v-if="cookTemperatureError" class="alert alert-danger mt-2">{{ cookTemperatureError }}</div>
+	                </div>
+	            </div>
+
+	            <template v-if="cookTemperature && thermalAnalysis.ready">
+	                <div class="card mb-3">
+	                    <div class="card-header">模型参数与假设</div>
+	                    <div class="card-body">
+	                        <div class="row g-2 align-items-end">
+	                            <div class="col-md-2">
+	                                <label class="filter-label">室温 / 食材初温 ℃</label>
+	                                <input type="number" class="form-control form-control-sm" v-model.number="thermalModel.roomTemp">
+	                            </div>
+	                            <div class="col-md-2">
+	                                <label class="filter-label">热效率 η</label>
+	                                <input type="number" min="0" max="1" step="0.05" class="form-control form-control-sm" v-model.number="thermalModel.heatEfficiency">
+	                            </div>
+	                            <div class="col-md-2">
+	                                <label class="filter-label">锅体等效热容 kJ/℃</label>
+	                                <input type="number" step="0.1" class="form-control form-control-sm" v-model.number="thermalModel.panHeatCapacityKjPerC">
+	                            </div>
+	                            <div class="col-md-2">
+	                                <label class="filter-label">散热系数 kJ/s/℃</label>
+	                                <input type="number" step="0.001" class="form-control form-control-sm" v-model.number="thermalModel.lossCoefficientKjPerSC">
+	                            </div>
+	                            <div class="col-md-2">
+	                                <label class="filter-label">初始锅温 ℃</label>
+	                                <input type="number" class="form-control form-control-sm" v-model.number="thermalModel.initialPotTemp" placeholder="自动取首点">
+	                            </div>
+	                            <div class="col-md-2">
+	                                <label class="filter-label">能量单位</label>
+	                                <select class="form-select form-select-sm" v-model="powerEnergyUnit">
+	                                    <option value="kj">kJ 千焦</option>
+	                                    <option value="kwh">kWh 千瓦时</option>
+	                                    <option value="kws">kW·s 千瓦秒</option>
+	                                </select>
+	                            </div>
+	                            <div class="col-md-2">
+	                                <label class="filter-label">分析范围</label>
+	                                <label class="d-flex align-items-center gap-2 small">
+	                                    <input type="checkbox" v-model="thermalModel.includePreheat"> 包含当前作业内热锅/润锅
+	                                </label>
+	                            </div>
+	                        </div>
+	                        <div class="history-meta mt-2">当前模型用于工程解释和风险筛选，不代表最终安全阈值。后续可接入锅型、锅龄、锅黑等级、红外状态和润锅关联表做参数修正。</div>
+	                    </div>
+	                </div>
+
+	                <div class="row g-3 mb-3">
+	                    <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalEnergyLabel(thermalAnalysis.energy.actual_kwh) }}</div><div class="admin-metric-label">实际输出能量</div></div></div>
+	                    <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalEnergyLabel(thermalAnalysis.energy.command_kwh) }}</div><div class="admin-metric-label">指令能量</div></div></div>
+	                    <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalTempLabel(thermalAnalysis.prediction.max_pred_temp) }}</div><div class="admin-metric-label">预测最高锅温</div></div></div>
+	                    <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ thermalTempLabel(thermalAnalysis.measured.max_temp) }}</div><div class="admin-metric-label">实测最高锅温</div></div></div>
+	                </div>
+	                <div class="row g-3 mb-3">
+	                    <div class="col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKjLabel(thermalAnalysis.energy.effective_input_kj) }}</div><div class="admin-metric-label">按效率后的累计入热</div></div></div>
+	                    <div class="col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKjLabel(thermalAnalysis.energy.food_load_kj) }}</div><div class="admin-metric-label">投料吸热估算</div></div></div>
+	                    <div class="col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ thermalKjLabel(thermalAnalysis.energy.loss_kj) }}</div><div class="admin-metric-label">散热损失估算</div></div></div>
+	                </div>
+
+	                <div class="card mb-3">
+	                    <div class="card-header">预测锅温 vs 实测锅温</div>
+	                    <div class="card-body">
+	                        <div class="d-flex justify-content-between align-items-center flex-wrap mb-2">
+	                            <div>
+	                                <strong>{{ thermalAnalysis.cook.recipe_name || '-' }}</strong>
+	                                <span class="history-meta ms-2">{{ thermalAnalysis.cook.start_time || '-' }} · {{ thermalAnalysis.cook.duration_seconds || 0 }}s</span>
+	                            </div>
+	                            <div class="d-flex gap-3 flex-wrap small">
+	                                <span><span class="legend-dot" style="background:#2563eb"></span>理论预测</span>
+	                                <span><span class="legend-dot" style="background:#d93026"></span>实测锅温/输出温度</span>
+	                                <span><span class="legend-dot" style="background:#12a150"></span>实际功率</span>
+	                                <span><span class="legend-dot" style="background:#ff7a1a"></span>指令功率</span>
+	                            </div>
+	                        </div>
+	                        <div class="thermal-chart">
+	                            <svg viewBox="0 0 920 300" preserveAspectRatio="none">
+	                                <line x1="55" y1="250" x2="835" y2="250" stroke="#dfe5ef" />
+	                                <line x1="55" y1="35" x2="55" y2="250" stroke="#dfe5ef" />
+	                                <line x1="835" y1="35" x2="835" y2="250" stroke="#dfe5ef" />
+	                                <text x="8" y="42" font-size="11" fill="#334155">420℃</text>
+	                                <text x="8" y="148" font-size="11" fill="#334155">210℃</text>
+	                                <text x="14" y="253" font-size="11" fill="#334155">0℃</text>
+	                                <text x="848" y="42" font-size="11" fill="#12a150">35kW</text>
+	                                <text x="848" y="148" font-size="11" fill="#12a150">17.5kW</text>
+	                                <text x="848" y="253" font-size="11" fill="#12a150">0kW</text>
+	                                <polyline :points="thermalLinePoints(thermalAnalysis.curve, 'pred_temp', 420)" fill="none" stroke="#2563eb" stroke-width="2" />
+	                                <polyline :points="thermalLinePoints(thermalAnalysis.curve, 'measured_temp', 420)" fill="none" stroke="#d93026" stroke-width="2" />
+	                                <polyline :points="thermalLinePoints(thermalAnalysis.curve, 'actual_power_kw', 35)" fill="none" stroke="#12a150" stroke-width="1.6" />
+	                                <polyline :points="thermalLinePoints(thermalAnalysis.curve, 'command_power_kw', 35)" fill="none" stroke="#ff7a1a" stroke-width="1.3" stroke-dasharray="4,4" />
+	                                <g v-for="m in thermalAnalysis.markers" :key="`thermal-marker-${m.offset}-${m.label}`">
+	                                    <line :x1="thermalMarkerX(m.offset, thermalAnalysis.duration)" y1="35" :x2="thermalMarkerX(m.offset, thermalAnalysis.duration)" y2="250" :stroke="m.color" stroke-width="1" stroke-dasharray="3,4" />
+	                                    <text :x="thermalMarkerX(m.offset, thermalAnalysis.duration)" y="288" font-size="10" :fill="m.color">{{ m.label }}</text>
+	                                </g>
+	                            </svg>
+	                        </div>
+	                        <div class="history-meta mt-2">
+	                            温度口径：优先使用 android 日志输出温度 / 作业温度中的锅体温度；temperature.log 可作为后续更密采样校验。预测曲线按当前参数即时重算。
+	                        </div>
+	                    </div>
+	                </div>
+
+	                <div class="row g-3 mb-3">
+	                    <div class="col-xl-6">
+	                        <div class="card h-100">
+	                            <div class="card-header">动作链阶段与能量窗口</div>
+	                            <div class="card-body p-0">
+	                                <table class="table table-sm table-striped mb-0">
+	                                    <thead><tr><th>阶段</th><th>时间窗</th><th>持续</th><th>实际能量</th><th>指令能量</th><th>关键动作</th></tr></thead>
+	                                    <tbody>
+	                                        <tr v-for="p in thermalAnalysis.phases" :key="`phase-${p.start}-${p.label}`">
+	                                            <td>{{ p.label }}</td>
+	                                            <td>{{ p.start }}s ~ {{ p.end }}s</td>
+	                                            <td>{{ p.duration }}s</td>
+	                                            <td>{{ thermalEnergyLabel(p.actual_kwh) }}</td>
+	                                            <td>{{ thermalEnergyLabel(p.command_kwh) }}</td>
+	                                            <td class="text-break">{{ p.action }}</td>
+	                                        </tr>
+	                                        <tr v-if="!thermalAnalysis.phases.length"><td colspan="6" class="text-muted">当前作业没有足够步骤可切分阶段。</td></tr>
+	                                    </tbody>
+	                                </table>
+	                            </div>
+	                        </div>
+	                    </div>
+	                    <div class="col-xl-6">
+	                        <div class="card h-100">
+	                            <div class="card-header">食材热负载估算</div>
+	                            <div class="card-body p-0">
+	                                <table class="table table-sm table-striped mb-0">
+	                                    <thead><tr><th>投料</th><th>时间</th><th>类别</th><th>重量</th><th>比热</th><th>升到100℃吸热</th><th>燃烧参考</th></tr></thead>
+	                                    <tbody>
+	                                        <tr v-for="ing in thermalAnalysis.ingredients" :key="`thermal-ing-${ing.offset}-${ing.name}-${ing.amount}`">
+	                                            <td class="text-break">{{ ing.name }}</td>
+	                                            <td>{{ ing.offset }}s</td>
+	                                            <td>{{ ing.category }}</td>
+	                                            <td>{{ ing.mass_g }}g</td>
+	                                            <td>{{ ing.specific_heat }}</td>
+	                                            <td>{{ thermalKjLabel(ing.heat_to_100_kj) }}</td>
+	                                            <td>{{ thermalFirePointLabel(ing) }}</td>
+	                                        </tr>
+	                                        <tr v-if="!thermalAnalysis.ingredients.length"><td colspan="7" class="text-muted">未从步骤文本中识别到带重量的投料。后续接菜谱配料表后可补齐。</td></tr>
+	                                    </tbody>
+	                                </table>
+	                            </div>
+	                        </div>
+	                    </div>
+	                </div>
+
+	                <div class="row g-3">
+	                    <div class="col-xl-6">
+	                        <div class="card h-100">
+	                            <div class="card-header">偏差解释</div>
+	                            <div class="card-body">
+	                                <div class="row-detail-metrics mb-3">
+	                                    <div class="row-detail-metric"><div class="row-detail-metric-value">{{ thermalTempLabel(thermalAnalysis.deviation.max_delta) }}</div><div class="row-detail-metric-label">最高温偏差</div></div>
+	                                    <div class="row-detail-metric"><div class="row-detail-metric-value">{{ thermalTempLabel(thermalAnalysis.deviation.end_delta) }}</div><div class="row-detail-metric-label">结束温偏差</div></div>
+	                                </div>
+	                                <div class="history-meta">偏差方向：{{ thermalAnalysis.deviation.direction }}</div>
+	                                <ul class="mt-2 mb-0">
+	                                    <li v-for="note in thermalAnalysis.deviation.notes" :key="note">{{ note }}</li>
+	                                </ul>
+	                            </div>
+	                        </div>
+	                    </div>
+	                    <div class="col-xl-6">
+	                        <div class="card h-100">
+	                            <div class="card-header">安全风险窗口</div>
+	                            <div class="card-body">
+	                                <div class="mb-2">
+	                                    <span v-for="risk in thermalAnalysis.risks" :key="risk.label" class="resource-chip" :class="risk.level === 'high' ? 'danger-chip' : ''">{{ risk.label }}</span>
+	                                    <span v-if="!thermalAnalysis.risks.length" class="resource-chip">未触发明显风险标签</span>
+	                                </div>
+	                                <div class="history-meta">
+	                                    投油时间：{{ thermalAnalysis.windows.oil_offset ?? '-' }}s；
+	                                    第一主料：{{ thermalAnalysis.windows.food_offset ?? '-' }}s；
+	                                    投油到主料：{{ thermalAnalysis.windows.oil_to_food_interval ?? '-' }}s；
+	                                    主料前累计实际能量：{{ thermalEnergyLabel(thermalAnalysis.windows.energy_before_food_kwh) }}。
+	                                </div>
+	                            </div>
+	                        </div>
+	                    </div>
+	                </div>
+	            </template>
 	            <div v-else class="card">
-	                <div class="card-body text-muted">先选择一个或多个日志包，点击“解析功率”。系统会复用温度诊断解析链路，解析成功后展示单道菜功率曲线和分步骤能量。</div>
+	                <div class="card-body text-muted">
+	                    先选择日志包并点击“解析热过程”。解析完成后，本页会针对单道菜展示理论能量、投料吸热、预测曲线、实测偏差和风险窗口。
+	                </div>
 	            </div>
 	        </section>
 
-	        <section v-if="data" v-show="activeTab === 'logAnalysis'">
+		        <section v-if="data" v-show="activeTab === 'logAnalysis'">
         <div class="card">
 	            <div class="card-header">日志诊断结论</div>
             <div class="card-body">
@@ -2566,6 +3158,7 @@
         </div>
         </section>
 
+
     </div>
         </main>
 
@@ -2645,7 +3238,72 @@
                     minEnergy: '',
                     recipeKey: '',
                 },
-                powerEnergyUnit: 'kwh',
+                thermalModel: {
+                    selectedCookKey: '',
+                    includePreheat: true,
+                    roomTemp: 25,
+                    heatEfficiency: 0.85,
+                    panHeatCapacityKjPerC: 3.2,
+                    lossCoefficientKjPerSC: 0.012,
+                    initialPotTemp: '',
+                },
+                thermalKnowledgeFilters: {
+                    keyword: '',
+                    category: '',
+                    hazard: '',
+                    massG: 100,
+                    roomTemp: 25,
+                    targetTemp: 100,
+                },
+                thermalKnowledge: {
+                    loading: false,
+                    syncLoading: false,
+                    error: '',
+                    result: null,
+                },
+                thermalKnowledgeBase: [
+                    { id: 'water', name: '水', aliases: ['清水', '饮用水', '开水', '冷水', '热水'], category: '水/汤汁', specific_heat: 4.184, water_fraction: 1, oil_fraction: 0, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '不可燃', confidence: '高', source: '常用物性参考' },
+                    { id: 'stock', name: '高汤/汤汁', aliases: ['汤', '汤底', '汤汁'], category: '水/汤汁', specific_heat: 4.0, water_fraction: 0.9, oil_fraction: 0.03, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '低风险含水液体', confidence: '中', source: '工程估算' },
+                    { id: 'starch_slurry', name: '水淀粉', aliases: ['生粉水', '淀粉水', '片栗粉水'], category: '水/汤汁', specific_heat: 3.8, water_fraction: 0.75, oil_fraction: 0, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '低风险含水液体', confidence: '中', source: '工程估算' },
+                    { id: 'vegetable_oil', name: '植物油/色拉油', aliases: ['色拉油', '菜籽油', '花生油', '大豆油', '食用油'], category: '油脂', specific_heat: 2.0, water_fraction: 0, oil_fraction: 1, boiling_c: null, smoke_point_c: 220, flash_point_c: 315, autoignition_c: 370, hazard_class: '可燃油脂', confidence: '中', source: '工程参考/需实测' },
+                    { id: 'lard', name: '猪油', aliases: ['猪油桶', '动物油'], category: '油脂', specific_heat: 2.0, water_fraction: 0, oil_fraction: 1, boiling_c: null, smoke_point_c: 190, flash_point_c: 300, autoignition_c: 360, hazard_class: '可燃油脂', confidence: '中', source: '工程参考/需实测' },
+                    { id: 'beef_tallow', name: '牛油', aliases: ['牛脂'], category: '油脂', specific_heat: 2.0, water_fraction: 0, oil_fraction: 1, boiling_c: null, smoke_point_c: 200, flash_point_c: 300, autoignition_c: 360, hazard_class: '可燃油脂', confidence: '低', source: '工程参考/需实测' },
+                    { id: 'chicken', name: '鸡肉', aliases: ['鸡丁', '鸡腿', '鸡胸', '鸡肉丁'], category: '肉蛋类', specific_heat: 3.3, water_fraction: 0.65, oil_fraction: 0.08, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水可焦化食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'beef', name: '牛肉', aliases: ['牛肉丝', '牛肉片', '牛肉粒'], category: '肉蛋类', specific_heat: 3.2, water_fraction: 0.62, oil_fraction: 0.12, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水可焦化食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'pork', name: '猪肉', aliases: ['肉丝', '肉片', '五花肉', '肥肉'], category: '肉蛋类', specific_heat: 3.1, water_fraction: 0.58, oil_fraction: 0.18, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含脂可焦化食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'egg', name: '鸡蛋', aliases: ['蛋液', '土鸡蛋'], category: '肉蛋类', specific_heat: 3.4, water_fraction: 0.74, oil_fraction: 0.1, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水可焦化食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'tofu', name: '豆腐', aliases: ['豆干', '香干'], category: '豆制品', specific_heat: 3.6, water_fraction: 0.75, oil_fraction: 0.03, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水低风险食材', confidence: '中', source: '工程估算' },
+                    { id: 'potato', name: '土豆', aliases: ['马铃薯', '薯片'], category: '蔬菜类', specific_heat: 3.6, water_fraction: 0.78, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水低风险食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'leafy_veg', name: '叶菜/包菜', aliases: ['白菜', '包菜', '青菜', '生菜'], category: '蔬菜类', specific_heat: 3.8, water_fraction: 0.88, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水低风险食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'chili_fresh', name: '鲜辣椒', aliases: ['青椒', '红椒', '辣椒'], category: '蔬菜类', specific_heat: 3.7, water_fraction: 0.85, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水低风险食材', confidence: '中', source: '食品工程估算' },
+                    { id: 'dry_chili', name: '干辣椒', aliases: ['干辣椒段', '辣椒干'], category: '干货/香辛料', specific_heat: 1.6, water_fraction: 0.12, oil_fraction: 0.08, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: 260, hazard_class: '可燃干货', confidence: '低', source: '工程参考/需实测' },
+                    { id: 'peppercorn', name: '花椒/麻椒', aliases: ['花椒', '麻椒', '藤椒'], category: '干货/香辛料', specific_heat: 1.5, water_fraction: 0.1, oil_fraction: 0.1, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: 260, hazard_class: '可燃干货', confidence: '低', source: '工程参考/需实测' },
+                    { id: 'sugar', name: '白糖', aliases: ['糖', '冰糖'], category: '调料', specific_heat: 1.25, water_fraction: 0, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: 350, hazard_class: '可燃固体/焦糖化', confidence: '中', source: '工程参考/需实测' },
+                    { id: 'salt', name: '盐', aliases: ['食盐'], category: '调料', specific_heat: 0.85, water_fraction: 0, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '不可燃', confidence: '中', source: '物性参考' },
+                    { id: 'soy_sauce', name: '酱油/生抽', aliases: ['生抽', '老抽', '酱汁'], category: '液体调料', specific_heat: 3.7, water_fraction: 0.75, oil_fraction: 0, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '低风险含水液体', confidence: '中', source: '工程估算' },
+                    { id: 'vinegar_wine', name: '醋/料酒', aliases: ['陈醋', '香醋', '料酒', '黄酒'], category: '液体调料', specific_heat: 3.8, water_fraction: 0.8, oil_fraction: 0, boiling_c: 100, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水挥发液体', confidence: '低', source: '工程估算' },
+                    { id: 'aromatics', name: '葱姜蒜', aliases: ['葱', '姜', '蒜', '蒜末', '姜片'], category: '蔬菜类', specific_heat: 3.5, water_fraction: 0.7, oil_fraction: 0.02, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '含水可焦化食材', confidence: '中', source: '工程估算' },
+                ],
+                safetyDashboard: {
+                    overview: null,
+                    overviewLoading: false,
+                    overviewError: '',
+                    alerts: null,
+                    alertsLoading: false,
+                    alertsError: '',
+                    alertsFilters: {
+                        riskLevel: '',
+                        ruleKey: '',
+                        sn: '',
+                        dismissed: '',
+                    },
+                    alertsPage: 0,
+                    scanLoading: false,
+                    scanResult: null,
+                    trends: null,
+                    trendsLoading: false,
+                },
+                powerEnergyUnit: 'kj',
                 powerChartHover: null,
                 cookTemperatureLoading: false,
                 cookTemperatureError: '',
@@ -2657,6 +3315,17 @@
                     loading: false,
                     error: '',
                     lastLoadedDay: '',
+                },
+                temperatureCalibration: {
+                    startDate: '',
+                    endDate: '',
+                    keyword: '',
+                    loading: false,
+                    syncing: false,
+                    error: '',
+                    result: null,
+                    pollTimer: null,
+                    pollCount: 0,
                 },
                 cookTemperatureProgress: {
                     status: 'idle',
@@ -2686,7 +3355,7 @@
 		                monthLoading: '',
 		                monthDetails: {},
 				                activeTab: 'home',
-	                appVersion: '2026.06.06-ui-polish1',
+		                appVersion: '2026.06.11-temperature-calibration1',
 		                navGroups: [
 		                    { title: '工作台', tabs: [
 		                        { id: 'home', label: '工作台', icon: '⌂', desc: '搜索、历史、入口' },
@@ -2703,12 +3372,19 @@
 		                    { title: '日志诊断', tabs: [
 		                        { id: 'logAnalysis', label: '日志结论', icon: 'D', desc: '故障、油路、证据' },
 		                        { id: 'cookTemperature', label: '温度诊断', icon: 'T', desc: '单次锅体温度' },
+                                { id: 'temperatureCalibration', label: '温度校正', icon: 'C', desc: '校准动作、时间、证据' },
 		                        { id: 'powerDiagnosis', label: '功率诊断', icon: 'P', desc: '指令、输出、能量' },
+		                        { id: 'thermalModel', label: '热过程分析', icon: 'H', desc: '能量、投料、预测' },
 		                    ]},
 		                    { title: '管理与治理', tabs: [
 		                        { id: 'versionStats', label: '版本治理', icon: 'V', desc: '上位机版本' },
+		                        { id: 'thermalKnowledge', label: '热物性库', icon: 'K', desc: '食材、比热、燃点' },
 		                        { id: 'admin', label: '系统审计', icon: 'A', desc: '账号、缓存、导出', adminOnly: true },
 		                        { id: 'emergency', label: '重点设备', icon: '!', desc: '重点设备复盘', adminOnly: true },
+		                    ]},
+		                    { title: '安全治理', tabs: [
+		                        { id: 'safetyOverview', label: '安全总览', icon: 'S', desc: '风险面、分布、趋势' },
+		                        { id: 'safetyAlerts', label: '告警明细', icon: '⚠', desc: '规则命中、追溯' },
 		                    ]},
 		                ],
                 displayIntervals: [],
@@ -2806,6 +3482,7 @@
 	            this.loadSavedRecipeQueries();
 	            this.initRecipeSearchDates();
 	            this.initStructuredTemperatureDate();
+                this.initTemperatureCalibrationDates();
 	        },
 	        computed: {
 		            pageTitle() {
@@ -2817,12 +3494,17 @@
 		                    logs: '日志包',
 		                    recipeSearch: '菜谱检索',
 		                    versionStats: '版本治理',
+		                    thermalKnowledge: '热物性库',
 		                    logAnalysis: '日志结论',
 		                    cookTemperature: '温度诊断',
+                            temperatureCalibration: '温度校正',
 		                    powerDiagnosis: '功率诊断',
+		                    thermalModel: '热过程分析',
 		                    oilThermal: '温控样例',
 		                    emergency: '重点设备',
 		                    admin: '系统审计',
+		                    safetyOverview: '安全总览',
+		                    safetyAlerts: '告警明细',
 		                };
 		                return titles[this.activeTab] || '设备运营工作台';
 		            },
@@ -2830,11 +3512,16 @@
 		                if (this.activeTab === 'home') return '统一搜索、继续工作和常用入口';
 		                if (this.activeTab === 'recipeSearch') return '按客户、设备和时间查询菜谱、配料与资源覆盖';
 		                if (this.activeTab === 'versionStats') return '查看全量设备的软件版本、升级时间和版本归类';
+		                if (this.activeTab === 'thermalKnowledge') return '维护食材分类、比热容、升温能量和燃烧参考温度，供热过程模型调用';
 		                if (this.activeTab === 'logAnalysis') return '按日志包解析故障码、油路、温控和原始证据';
 		                if (this.activeTab === 'cookTemperature') return '对齐单次烹饪的菜谱步骤、真实动作和锅体温度';
+                        if (this.activeTab === 'temperatureCalibration') return '按设备和日期范围检索自动温度校正动作及原始日志证据';
 		                if (this.activeTab === 'powerDiagnosis') return '对齐指令功率、实际输出功率、温度和能量值';
+		                if (this.activeTab === 'thermalModel') return '把单道菜的能量输入、投料吸热、理论锅温和实测偏差放到同一张图里';
 		                if (this.activeTab === 'admin') return '查看账号、缓存、导出和系统使用审计';
 		                if (this.activeTab === 'emergency') return '集中跟踪重点设备的使用跨度和生产情况';
+		                if (this.activeTab === 'safetyOverview') return '全局温度风险分布、高危设备和菜谱排行';
+		                if (this.activeTab === 'safetyAlerts') return '按规则筛选和追溯安全告警';
 		                return '围绕单台设备查看档案、生产、菜谱、日志和诊断结果';
 		            },
             isAdmin() {
@@ -2855,7 +3542,7 @@
 	                return this.activeGroup ? this.activeGroup.tabs : [];
 	            },
 		            isDeviceTab() {
-		                return ['overview', 'recipes', 'intervals', 'logs', 'logAnalysis', 'cookTemperature', 'powerDiagnosis'].includes(this.activeTab);
+		                return ['overview', 'recipes', 'intervals', 'logs', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'powerDiagnosis', 'thermalModel'].includes(this.activeTab);
 		            },
 	            showDeviceSearch() {
 	                return this.isDeviceTab;
@@ -2869,9 +3556,14 @@
 		            currentPageHint() {
 		                if (this.activeTab === 'recipeSearch') return '检索会优先复用本地和服务器缓存。';
 		                if (this.activeTab === 'versionStats') return '版本治理只读设备档案和客户信息。';
+		                if (this.activeTab === 'thermalKnowledge') return '热物性库是工程底座，数值需要用实验和实测持续校准。';
 		                if (this.activeTab === 'logAnalysis') return '先选日志包，再生成诊断证据。';
 		                if (this.activeTab === 'cookTemperature') return '温度诊断依赖日志包，缺口会提示。';
+                        if (this.activeTab === 'temperatureCalibration') return '先读本地事件库，未扫描日志由后台自动补齐。';
 		                if (this.activeTab === 'powerDiagnosis') return '功率诊断复用日志解析缓存。';
+		                if (this.activeTab === 'thermalModel') return '第一版是可解释工程近似，真实安全判断仍要结合日志、视频和人工复核。';
+		                if (this.activeTab === 'safetyOverview') return '安全总览基于本地已入库的作业数据，建议先同步或解析更多日志包。';
+		                if (this.activeTab === 'safetyAlerts') return '告警规则覆盖温度、时序和传感器可信度维度。admin 可触发重新扫描。';
 		                if (this.activeTab === 'home') return '从搜索、历史和常用入口开始。';
 		                return `当前版本：${this.appVersion}`;
 		            },
@@ -2946,14 +3638,47 @@
                                     { id: 'logAnalysis', label: '日志结论' },
                                 ],
                             },
+                            temperatureCalibration: {
+                                title: '在长时间范围内定位设备温度校正动作',
+                                text: '用于研发和售后确认设备何时执行过温度校准、校正或标定。结果独立于菜谱匹配，日志包只扫描一次并长期复用。',
+                                meta: [
+                                    this.temperatureCalibration.result ? `${this.temperatureCalibration.result.summary.event_count || 0} 条记录` : '等待查询',
+                                    this.temperatureCalibration.result ? `${this.temperatureCalibration.result.summary.completed_packages || 0}/${this.temperatureCalibration.result.summary.package_count || 0} 包已扫描` : '本地事件库优先',
+                                    '缺失自动补齐',
+                                ],
+                                actions: [
+                                    { id: 'loadTemperatureCalibration', label: '查询当前范围', primary: true },
+                                    { id: 'cookTemperature', label: '温度诊断' },
+                                    { id: 'logs', label: '日志包' },
+                                ],
+                            },
                             powerDiagnosis: {
                                 title: '核对单道菜的指令功率、实际输出和能量',
                                 text: '用于研发定位“给了多少功率、机器实际输出多少、某个食材或步骤消耗多少能量”。先选日志包解析，再按单道菜和动作关键词筛查。',
-                                meta: [`已选 ${this.selectedCookTemperatureFiles.length || 0} 包`, this.cookTemperature ? `${this.filteredPowerDiagnosisCooks.length || 0} 道菜` : '等待解析', 'kW / kWh'],
+                                meta: [`已选 ${this.selectedCookTemperatureFiles.length || 0} 包`, this.cookTemperature ? `${this.filteredPowerDiagnosisCooks.length || 0} 道菜` : '等待解析', `能量单位 ${this.energyUnitLabel}`],
                                 actions: [
                                     { id: 'selectRecentLogs', label: '选最近3包', primary: true },
                                     { id: 'cookTemperature', label: '温度对齐' },
                                     { id: 'logs', label: '换日志包' },
+                                ],
+                            },
+                            thermalModel: {
+                                title: '把单道菜的能量、投料和锅温偏差放在一页',
+                                text: '用于研发、安全和工艺团队解释“理论能量为什么会推高锅温、实测为什么偏离、投油和主料窗口是否危险”。第一版是工程近似模型。',
+                                meta: [`已选 ${this.selectedCookTemperatureFiles.length || 0} 包`, this.cookTemperature ? `${this.thermalCookOptions.length || 0} 道可分析作业` : '等待解析', '可调参数'],
+                                actions: [
+                                    { id: 'selectRecentLogs', label: '选最近3包', primary: true },
+                                    { id: 'powerDiagnosis', label: '功率诊断' },
+                                    { id: 'cookTemperature', label: '温度诊断' },
+                                ],
+                            },
+                            thermalKnowledge: {
+                                title: '把食材物性沉淀成可复用底座',
+                                text: '用于维护食材分类、比热容、升温能量和燃烧参考温度。热过程分析会优先从这里取食材参数。',
+                                meta: [`${this.thermalKnowledgeBase.length} 条种子数据`, `${this.thermalKnowledgeCategories.length} 个分类`, '后续接数据库'],
+                                actions: [
+                                    { id: 'thermalModel', label: '热过程分析', primary: true },
+                                    { id: 'recipeSearch', label: '菜谱检索' },
                                 ],
                             },
                             versionStats: {
@@ -3133,10 +3858,14 @@
 		            normalizedPowerMinEnergyKwh() {
 		                const raw = Number(this.powerDiagnosisFilters.minEnergy || 0);
 		                if (!raw) return 0;
-		                return this.powerEnergyUnit === 'kws' ? raw / 3600 : raw;
+		                if (this.powerEnergyUnit === 'kws') return raw / 3600;
+		                if (this.powerEnergyUnit === 'kj') return raw / 3600;
+		                return raw;
 		            },
 		            energyUnitLabel() {
-		                return this.powerEnergyUnit === 'kws' ? 'kW·s' : 'kWh';
+		                if (this.powerEnergyUnit === 'kws') return 'kW·s';
+		                if (this.powerEnergyUnit === 'kj') return 'kJ';
+		                return 'kWh';
 		            },
 		            selectedPowerCook() {
 		                const rows = this.filteredPowerDiagnosisCooks;
@@ -3150,7 +3879,76 @@
 		                if (!keyword) return rows;
 		                return rows.filter(row => String(row.commands || '').toLowerCase().includes(keyword));
 		            },
-	            versionStatsVersionOptions() {
+		            thermalCookOptions() {
+		                return this.cookTemperatureCooks.map((item, idx) => ({
+		                    key: this.cookTemperatureKey(item, idx),
+		                    label: `${item.cook?.recipe_name || item.cook?.recipe_id || '未命名菜谱'} · ${item.cook?.start_time || '-'} · ${item.cook?.duration_seconds || 0}s`,
+		                }));
+		            },
+		            selectedThermalCook() {
+		                const rows = this.cookTemperatureCooks;
+		                if (!rows.length) return { cook: {}, summary: {}, steps: [], power_samples: [], temperature_samples: [] };
+		                const key = this.thermalModel.selectedCookKey || this.selectedCookTemperatureKey;
+		                const found = rows.find((item, idx) => this.cookTemperatureKey(item, idx) === key);
+		                return found || this.selectedPowerCook || rows[0];
+		            },
+		            thermalAnalysis() {
+		                return this.buildThermalAnalysis(this.selectedThermalCook);
+		            },
+		            thermalKnowledgeItems() {
+		                const rows = this.thermalKnowledge.result?.items;
+		                if (Array.isArray(rows) && rows.length) {
+		                    return rows.map(row => ({
+		                        ...row,
+		                        name: row.canonical_name || row.name,
+		                        specific_heat: row.specific_heat_kj_kg_c ?? row.specific_heat ?? null,
+		                        water_fraction: row.water_fraction ?? null,
+		                        oil_fraction: row.oil_fraction ?? null,
+		                        source: row.source_note || row.source,
+		                    }));
+		                }
+		                return this.thermalKnowledgeBase;
+		            },
+		            thermalKnowledgeCategories() {
+		                const opts = this.thermalKnowledge.result?.summary?.category_options;
+		                if (Array.isArray(opts) && opts.length) return opts.map(item => item.category).filter(Boolean);
+		                return Array.from(new Set(this.thermalKnowledgeBase.map(item => item.category))).sort();
+		            },
+		            thermalKnowledgeHazards() {
+		                const opts = this.thermalKnowledge.result?.summary?.hazard_options;
+		                if (Array.isArray(opts) && opts.length) return opts.map(item => item.hazard_class).filter(Boolean);
+		                return Array.from(new Set(this.thermalKnowledgeBase.map(item => item.hazard_class))).sort();
+		            },
+		            filteredThermalKnowledgeItems() {
+		                if (this.thermalKnowledge.result?.items) return this.thermalKnowledgeItems;
+		                const keyword = String(this.thermalKnowledgeFilters.keyword || '').trim().toLowerCase();
+		                return this.thermalKnowledgeItems.filter(item => {
+		                    if (this.thermalKnowledgeFilters.category && item.category !== this.thermalKnowledgeFilters.category) return false;
+		                    if (this.thermalKnowledgeFilters.hazard && item.hazard_class !== this.thermalKnowledgeFilters.hazard) return false;
+		                    if (!keyword) return true;
+		                    const text = [item.name, item.category, item.hazard_class, item.source, ...(item.aliases || [])].join(' ').toLowerCase();
+		                    return text.includes(keyword);
+		                });
+		            },
+		            thermalKnowledgeSummary() {
+		                const server = this.thermalKnowledge.result?.summary;
+		                if (server && Number(server.total || 0)) {
+		                    return {
+		                        total: Number(server.total || 0),
+		                        categories: Number(server.categories || 0),
+		                        oils: Number(server.oils || 0),
+		                        risky: Number(server.risky || 0),
+		                    };
+		                }
+		                const rows = this.filteredThermalKnowledgeItems;
+		                return {
+		                    total: rows.length,
+		                    categories: new Set(rows.map(item => item.category)).size,
+		                    oils: rows.filter(item => item.category === '油脂' || Number(item.oil_fraction || 0) > 0.5).length,
+		                    risky: rows.filter(item => /可燃|油脂|挥发/.test(item.hazard_class || '')).length,
+		                };
+		            },
+            versionStatsVersionOptions() {
 	                return (this.versionStats.result?.versions || []).map(v => v.version).filter(Boolean);
 	            },
 	            versionStatsCacheLabel() {
@@ -3338,6 +4136,25 @@
                 const selected = new Set((this.selectedCookTemperatureFileIds || []).map(String));
                 return this.logAnalysisOptions.filter(log => selected.has(String(log.id)));
             },
+            selectedTemperatureFilesBusy() {
+                return this.selectedCookTemperatureFiles.some(log => ['queued', 'parsing'].includes(log.parse_status));
+            },
+            selectedTemperatureFilesStored() {
+                return this.selectedCookTemperatureFiles.length > 0
+                    && this.selectedCookTemperatureFiles.every(log => log.storage_status === 'stored');
+            },
+            filteredTemperatureCalibrationEvents() {
+                const rows = (this.temperatureCalibration.result && this.temperatureCalibration.result.events) || [];
+                const keyword = String(this.temperatureCalibration.keyword || '').trim().toLowerCase();
+                if (!keyword) return rows;
+                return rows.filter(row => [
+                    row.event_label,
+                    row.matched_keyword,
+                    row.package_name,
+                    row.source_log_name,
+                    row.raw_log_excerpt,
+                ].join(' ').toLowerCase().includes(keyword));
+            },
             cookTemperatureEstimate() {
                 const files = this.selectedCookTemperatureFiles;
                 const totalMb = files.reduce((sum, log) => sum + this.logSizeMb(log), 0);
@@ -3514,6 +4331,89 @@
 	            initStructuredTemperatureDate() {
 	                this.structuredTemperature.date = this.formatDateInput(new Date());
 	            },
+                initTemperatureCalibrationDates() {
+                    const end = new Date();
+                    const start = new Date(end.getTime() - 41 * 24 * 3600 * 1000);
+                    this.temperatureCalibration.startDate = this.formatDateInput(start);
+                    this.temperatureCalibration.endDate = this.formatDateInput(end);
+                },
+                stopTemperatureCalibrationPolling() {
+                    if (this.temperatureCalibration.pollTimer) clearTimeout(this.temperatureCalibration.pollTimer);
+                    this.temperatureCalibration.pollTimer = null;
+                },
+                scheduleTemperatureCalibrationPolling() {
+                    this.stopTemperatureCalibrationPolling();
+                    const summary = (this.temperatureCalibration.result || {}).summary || {};
+                    if (!(summary.queued_packages || summary.scanning_packages) || this.temperatureCalibration.pollCount >= 120) return;
+                    this.temperatureCalibration.pollTimer = setTimeout(async () => {
+                        this.temperatureCalibration.pollCount += 1;
+                        await this.loadTemperatureCalibrations(false, true);
+                    }, 5000);
+                },
+                async loadTemperatureCalibrations(autoQueue = true, silent = false) {
+                    if (!this.data) return;
+                    if (!this.temperatureCalibration.startDate || !this.temperatureCalibration.endDate) {
+                        this.temperatureCalibration.error = '请选择开始和结束日期。';
+                        return;
+                    }
+                    if (!silent) this.temperatureCalibration.loading = true;
+                    this.temperatureCalibration.error = '';
+                    try {
+                        const params = new URLSearchParams({
+                            start_date: this.temperatureCalibration.startDate,
+                            end_date: this.temperatureCalibration.endDate,
+                            auto_queue: autoQueue ? '1' : '0',
+                        });
+                        const res = await fetch(`/api/temperature-calibrations/${this.data.stats.sn}?${params.toString()}`, { headers: this.authHeaders() });
+                        if (res.status === 401) {
+                            this.logout();
+                            return;
+                        }
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                            this.temperatureCalibration.error = payload.detail || '温度校正记录读取失败。';
+                            return;
+                        }
+                        this.temperatureCalibration.result = payload;
+                        this.scheduleTemperatureCalibrationPolling();
+                    } catch (e) {
+                        this.temperatureCalibration.error = '温度校正记录读取失败，请稍后重试。';
+                    } finally {
+                        if (!silent) this.temperatureCalibration.loading = false;
+                    }
+                },
+                async syncTemperatureCalibrations() {
+                    if (!this.data) return;
+                    this.temperatureCalibration.syncing = true;
+                    this.temperatureCalibration.error = '';
+                    this.temperatureCalibration.pollCount = 0;
+                    try {
+                        const params = new URLSearchParams({
+                            start_date: this.temperatureCalibration.startDate,
+                            end_date: this.temperatureCalibration.endDate,
+                            retry_failed: '1',
+                        });
+                        const res = await fetch(`/api/temperature-calibrations/${this.data.stats.sn}/sync?${params.toString()}`, {
+                            method: 'POST',
+                            headers: this.authHeaders(),
+                        });
+                        if (res.status === 401) {
+                            this.logout();
+                            return;
+                        }
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) {
+                            this.temperatureCalibration.error = payload.detail || '日志补齐任务提交失败。';
+                            return;
+                        }
+                        this.temperatureCalibration.result = payload;
+                        this.scheduleTemperatureCalibrationPolling();
+                    } catch (e) {
+                        this.temperatureCalibration.error = '日志补齐任务提交失败，请稍后重试。';
+                    } finally {
+                        this.temperatureCalibration.syncing = false;
+                    }
+                },
 	            structuredStatusClass(status) {
 	                const value = status || '';
 	                if (value === '已入库') return 'bg-success';
@@ -3921,8 +4821,12 @@
             runPageGuideAction(action) {
                 if (!action || !action.id) return;
                 const id = action.id;
-                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'powerDiagnosis', 'versionStats', 'admin', 'emergency'].includes(id)) {
+                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'powerDiagnosis', 'thermalModel', 'thermalKnowledge', 'versionStats', 'admin', 'emergency'].includes(id)) {
                     this.setActiveTab(id);
+                    return;
+                }
+                if (id === 'loadTemperatureCalibration') {
+                    this.loadTemperatureCalibrations(true);
                     return;
                 }
                 if (id === 'recipeSearchModeTop') {
@@ -3956,12 +4860,171 @@
                 if (tabId === 'emergency') this.loadEmergencyDevices();
                 if (tabId === 'oilThermal') this.loadOilThermal();
                 if (tabId === 'versionStats' && !this.versionStats.result) this.loadVersionStats(false);
+                if (tabId === 'thermalKnowledge' && !this.thermalKnowledge.result) this.loadThermalKnowledge(0);
+                if (tabId === 'safetyOverview') this.loadSafetyOverview();
+                if (tabId === 'safetyAlerts') this.loadSafetyAlerts();
                 if (tabId === 'logAnalysis') this.prepareLogAnalysis();
+                if (tabId === 'temperatureCalibration' && this.data) this.loadTemperatureCalibrations(true);
                 if ((tabId === 'cookTemperature' || tabId === 'powerDiagnosis') && this.data && !this.selectedCookTemperatureFileIds.length && this.logAnalysisOptions.length) {
                     this.selectedCookTemperatureFileIds = [String(this.logAnalysisOptions[0].id)];
                     this.syncPrimaryTemperatureLog();
                 }
             },
+            async loadThermalKnowledge(offset = 0) {
+                this.thermalKnowledge.loading = true;
+                this.thermalKnowledge.error = '';
+                try {
+                    const params = new URLSearchParams();
+                    if (this.thermalKnowledgeFilters.keyword) params.set('keyword', this.thermalKnowledgeFilters.keyword);
+                    if (this.thermalKnowledgeFilters.category) params.set('category', this.thermalKnowledgeFilters.category);
+                    if (this.thermalKnowledgeFilters.hazard) params.set('hazard', this.thermalKnowledgeFilters.hazard);
+                    params.set('limit', '300');
+                    params.set('offset', String(Math.max(0, Number(offset || 0))));
+                    const res = await fetch(`/api/thermal-knowledge?${params.toString()}`, { headers: this.authHeaders() });
+                    if (res.status === 401) {
+                        this.logout();
+                        this.loginError = '登录已失效，请重新登录';
+                        return;
+                    }
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        this.thermalKnowledge.error = payload.detail || '热物性库读取失败';
+                        return;
+                    }
+                    this.thermalKnowledge.result = await res.json();
+                } catch (e) {
+                    this.thermalKnowledge.error = '热物性库读取失败，请稍后重试。';
+                } finally {
+                    this.thermalKnowledge.loading = false;
+                }
+            },
+            async syncThermalKnowledge() {
+                if (!this.isAdmin) return;
+                this.thermalKnowledge.syncLoading = true;
+                this.thermalKnowledge.error = '';
+                try {
+                    const res = await fetch('/api/thermal-knowledge/sync?recipe_limit=20000', { method: 'POST', headers: this.authHeaders() });
+                    if (res.status === 401) {
+                        this.logout();
+                        this.loginError = '登录已失效，请重新登录';
+                        return;
+                    }
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        this.thermalKnowledge.error = payload.detail || '热物性库同步失败';
+                        return;
+                    }
+                    await res.json();
+                    await this.loadThermalKnowledge(0);
+                } catch (e) {
+                    this.thermalKnowledge.error = '热物性库同步失败，请稍后重试。';
+                } finally {
+                    this.thermalKnowledge.syncLoading = false;
+                }
+            },
+            resetThermalKnowledgeFilters() {
+                this.thermalKnowledgeFilters.keyword = '';
+                this.thermalKnowledgeFilters.category = '';
+                this.thermalKnowledgeFilters.hazard = '';
+                this.loadThermalKnowledge(0);
+            },
+            // ── Safety Dashboard Methods ──
+            async loadSafetyOverview() {
+                this.safetyDashboard.overviewLoading = true;
+                this.safetyDashboard.overviewError = '';
+                try {
+                    const res = await fetch('/api/safety/overview', { headers: this.authHeaders() });
+                    if (res.status === 401) { this.logout(); return; }
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        this.safetyDashboard.overviewError = payload.detail || '安全总览加载失败';
+                        return;
+                    }
+                    this.safetyDashboard.overview = await res.json();
+                } catch (e) {
+                    this.safetyDashboard.overviewError = '安全总览加载失败，请稍后重试。';
+                } finally {
+                    this.safetyDashboard.overviewLoading = false;
+                }
+            },
+            async loadSafetyAlerts(offset = 0) {
+                this.safetyDashboard.alertsLoading = true;
+                this.safetyDashboard.alertsError = '';
+                try {
+                    const params = new URLSearchParams();
+                    const f = this.safetyDashboard.alertsFilters;
+                    if (f.riskLevel) params.set('risk_level', f.riskLevel);
+                    if (f.ruleKey) params.set('rule_key', f.ruleKey);
+                    if (f.sn) params.set('sn', f.sn);
+                    if (f.dismissed !== '') params.set('dismissed', String(f.dismissed));
+                    params.set('limit', '200');
+                    params.set('offset', String(Math.max(0, Number(offset || 0))));
+                    const res = await fetch('/api/safety/alerts?' + params.toString(), { headers: this.authHeaders() });
+                    if (res.status === 401) { this.logout(); return; }
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        this.safetyDashboard.alertsError = payload.detail || '告警查询失败';
+                        return;
+                    }
+                    this.safetyDashboard.alerts = await res.json();
+                    this.safetyDashboard.alertsPage = Math.floor(offset / 200);
+                } catch (e) {
+                    this.safetyDashboard.alertsError = '告警查询失败，请稍后重试。';
+                } finally {
+                    this.safetyDashboard.alertsLoading = false;
+                }
+            },
+            async triggerSafetyScan() {
+                if (!this.isAdmin) return;
+                this.safetyDashboard.scanLoading = true;
+                this.safetyDashboard.scanResult = null;
+                try {
+                    const res = await fetch('/api/safety/scan', { method: 'POST', headers: this.authHeaders() });
+                    if (res.status === 401) { this.logout(); return; }
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        alert('扫描失败：' + (payload.detail || '未知错误'));
+                        return;
+                    }
+                    this.safetyDashboard.scanResult = await res.json();
+                    await this.loadSafetyOverview();
+                    if (this.safetyDashboard.alerts) await this.loadSafetyAlerts(0);
+                } catch (e) {
+                    alert('扫描失败，请稍后重试。');
+                } finally {
+                    this.safetyDashboard.scanLoading = false;
+                }
+            },
+            async dismissSafetyAlert(alertId) {
+                if (!this.isAdmin) return;
+                try {
+                    const res = await fetch('/api/safety/alerts/' + alertId + '/dismiss', { method: 'POST', headers: this.authHeaders() });
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        alert('处理失败：' + (payload.detail || '未知错误'));
+                        return;
+                    }
+                    await this.loadSafetyAlerts(this.safetyDashboard.alertsPage * 200);
+                    await this.loadSafetyOverview();
+                } catch (e) {
+                    alert('处理失败，请稍后重试。');
+                }
+            },
+            resetSafetyAlertsFilters() {
+                this.safetyDashboard.alertsFilters = { riskLevel: '', ruleKey: '', sn: '', dismissed: '' };
+                this.loadSafetyAlerts(0);
+            },
+            jumpToDeviceFromAlert(alert) {
+                if (!alert || !alert.sn) return;
+                this.snInput = alert.sn;
+                this.search();
+            },
+            safetyRiskBadgeClass(level) {
+                if (level === 'high') return 'bg-danger';
+                if (level === 'medium') return 'bg-warning text-dark';
+                return 'bg-secondary';
+            },
+
 	            async loadAdminStatus() {
 	                if (!this.isAdmin) return;
 	                this.adminLoading = true;
@@ -4094,6 +5157,7 @@
                 const n = Number(kwh || 0);
                 if (!Number.isFinite(n)) return '-';
                 if (this.powerEnergyUnit === 'kws') return `${(n * 3600).toFixed(1)} kW·s`;
+                if (this.powerEnergyUnit === 'kj') return `${(n * 3600).toFixed(1)} kJ`;
                 return `${n.toFixed(4)} kWh`;
             },
             chartXForOffset(offset, duration) {
@@ -4149,11 +5213,378 @@
                     potTempLabel: pot ? `${pot}℃` : '-',
                 };
             },
+            ensureThermalCookVisible() {
+                const rows = this.cookTemperatureCooks;
+                if (!rows.length) {
+                    this.thermalModel.selectedCookKey = '';
+                    return;
+                }
+                if (!this.thermalModel.selectedCookKey) return;
+                const found = rows.some((item, idx) => this.cookTemperatureKey(item, idx) === this.thermalModel.selectedCookKey);
+                if (!found) this.thermalModel.selectedCookKey = '';
+            },
+            thermalEnergyLabel(kwh) {
+                return this.energyValueLabel(kwh);
+            },
+            thermalKjLabel(kj) {
+                const n = Number(kj || 0);
+                if (!Number.isFinite(n)) return '-';
+                if (this.powerEnergyUnit === 'kwh') return `${(n / 3600).toFixed(4)} kWh`;
+                if (this.powerEnergyUnit === 'kws') return `${n.toFixed(1)} kW·s`;
+                return `${n.toFixed(1)} kJ`;
+            },
+            thermalTempLabel(value) {
+                const n = Number(value);
+                if (!Number.isFinite(n)) return '-';
+                return `${n.toFixed(1)}℃`;
+            },
+            thermalNumber(value, fallback = 0) {
+                const n = Number(value);
+                return Number.isFinite(n) ? n : fallback;
+            },
+            thermalStepKind(text) {
+                const raw = String(text || '');
+                if (/润锅|热锅|预热|锅设置|锅设为/.test(raw)) return 'preheat';
+                if (/色拉油|花椒油|葱油|菜籽油|猪油|牛油|油/.test(raw)) return 'oil';
+                if (/鸡|牛|肉|鱼|虾|蛋|豆腐|土豆|辣椒|白菜|包菜|笋|主料|下料/.test(raw)) return 'food';
+                if (/水|汤|高汤|水淀粉|汁/.test(raw)) return 'water';
+                if (/盐|糖|酱|醋|料酒|生抽|老抽|蚝油|味精|鸡精|调料|麻椒|花椒/.test(raw)) return 'seasoning';
+                if (/出锅|结束|完成/.test(raw)) return 'finish';
+                return 'cook';
+            },
+            thermalKindLabel(kind) {
+                return {
+                    preheat: '热锅/润锅',
+                    oil: '投油',
+                    food: '投主料/食材',
+                    water: '投水/汤汁',
+                    seasoning: '调料',
+                    finish: '出锅/结束',
+                    cook: '加热/翻炒',
+                }[kind] || '其他';
+            },
+            thermalKnowledgeEnergyKj(item, targetTemp, massG, roomTemp) {
+                const rawC = item?.specific_heat ?? item?.specific_heat_kj_kg_c;
+                if (rawC === null || rawC === undefined || rawC === '') return null;
+                const c = this.thermalNumber(rawC, NaN);
+                if (!Number.isFinite(c) || c <= 0) return null;
+                const massKg = Math.max(0, this.thermalNumber(massG, this.thermalKnowledgeFilters.massG || 100)) / 1000;
+                const delta = Math.max(0, this.thermalNumber(targetTemp, 100) - this.thermalNumber(roomTemp, this.thermalKnowledgeFilters.roomTemp || 25));
+                return massKg * c * delta;
+            },
+            thermalKnowledgeEnergyLabel(item, targetTemp) {
+                const kj = this.thermalKnowledgeEnergyKj(item, targetTemp, this.thermalKnowledgeFilters.massG, this.thermalKnowledgeFilters.roomTemp);
+                if (!Number.isFinite(kj)) return '待校准';
+                return this.thermalKjLabel(kj);
+            },
+            thermalKnowledgeAverageEnergyLabel(targetTemp) {
+                const rows = this.filteredThermalKnowledgeItems.length ? this.filteredThermalKnowledgeItems : this.thermalKnowledgeBase;
+                const knownRows = rows.filter(item => Number.isFinite(this.thermalNumber(item.specific_heat ?? item.specific_heat_kj_kg_c, NaN)));
+                if (!knownRows.length) return '待校准';
+                const avgC = knownRows.reduce((sum, item) => sum + this.thermalNumber(item.specific_heat ?? item.specific_heat_kj_kg_c, 0), 0) / knownRows.length;
+                return this.thermalKnowledgeEnergyLabel({ specific_heat: avgC }, targetTemp);
+            },
+            thermalFractionLabel(item) {
+                if (item?.water_fraction === null && item?.oil_fraction === null) return '待校准';
+                const water = Math.round(this.thermalNumber(item?.water_fraction, 0) * 100);
+                const oil = Math.round(this.thermalNumber(item?.oil_fraction, 0) * 100);
+                return `水 ${water}% / 油 ${oil}%`;
+            },
+            thermalHazardClass(hazard) {
+                if (/可燃油脂|可燃干货|挥发|固体/.test(String(hazard || ''))) return 'danger-chip';
+                if (/低风险|含水/.test(String(hazard || ''))) return 'safe-chip';
+                return 'warning-chip';
+            },
+            thermalFirePointLabel(item) {
+                if (!item) return '-';
+                const rows = [];
+                if (item.smoke_point_c) rows.push(`烟点${item.smoke_point_c}℃`);
+                if (item.flash_point_c) rows.push(`闪点${item.flash_point_c}℃`);
+                if (item.autoignition_c) rows.push(`自燃${item.autoignition_c}℃`);
+                if (item.boiling_c) rows.push(`沸点${item.boiling_c}℃`);
+                return rows.join(' / ') || '-';
+            },
+            thermalIngredientKnowledge(name, unit) {
+                const text = String(name || '').toLowerCase();
+                const normalized = text.replace(/\s+/g, '');
+                const candidates = [];
+                this.thermalKnowledgeItems.forEach(item => {
+                    [item.name, ...(item.aliases || [])].forEach(label => {
+                        const key = String(label || '').toLowerCase().replace(/\s+/g, '');
+                        if (key && normalized.includes(key)) candidates.push({ item, length: key.length });
+                    });
+                });
+                const match = candidates.sort((a, b) => b.length - a.length)[0]?.item;
+                if (match) return match;
+                if (/ml|毫升|l|升/i.test(unit || '')) return this.thermalKnowledgeItems.find(item => item.id === 'water' || item.name === '水' || item.canonical_name === '水') || { category: '水/汤汁', specific_heat: 4.184, hazard_class: '低风险含水液体' };
+                return { id: 'unknown', name: '未分类', aliases: [], category: '未分类', specific_heat: 3.5, water_fraction: 0.5, oil_fraction: 0, boiling_c: null, smoke_point_c: null, flash_point_c: null, autoignition_c: null, hazard_class: '待归类', confidence: '低', source: '默认兜底' };
+            },
+            thermalIngredientCategory(name, unit) {
+                const meta = this.thermalIngredientKnowledge(name, unit);
+                return { category: meta.category, specific_heat: meta.specific_heat };
+            },
+            parseThermalIngredients(item) {
+                const rows = [];
+                const unitScale = { g: 1, '克': 1, kg: 1000, '千克': 1000, ml: 1, '毫升': 1, l: 1000, L: 1000, '升': 1000 };
+                const sources = [
+                    ...(item.steps || []).map(step => ({ offset: Number(step.offset_seconds || 0), text: step.commands || '' })),
+                    ...(item.android_actions || []).map(action => ({ offset: Number(action.offset_seconds || 0), text: action.raw || '' })),
+                ];
+                sources.forEach(source => {
+                    const text = String(source.text || '').replace(/锅设置为?\d+W?/g, '');
+                    const re = /([\u4e00-\u9fa5A-Za-z0-9（）()·\-\s]{1,18}?)(\d+(?:\.\d+)?)\s*(kg|千克|g|克|ml|毫升|L|l|升)/g;
+                    let match;
+                    while ((match = re.exec(text)) !== null) {
+                        const name = String(match[1] || '').replace(/[，,。；;、\s]+$/g, '').trim() || '投料';
+                        const amount = Number(match[2]);
+                        const unit = match[3];
+                        if (!Number.isFinite(amount) || amount <= 0) continue;
+                        const mass_g = amount * (unitScale[unit] || 1);
+                        if (mass_g > 5000) continue;
+                        const meta = this.thermalIngredientKnowledge(name, unit);
+                        const heat_to_100_kj = (mass_g / 1000) * meta.specific_heat * Math.max(0, 100 - this.thermalNumber(this.thermalModel.roomTemp, 25));
+                        rows.push({
+                            offset: Math.max(0, Math.round(source.offset || 0)),
+                            name,
+                            amount,
+                            unit,
+                            mass_g: Number(mass_g.toFixed(1)),
+                            category: meta.category,
+                            specific_heat: meta.specific_heat,
+                            knowledge_id: meta.id,
+                            hazard_class: meta.hazard_class,
+                            water_fraction: meta.water_fraction,
+                            oil_fraction: meta.oil_fraction,
+                            boiling_c: meta.boiling_c,
+                            smoke_point_c: meta.smoke_point_c,
+                            flash_point_c: meta.flash_point_c,
+                            autoignition_c: meta.autoignition_c,
+                            source: meta.source,
+                            heat_to_100_kj: Number(heat_to_100_kj.toFixed(1)),
+                            consumed: false,
+                        });
+                    }
+                });
+                const unique = new Map();
+                rows.forEach(row => unique.set(`${row.offset}-${row.name}-${row.mass_g}`, row));
+                return Array.from(unique.values()).sort((a, b) => a.offset - b.offset);
+            },
+            thermalPowerAt(samples, offset, key) {
+                if (!samples.length) return 0;
+                let best = samples[0];
+                for (const row of samples) {
+                    if (Number(row.offset_seconds || 0) <= offset) best = row;
+                    else break;
+                }
+                return this.thermalNumber(best[key], 0);
+            },
+            integrateThermalPower(samples, start, end, key) {
+                const clean = (samples || [])
+                    .map(row => ({ ...row, offset: Number(row.offset_seconds || 0), value: this.thermalNumber(row[key], 0) }))
+                    .filter(row => Number.isFinite(row.offset))
+                    .sort((a, b) => a.offset - b.offset);
+                if (!clean.length || end <= start) return 0;
+                let energy = 0;
+                for (let i = 0; i < clean.length; i += 1) {
+                    const current = clean[i];
+                    const nextOffset = i + 1 < clean.length ? clean[i + 1].offset : end;
+                    const segStart = Math.max(start, current.offset);
+                    const segEnd = Math.min(end, nextOffset);
+                    if (segEnd > segStart) energy += current.value * (segEnd - segStart) / 3600;
+                }
+                return Number(energy.toFixed(5));
+            },
+            measuredThermalTempAt(item, offset) {
+                const temp = this.nearestByOffset(item.temperature_samples || [], offset) || {};
+                const value = temp.pot_temp ?? temp.output_temp ?? temp.temp_3 ?? temp.temperature;
+                const n = Number(value);
+                return Number.isFinite(n) ? n : null;
+            },
+            buildThermalPhases(item, ingredients, duration) {
+                const steps = (item.steps || []).map(step => ({
+                    offset: Math.max(0, Number(step.offset_seconds || 0)),
+                    action: step.commands || '-',
+                    kind: this.thermalStepKind(step.commands),
+                })).sort((a, b) => a.offset - b.offset);
+                if (!steps.length && ingredients.length) {
+                    ingredients.forEach(ing => steps.push({ offset: ing.offset, action: ing.name, kind: this.thermalStepKind(ing.name) }));
+                }
+                const phases = [];
+                const samples = item.power_samples || [];
+                steps.forEach((step, idx) => {
+                    const end = idx + 1 < steps.length ? steps[idx + 1].offset : duration;
+                    if (end < step.offset) return;
+                    const actual = this.integrateThermalPower(samples, step.offset, end, 'actual_power_kw');
+                    const command = this.integrateThermalPower(samples, step.offset, end, 'command_power_kw');
+                    phases.push({
+                        label: this.thermalKindLabel(step.kind),
+                        kind: step.kind,
+                        start: Math.round(step.offset),
+                        end: Math.round(end),
+                        duration: Math.max(0, Math.round(end - step.offset)),
+                        actual_kwh: actual,
+                        command_kwh: command,
+                        action: step.action,
+                    });
+                });
+                return phases;
+            },
+            buildThermalCurve(item, ingredients, duration, startOffset = 0) {
+                const samples = (item.power_samples || [])
+                    .map(row => ({ ...row, offset: Math.max(0, Number(row.offset_seconds || 0)) }))
+                    .filter(row => Number.isFinite(row.offset))
+                    .sort((a, b) => a.offset - b.offset);
+                const firstMeasured = this.measuredThermalTempAt(item, startOffset);
+                let temp = this.thermalNumber(this.thermalModel.initialPotTemp, firstMeasured ?? this.thermalNumber(this.thermalModel.roomTemp, 25));
+                const room = this.thermalNumber(this.thermalModel.roomTemp, 25);
+                const eta = Math.max(0, Math.min(1, this.thermalNumber(this.thermalModel.heatEfficiency, 0.85)));
+                const panCapacity = Math.max(0.5, this.thermalNumber(this.thermalModel.panHeatCapacityKjPerC, 3.2));
+                const loss = Math.max(0, this.thermalNumber(this.thermalModel.lossCoefficientKjPerSC, 0.012));
+                let foodCapacity = 0;
+                let cumulativeInputKj = 0;
+                let cumulativeLossKj = 0;
+                let cumulativeFoodLoadKj = 0;
+                const events = ingredients.filter(row => row.offset >= startOffset).map(row => ({ ...row, consumed: false }));
+                const offsets = new Set([startOffset, duration]);
+                samples.forEach(row => offsets.add(Math.round(row.offset)));
+                (item.temperature_samples || []).forEach(row => offsets.add(Math.round(Number(row.offset_seconds || 0))));
+                events.forEach(row => offsets.add(Math.round(row.offset)));
+                const points = Array.from(offsets).filter(x => x >= startOffset && x <= duration).sort((a, b) => a - b);
+                const curve = [];
+                for (let i = 0; i < points.length; i += 1) {
+                    const offset = points[i];
+                    const next = i + 1 < points.length ? points[i + 1] : offset;
+                    events.filter(row => !row.consumed && row.offset <= offset).forEach(row => {
+                        const load = (row.mass_g / 1000) * row.specific_heat * Math.max(0, temp - room);
+                        temp -= load / Math.max(0.5, panCapacity + foodCapacity);
+                        foodCapacity += (row.mass_g / 1000) * row.specific_heat;
+                        cumulativeFoodLoadKj += load;
+                        row.consumed = true;
+                    });
+                    const measured = this.measuredThermalTempAt(item, offset);
+                    const command = this.thermalPowerAt(samples, offset, 'command_power_kw');
+                    const actual = this.thermalPowerAt(samples, offset, 'actual_power_kw') || command;
+                    curve.push({
+                        offset,
+                        pred_temp: Number(temp.toFixed(1)),
+                        measured_temp: measured,
+                        command_power_kw: command,
+                        actual_power_kw: actual,
+                        cumulative_input_kj: Number(cumulativeInputKj.toFixed(1)),
+                        cumulative_food_load_kj: Number(cumulativeFoodLoadKj.toFixed(1)),
+                        cumulative_loss_kj: Number(cumulativeLossKj.toFixed(1)),
+                    });
+                    const dt = Math.max(0, next - offset);
+                    if (dt > 0) {
+                        const inputKj = actual * dt * eta;
+                        const lossKj = loss * Math.max(0, temp - room) * dt;
+                        cumulativeInputKj += inputKj;
+                        cumulativeLossKj += lossKj;
+                        temp += (inputKj - lossKj) / Math.max(0.5, panCapacity + foodCapacity);
+                        temp = Math.max(room - 10, Math.min(520, temp));
+                    }
+                }
+                return curve;
+            },
+            buildThermalAnalysis(item) {
+                if (!item || !item.cook) return { ready: false };
+                const duration = Math.max(1, Number(item.cook.duration_seconds || item.summary?.duration_seconds || 1));
+                const ingredients = this.parseThermalIngredients(item);
+                const allPhases = this.buildThermalPhases(item, ingredients, duration);
+                const firstNonPreheat = allPhases.find(row => row.kind !== 'preheat');
+                const analysisStart = this.thermalModel.includePreheat ? 0 : (firstNonPreheat ? firstNonPreheat.start : 0);
+                const phases = this.thermalModel.includePreheat ? allPhases : allPhases.filter(row => row.end >= analysisStart && row.kind !== 'preheat');
+                const curve = this.buildThermalCurve(item, ingredients, duration, analysisStart);
+                const actualEnergy = this.integrateThermalPower(item.power_samples || [], analysisStart, duration, 'actual_power_kw') || this.thermalNumber(item.summary?.actual_energy_kwh, 0);
+                const commandEnergy = this.integrateThermalPower(item.power_samples || [], analysisStart, duration, 'command_power_kw') || this.thermalNumber(item.summary?.command_energy_kwh, 0);
+                const finalCurve = curve.length ? curve[curve.length - 1] : {};
+                const foodLoadKj = this.thermalNumber(finalCurve.cumulative_food_load_kj, 0);
+                const lossKj = this.thermalNumber(finalCurve.cumulative_loss_kj, 0);
+                const effectiveInputKj = this.thermalNumber(finalCurve.cumulative_input_kj, 0);
+                const maxPred = Math.max(...curve.map(row => Number(row.pred_temp || 0)), 0);
+                const measuredRows = curve.filter(row => row.measured_temp !== null && row.measured_temp !== undefined);
+                const maxMeasured = measuredRows.length ? Math.max(...measuredRows.map(row => Number(row.measured_temp || 0))) : this.thermalNumber(item.summary?.max_temp, 0);
+                const endPred = curve.length ? curve[curve.length - 1].pred_temp : null;
+                const endMeasured = measuredRows.length ? measuredRows[measuredRows.length - 1].measured_temp : null;
+                const oilPhase = phases.find(row => row.kind === 'oil');
+                const foodPhase = phases.find(row => row.kind === 'food');
+                const oilOffset = oilPhase ? oilPhase.start : null;
+                const foodOffset = foodPhase ? foodPhase.start : null;
+                const oilToFood = oilOffset !== null && foodOffset !== null && foodOffset >= oilOffset ? foodOffset - oilOffset : null;
+                const energyBeforeFood = foodOffset !== null ? this.integrateThermalPower(item.power_samples || [], analysisStart, foodOffset, 'actual_power_kw') : 0;
+                const markers = [];
+                if (oilOffset !== null) markers.push({ offset: oilOffset, label: '投油', color: '#f97316' });
+                if (foodOffset !== null) markers.push({ offset: foodOffset, label: '主料', color: '#16a34a' });
+                phases.filter(row => row.kind === 'preheat').slice(0, 1).forEach(row => markers.push({ offset: row.start, label: '热锅', color: '#64748b' }));
+                const risks = [];
+                if (oilToFood !== null && oilToFood > 60) risks.push({ label: `投油到主料间隔 ${oilToFood}s`, level: 'high' });
+                if (energyBeforeFood > 0.18) risks.push({ label: `主料前能量 ${this.thermalEnergyLabel(energyBeforeFood)}`, level: 'high' });
+                if (maxMeasured > 330) risks.push({ label: `实测高温 ${this.thermalTempLabel(maxMeasured)}`, level: 'high' });
+                if (maxPred > 360) risks.push({ label: `预测高温 ${this.thermalTempLabel(maxPred)}`, level: 'high' });
+                ingredients.filter(row => Number(row.oil_fraction || 0) > 0.5 || row.category === '油脂').forEach(row => {
+                    const peak = Math.max(maxPred || 0, maxMeasured || 0);
+                    if (row.autoignition_c && peak >= row.autoignition_c) risks.push({ label: `${row.name} 达自燃参考 ${row.autoignition_c}℃`, level: 'high' });
+                    else if (row.flash_point_c && peak >= row.flash_point_c) risks.push({ label: `${row.name} 达闪点参考 ${row.flash_point_c}℃`, level: 'high' });
+                    else if (row.smoke_point_c && peak >= row.smoke_point_c) risks.push({ label: `${row.name} 超烟点参考 ${row.smoke_point_c}℃`, level: 'medium' });
+                });
+                if (!item.power_samples || !item.power_samples.length) risks.push({ label: '缺功率采样', level: 'medium' });
+                if (!measuredRows.length) risks.push({ label: '缺实测温度', level: 'medium' });
+                if (Math.abs(maxPred - maxMeasured) > 80 && maxMeasured) risks.push({ label: '预测/实测偏差过大', level: 'medium' });
+                const maxDelta = maxPred && maxMeasured ? maxPred - maxMeasured : null;
+                const endDelta = endPred !== null && endMeasured !== null ? endPred - endMeasured : null;
+                const notes = [];
+                if (maxDelta !== null && maxDelta > 50) notes.push('预测明显高于实测：可能是热效率假设偏高、食材吸热低估，或红外/输出温度口径偏低。');
+                if (maxDelta !== null && maxDelta < -50) notes.push('实测明显高于预测：可能是实际热效率偏高、锅体热容参数偏大，或局部热斑未被模型覆盖。');
+                if (!notes.length) notes.push('预测与实测处于可观察范围内，仍需结合锅黑、油烟、视频和现场状态判断。');
+                return {
+                    ready: true,
+                    cook: item.cook || {},
+                    duration,
+                    analysis_start: analysisStart,
+                    energy: { actual_kwh: actualEnergy, command_kwh: commandEnergy, effective_input_kj: effectiveInputKj, food_load_kj: foodLoadKj, loss_kj: lossKj },
+                    measured: { max_temp: maxMeasured },
+                    prediction: { max_pred_temp: maxPred, end_pred_temp: endPred },
+                    ingredients,
+                    phases,
+                    curve,
+                    markers,
+                    windows: {
+                        oil_offset: oilOffset,
+                        food_offset: foodOffset,
+                        oil_to_food_interval: oilToFood,
+                        energy_before_food_kwh: energyBeforeFood,
+                    },
+                    deviation: {
+                        max_delta: maxDelta,
+                        end_delta: endDelta,
+                        direction: maxDelta === null ? '缺少可比温度' : (maxDelta > 0 ? '预测高于实测' : (maxDelta < 0 ? '实测高于预测' : '基本一致')),
+                        notes,
+                    },
+                    risks,
+                };
+            },
+            thermalLinePoints(rows, key, maxValue) {
+                if (!rows || !rows.length) return '';
+                const duration = Math.max(1, Number(this.thermalAnalysis.duration || 1));
+                const width = 780;
+                const height = 215;
+                const x0 = 55;
+                const y0 = 250;
+                return rows.filter(row => row[key] !== null && row[key] !== undefined).map(row => {
+                    const x = x0 + (Number(row.offset || 0) / duration) * width;
+                    const y = y0 - (Number(row[key] || 0) / Math.max(1, maxValue)) * height;
+                    return `${x.toFixed(1)},${Math.max(30, Math.min(258, y)).toFixed(1)}`;
+                }).join(' ');
+            },
+            thermalMarkerX(offset, duration) {
+                return (55 + (Number(offset || 0) / Math.max(1, Number(duration || 1))) * 780).toFixed(1);
+            },
             formatLogFileOption(log) {
                 if (!log) return '';
                 const time = log.log_time_hint || log.create_time || '-';
                 const size = this.formatLogSize(log);
-                const status = log.analytics_status || (log.downloadable === false || log.cos_deleted ? '不可下载' : '可下载');
+                const rawStatus = log.analytics_status || (log.downloadable === false || log.cos_deleted ? '不可下载' : '可下载');
+                const status = rawStatus === '排队中' ? '等待后台解析' : rawStatus;
                 const name = log.file_name || `日志 ${log.id}`;
                 return `${time}｜${size}｜${status}｜${name}`;
             },
@@ -4576,6 +6007,10 @@
                     this.cookTemperatureError = '本次选择超过 90MB，建议拆成多次分析，避免浏览器和服务器同时超时。';
                     return;
                 }
+                if (this.selectedTemperatureFilesBusy) {
+                    this.cookTemperatureError = '所选日志包正在后台等待或解析，请稍后刷新状态，不要重复提交。';
+                    return;
+                }
                 this.selectedLogFileId = ids[0] || '';
                 this.cookTemperatureLoading = true;
                 this.cookTemperatureError = '';
@@ -4900,6 +6335,9 @@
                 this.cookTemperature = null;
                 this.selectedCookTemperatureIndex = 0;
                 this.cookTemperatureError = '';
+                this.stopTemperatureCalibrationPolling();
+                this.temperatureCalibration.result = null;
+                this.temperatureCalibration.error = '';
                 this.processIntervals();
                 this.saveHistoryItem();
                 if (persist) this.saveReportCache(report);
@@ -4909,8 +6347,8 @@
                         this.selectedCookTemperatureFileIds = [String(this.logAnalysisOptions[0].id)];
                         this.syncPrimaryTemperatureLog();
                     }
-                    this.loadCookTemperature();
                 }
+                if (this.activeTab === 'temperatureCalibration') this.loadTemperatureCalibrations(true);
             },
             reportCacheKey(sn) {
                 return `zhiku_device_report_v4_${sn}`;
