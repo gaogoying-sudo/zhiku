@@ -198,3 +198,34 @@
 - 验证核心业务表的查询链路
 - 建立常用查询模板库
 - 与用户开始实际数据检索工作
+
+## 2026-06-06
+
+### PR #1 功率诊断人工菜谱筛选复核部署
+- 操作人/会话：Codex，本地接手 ChatGPT PR #1。
+- 目标：跑通 ChatGPT → GitHub PR → Codex 复核/修补/部署流程，并让功率诊断支持人工选择某一道菜。
+- 变更文件：
+  - `deploy/frontend/index.html`
+  - `deploy/frontend/app.html`
+  - `deploy/frontend/nginx.conf`
+  - `docs/CHANGELOG_REQUESTS.md`
+  - `docs/CODEX_HANDOFF_TEMPLATE.md`
+- 技术结论：
+  - 不接受 ChatGPT 初版“独立 JS 补丁 + Nginx sub_filter 注入”方案，原因是依赖线上 Nginx 模块能力，且本地/线上入口容易不一致。
+  - 已把筛选逻辑直接合并进主前端入口，并删除 `deploy/frontend/power-diagnosis-recipe-filter.js`。
+  - `make check` 已同步 `index.html` 到 `app.html`。
+- 功能结果：
+  - 功率诊断页新增 `人工选择菜谱` 下拉框。
+  - 选项来自 `cookTemperatureCooks`，按 `recipe_id / recipe_name` 聚合并显示次数。
+  - 筛选后联动可诊断作业数量、当前能量指标、日志包内烹饪作业表、功率曲线和步骤功率/能量表。
+  - 读取结构化数据或重新解析日志包时会清空旧菜谱选择，避免跨包残留。
+- 部署命令：
+  - `make check`
+  - `git push origin feature/power-diagnosis-recipe-filter`
+  - `make deploy`
+- 验证结果：
+  - `make check` 通过。
+  - `make smoke SMOKE_KEYWORD="人工选择菜谱" SMOKE_SN="0105222506020185"` 通过：线上 HTML 341221 bytes，关键词命中，登录 200，设备查询 200，匹配设备 1。
+- 遗留问题：
+  - 该 PR 尚未合并到 `main`；当前线上已经部署 PR 分支代码，后续如接受应合并 PR 或同步 main。
+- 解除锁定：功率诊断前端筛选模块。
