@@ -10,6 +10,7 @@ import threading
 import re
 import zipfile
 import urllib.request
+import urllib.error
 import statistics
 import gc
 import uuid
@@ -74,6 +75,7 @@ REPORT_CACHE = {}
 DEVICE_LOOKUP_CACHE = {}
 VERSION_STATS_CACHE = {}
 LOG_ANALYSIS_VERSION = 2
+LOG_PACKAGE_DIAGNOSTICS_VERSION = 3
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 LOG_EVIDENCE_FILE_CACHE_DIR = CACHE_DIR / 'log_evidence_files'
 LOG_EVIDENCE_FILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1508,15 +1510,15 @@ def to_mysql_dt(value):
 
 def analytics_ui_status(download_status, parse_status, storage_status):
     if storage_status == 'stored':
-        return '已入库'
+        return '已匹配生产记录'
     if parse_status == 'parsed':
         return '已解析'
     if parse_status == 'parsing':
         return '解析中'
     if parse_status == 'queued':
-        return '排队中'
+        return '等待后台解析'
     if parse_status == 'no_production_match':
-        return '无生产记录'
+        return 'DB 未匹配，待检查日志证据'
     if parse_status in ('parse_failed', 'no_temperature_data'):
         return '解析失败'
     if download_status == 'downloaded':
@@ -1565,11 +1567,11 @@ def upsert_log_package_index(sn, rows):
                 ELSE VALUES(download_status)
             END,
             ui_status = CASE
-                WHEN storage_status = 'stored' THEN '已入库'
+                WHEN storage_status = 'stored' THEN '已匹配生产记录'
                 WHEN parse_status = 'parsed' THEN '已解析'
                 WHEN parse_status = 'parsing' THEN '解析中'
-                WHEN parse_status = 'queued' THEN '排队中'
-                WHEN parse_status = 'no_production_match' THEN '无生产记录'
+                WHEN parse_status = 'queued' THEN '等待后台解析'
+                WHEN parse_status = 'no_production_match' THEN 'DB 未匹配，待检查日志证据'
                 WHEN parse_status IN ('parse_failed', 'no_temperature_data') THEN '解析失败'
                 WHEN VALUES(download_status) = 'remote_deleted' THEN '不可下载'
                 ELSE VALUES(ui_status)
@@ -1601,10 +1603,14 @@ def attach_log_package_statuses(sn, rows):
     status_map = {int(row['source_file_id']): row for row in status_rows}
     for row in rows:
         status = status_map.get(int(row.get('id') or 0), {})
-        row['analytics_status'] = status.get('ui_status') or ('可下载' if row.get('downloadable') else '不可下载')
         row['download_status'] = status.get('download_status') or ('remote_available' if row.get('downloadable') else 'remote_deleted')
         row['parse_status'] = status.get('parse_status') or 'not_started'
         row['storage_status'] = status.get('storage_status') or 'not_stored'
+        row['analytics_status'] = analytics_ui_status(
+            row['download_status'],
+            row['parse_status'],
+            row['storage_status'],
+        )
         row['structured_cook_count'] = int(status.get('cook_count') or 0)
         row['structured_sample_count'] = int(status.get('sample_count') or 0)
         row['structured_error'] = status.get('error_message')
@@ -1612,6 +1618,15 @@ def attach_log_package_statuses(sn, rows):
         row['structured_coverage_end'] = status.get('log_end_time')
         row['structured_parsed_at'] = status.get('parsed_at')
         row['structured_stored_at'] = status.get('stored_at')
+        diagnostics = read_cached_log_package_diagnostics(row.get('id')) if row.get('id') else None
+        if diagnostics:
+            row['diagnostics_status'] = diagnostics.get('diagnosis_message')
+            row['diagnostics_code'] = diagnostics.get('diagnosis_code')
+            row['internal_session_count'] = len(diagnostics.get('internal_sessions') or [])
+            row['diagnostics_log_time_start'] = diagnostics.get('log_time_start')
+            row['diagnostics_log_time_end'] = diagnostics.get('log_time_end')
+            if status.get('parse_status') == 'no_production_match':
+                row['analytics_status'] = diagnostics.get('diagnosis_message') or row['analytics_status']
 
 def format_bytes(value):
     raw_text = str(value or '').strip()
@@ -2643,8 +2658,8 @@ def locate_log_target_line(sn, source_file_id, source_file, lines, line_hash='',
     return None
 
 def classify_log_file(name):
-    base = Path(name).name
-    if base.startswith('android_'):
+    base = Path(name).name.lower()
+    if base.startswith('android') and base.endswith('.log'):
         return 'android_app'
     if base.startswith('debug'):
         return 'mcu_debug'
@@ -2652,7 +2667,7 @@ def classify_log_file(name):
         return 'main_board'
     if base == 'oildrum_board.log':
         return 'oildrum_board'
-    if base == 'temperature.log':
+    if base.startswith('temperature') and base.endswith('.log'):
         return 'temperature'
     return 'other'
 
@@ -3977,8 +3992,9 @@ def build_cook_temperature_analysis(sn, file_id=None, force_refresh=False):
     )
     if not cook_logs:
         no_match_detail = (
-            "日志覆盖时间内没有匹配到生产记录："
-            f"{coverage_start.isoformat(sep=' ')} ~ {coverage_end.isoformat(sep=' ')}"
+            "DB 未匹配到生产记录；这不代表日志内没有作业。"
+            "请返回“日志包”点击“诊断”，查看日志内部烹饪、养锅、功率、温度和投料证据。"
+            f" 日志覆盖：{coverage_start.isoformat(sep=' ')} ~ {coverage_end.isoformat(sep=' ')}"
         )
         mark_log_package_status(real_sn, selected_file_id, download_status='downloaded', parse_status='no_production_match', storage_status='not_stored', error_message=no_match_detail)
         raise HTTPException(
@@ -4189,6 +4205,470 @@ def build_log_analysis(file_row, zip_bytes):
             'oildrum_heater_pwm': 'oildrum_board.log dev status 第 5 个数为油桶加热 PWM 占空比',
         },
     }
+
+def log_package_diagnostics_cache_path(file_id):
+    path = CACHE_DIR / 'log_package_diagnostics'
+    path.mkdir(parents=True, exist_ok=True)
+    return path / f'{int(file_id)}.json'
+
+def read_cached_log_package_diagnostics(file_id):
+    path = log_package_diagnostics_cache_path(file_id)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+        if payload.get('diagnostics_version') != LOG_PACKAGE_DIAGNOSTICS_VERSION:
+            return None
+        payload['cache'] = {'hit': True}
+        return payload
+    except Exception:
+        path.unlink(missing_ok=True)
+        return None
+
+def save_cached_log_package_diagnostics(file_id, payload):
+    path = log_package_diagnostics_cache_path(file_id)
+    serializable = dict(payload)
+    serializable.pop('cache', None)
+    path.write_text(json.dumps(serializable, ensure_ascii=False, default=str), encoding='utf-8')
+
+def expected_log_package_bytes(file_length):
+    size_mb = parse_mb_value(file_length)
+    if size_mb is None or size_mb <= 0:
+        return None
+    return int(size_mb * 1024 * 1024)
+
+def package_size_match_status(downloaded_size, expected_size):
+    if not expected_size:
+        return 'unknown'
+    ratio = abs(downloaded_size - expected_size) / expected_size
+    return 'matched' if ratio <= 0.15 else 'mismatch'
+
+def parse_internal_log_event(line, source_file, source_kind, line_no):
+    raw = str(line or '').strip()
+    ts = parse_log_ts(raw)
+    if not ts:
+        return None
+    lower = raw.lower()
+    event_type = None
+    event_label = None
+    session_hint = None
+    recipe_id = None
+    recipe_name = None
+    command_power_w = None
+    actual_power_w = None
+    temperatures = None
+
+    cook_match = re.search(r'烹饪开始[：:]?\s*(.+)$', raw)
+    if cook_match:
+        event_type, event_label, session_hint = 'cook_start', '烹饪开始', 'cooking'
+        recipe_name = str(cook_match.group(1) or '').strip(' _:-')
+        trailing = re.search(r'^(.+?)_(\d{4,})(?:\D*)$', recipe_name)
+        if trailing:
+            recipe_name = trailing.group(1).strip(' _:-')
+            recipe_id = int(trailing.group(2))
+    elif re.search(r'快速养锅|养锅开始|protect.?pot', raw, re.I):
+        event_type, event_label, session_hint = 'protect_pot_start', '快速养锅', 'protect_pot'
+    elif re.search(r'录制菜谱', raw, re.I):
+        event_type, event_label, session_hint = 'recipe_recording_start', '录制菜谱', 'recipe_recording'
+    elif re.search(r'RecipeMessageActivity\s+onCreate', raw, re.I):
+        event_type, event_label = 'recipe_activity', '菜谱消息页面'
+    elif re.search(r'NewCookingActivity\s+onCreate|updateRobotScene\s*:\s*scene\s*=\s*COOKING', raw, re.I):
+        event_type, event_label, session_hint = 'cooking_scene', '进入烹饪场景', 'cooking'
+    elif re.search(r'烹饪.*结束|COOK_FINISH|COOKING_FINISH', raw, re.I):
+        event_type, event_label = 'cook_end', '烹饪结束'
+    elif re.search(r'开始检测温度', raw):
+        event_type, event_label = 'temperature_detection_start', '开始检测温度'
+    elif re.search(r'开始检测输出功率', raw):
+        event_type, event_label = 'power_detection_start', '开始检测输出功率'
+    elif re.search(r'开始投液料', raw):
+        event_type, event_label = 'liquid_material_start', '开始投液料'
+    elif re.search(r'投液料_|消耗液料|液料投料记录', raw):
+        event_type, event_label = 'liquid_material', '液料投放'
+    elif re.search(r'开始称重', raw):
+        event_type, event_label = 'weighing_start', '开始称重'
+    elif re.search(r'倾锅操作|lean', raw, re.I):
+        event_type, event_label = 'tilt_pot', '倾锅操作'
+    elif re.search(r'转锅操作|开始转锅|roll mov|roll start|roll stop', raw, re.I):
+        event_type, event_label = 'rotate_pot', '转锅操作'
+    elif 'datacollectmanager' in lower:
+        event_type, event_label = 'data_collect', '数据采集'
+    elif re.search(r'CNEngine\s+speak', raw, re.I):
+        event_type, event_label = 'voice_prompt', '语音/人工操作提示'
+
+    power_sample = re.search(r'功率\s*:\s*(-?\d+(?:\.\d+)?)_(-?\d+(?:\.\d+)?)', raw)
+    power_set = re.search(r'功率设置(?:为|_)?\s*[：:]?\s*(-?\d+(?:\.\d+)?)\s*W?', raw, re.I)
+    if power_sample:
+        command_power_w = float(power_sample.group(1))
+        actual_power_w = float(power_sample.group(2))
+        event_type = event_type or 'power_sample'
+        event_label = event_label or '功率采样'
+    elif power_set:
+        command_power_w = float(power_set.group(1))
+        event_type = event_type or 'power_set'
+        event_label = event_label or '功率设置'
+
+    temp_match = re.search(r'温度\s*:_?\s*(-?\d+)_(-?\d+)_(-?\d+)', raw)
+    if not temp_match and source_kind == 'temperature':
+        temp_match = re.search(r'\]\s*(-?\d+)_(-?\d+)_(-?\d+)', raw)
+    if temp_match:
+        raw_values = [int(temp_match.group(i)) for i in (1, 2, 3)]
+        if source_kind == 'temperature':
+            temperatures = {
+                'filtered_temp': raw_values[0],
+                'infrared_temp': raw_values[1],
+                'pot_temp': raw_values[2],
+                'raw_triplet': '_'.join(map(str, raw_values)),
+            }
+        else:
+            temperatures = {
+                'core_temp': raw_values[0],
+                'coil_temp': raw_values[1],
+                'pot_temp': raw_values[2],
+                'raw_triplet': '_'.join(map(str, raw_values)),
+            }
+        event_type = event_type or 'temperature_sample'
+        event_label = event_label or '温度采样'
+
+    if not event_type:
+        return None
+    return {
+        'ts': ts,
+        'time': ts.isoformat(sep=' '),
+        'event_type': event_type,
+        'event_label': event_label,
+        'session_hint': session_hint,
+        'recipe_id': recipe_id,
+        'recipe_name': recipe_name,
+        'command_power_w': command_power_w,
+        'actual_power_w': actual_power_w,
+        'temperatures': temperatures,
+        'source_file': source_file,
+        'source_kind': source_kind,
+        'line_no': line_no,
+        'raw': raw[:1000],
+    }
+
+def internal_session_summary(events, index):
+    start = events[0]['ts']
+    end = events[-1]['ts']
+    session_type = next((row.get('session_hint') for row in events if row.get('session_hint')), None) or 'manual_action'
+    recipe_id = next((row.get('recipe_id') for row in events if row.get('recipe_id')), None)
+    recipe_name = next((row.get('recipe_name') for row in events if row.get('recipe_name')), None)
+    power_values = []
+    temperature_values = []
+    material_count = 0
+    evidence = []
+    for row in events:
+        for value in (row.get('command_power_w'), row.get('actual_power_w')):
+            if value is not None:
+                power_values.append(float(value))
+        temp = row.get('temperatures') or {}
+        if temp.get('pot_temp') is not None:
+            temperature_values.append(float(temp['pot_temp']))
+        if row.get('event_type') in ('liquid_material_start', 'liquid_material', 'weighing_start'):
+            material_count += 1
+        if len(evidence) < 80:
+            evidence.append({
+                'time': row.get('time'),
+                'event_type': row.get('event_type'),
+                'event_label': row.get('event_label'),
+                'source_file': row.get('source_file'),
+                'line_no': row.get('line_no'),
+                'raw': row.get('raw'),
+                'command_power_w': row.get('command_power_w'),
+                'actual_power_w': row.get('actual_power_w'),
+                'temperatures': row.get('temperatures'),
+            })
+    return {
+        'session_id': f'internal-{index}-{int(start.timestamp())}',
+        'session_type': session_type if session_type in ('cooking', 'protect_pot', 'recipe_recording', 'manual_action') else 'unknown',
+        'start_time': start.isoformat(sep=' '),
+        'end_time': end.isoformat(sep=' '),
+        'duration_seconds': max(0, int((end - start).total_seconds())),
+        'recipe_id': recipe_id,
+        'recipe_name': recipe_name,
+        'max_power_w': round(max(power_values), 1) if power_values else None,
+        'max_pot_temp': round(max(temperature_values), 1) if temperature_values else None,
+        'avg_pot_temp': round(statistics.mean(temperature_values), 1) if temperature_values else None,
+        'first_pot_temp': round(temperature_values[0], 1) if temperature_values else None,
+        'last_pot_temp': round(temperature_values[-1], 1) if temperature_values else None,
+        'event_count': len(events),
+        'temperature_sample_count': len(temperature_values),
+        'power_event_count': sum(1 for row in events if row.get('command_power_w') is not None or row.get('actual_power_w') is not None),
+        'material_event_count': material_count,
+        'evidence_lines': evidence,
+    }
+
+def build_internal_sessions(events):
+    deduped = {}
+    for row in events or []:
+        key = (
+            row.get('ts'),
+            row.get('event_type'),
+            re.sub(r'\s+', ' ', str(row.get('raw') or '')),
+        )
+        deduped[key] = row
+    rows = sorted(deduped.values(), key=lambda row: (row['ts'], row.get('source_file') or '', row.get('line_no') or 0))
+    if not rows:
+        return []
+    sessions = []
+    current = []
+    current_hint = None
+    strong_start_types = {'cook_start', 'protect_pot_start', 'recipe_recording_start', 'cooking_scene'}
+    for row in rows:
+        gap = (row['ts'] - current[-1]['ts']).total_seconds() if current else 0
+        hint = row.get('session_hint')
+        begins_new = row.get('event_type') in strong_start_types
+        if current and (
+            gap > 900
+            or (begins_new and hint and current_hint and hint != current_hint and current_hint != 'cooking')
+            or (row.get('event_type') == 'cook_start' and current_hint == 'cooking' and gap > 120)
+        ):
+            sessions.append(internal_session_summary(current, len(sessions) + 1))
+            current = []
+            current_hint = None
+        current.append(row)
+        current_hint = current_hint or hint
+        if row.get('event_type') == 'cook_end':
+            sessions.append(internal_session_summary(current, len(sessions) + 1))
+            current = []
+            current_hint = None
+    if current:
+        sessions.append(internal_session_summary(current, len(sessions) + 1))
+    return sessions[:120]
+
+def compact_internal_session(session):
+    return {key: value for key, value in session.items() if key != 'evidence_lines'}
+
+def build_target_job_match_diagnosis(target_job_time, coverage_start, coverage_end, db_rows, internal_sessions, detected_kinds):
+    target = to_mysql_dt(target_job_time)
+    if not target:
+        return None
+    before = []
+    after = []
+    for session in internal_sessions:
+        start = to_mysql_dt(session.get('start_time'))
+        end = to_mysql_dt(session.get('end_time')) or start
+        if not start:
+            continue
+        if start <= target <= end:
+            before.append((0, session))
+            after.append((0, session))
+        elif end and end < target:
+            before.append(((target - end).total_seconds(), session))
+        else:
+            after.append(((start - target).total_seconds(), session))
+    before.sort(key=lambda item: item[0])
+    after.sort(key=lambda item: item[0])
+    db_match = None
+    for row in db_rows:
+        start = to_mysql_dt(row.get('create_time'))
+        end = to_mysql_dt(row.get('end_time')) or start
+        if start and end and start - timedelta(minutes=2) <= target <= end + timedelta(minutes=2):
+            db_match = row
+            break
+    nearest = (before[:1] + after[:1])
+    nearest_delta = min([item[0] for item in nearest], default=None)
+    if coverage_start and coverage_end and not (coverage_start <= target <= coverage_end):
+        failure_reason = 'log_time_not_cover_job'
+        suggested = '更换覆盖目标作业时间的日志包，或先核对设备与日志时钟。'
+    elif db_match:
+        failure_reason = None
+        suggested = '已匹配数据库生产记录，可继续查看温度和功率证据。'
+    elif internal_sessions and nearest_delta is not None and nearest_delta <= 300:
+        failure_reason = 'internal_session_exists_but_no_db_record'
+        suggested = '优先查看日志内作业证据；同时核对数据库漏记、时区或设备时钟漂移。'
+    elif internal_sessions:
+        failure_reason = 'timezone_or_clock_drift_suspected'
+        suggested = '日志内存在作业但时间偏差较大，建议核对设备时区和日志/数据库时钟。'
+    elif 'temperature' not in detected_kinds and 'android_app' not in detected_kinds:
+        failure_reason = 'no_temperature_signal'
+        suggested = '当前包缺少温度信号，请换更完整日志包。'
+    else:
+        failure_reason = 'no_internal_session'
+        suggested = '当前日志覆盖内未重建出有效作业片段，请查看关键文件和原始日志。'
+    return {
+        'target_job_time': target.isoformat(sep=' '),
+        'searched_file_ids': [],
+        'db_match_status': 'matched' if db_match else 'not_matched',
+        'internal_session_match_status': 'matched' if internal_sessions and nearest_delta is not None and nearest_delta <= 300 else 'not_matched',
+        'nearest_internal_session_before': compact_internal_session(before[0][1]) if before else None,
+        'nearest_internal_session_after': compact_internal_session(after[0][1]) if after else None,
+        'log_time_start': coverage_start.isoformat(sep=' ') if coverage_start else None,
+        'log_time_end': coverage_end.isoformat(sep=' ') if coverage_end else None,
+        'failure_reason': failure_reason,
+        'suggested_next_action': suggested,
+    }
+
+def build_log_package_diagnostics(file_row, target_job_time=None):
+    result = {
+        'diagnostics_version': LOG_PACKAGE_DIAGNOSTICS_VERSION,
+        'generated_at': int(time.time()),
+        'file_id': int(file_row.get('id')),
+        'sn': file_row.get('sn'),
+        'file_name': file_row.get('file_name'),
+        'file_length': file_row.get('file_length'),
+        'create_time': file_row.get('create_time'),
+        'update_time': file_row.get('update_time'),
+        'cos_deleted': bool(file_row.get('cos_deleted')),
+        'has_cos_url': bool(file_row.get('url')),
+        'download_status': 'not_started',
+        'http_status': None,
+        'downloaded_size': None,
+        'expected_size': expected_log_package_bytes(file_row.get('file_length')),
+        'size_match_status': 'unknown',
+        'is_zip': False,
+        'zip_open_status': 'not_started',
+        'zip_error': None,
+        'file_list_count': 0,
+        'detected_files': [],
+        'detected_log_kinds': [],
+        'has_android_log': False,
+        'has_temperature_log': False,
+        'has_main_board_log': False,
+        'has_oildrum_board_log': False,
+        'has_debug_log': False,
+        'log_time_start': None,
+        'log_time_end': None,
+        'db_production_match_count': 0,
+        'internal_sessions': [],
+        'diagnosis_level': 'error',
+        'diagnosis_code': None,
+        'diagnosis_message': '',
+        'suggested_action': '',
+        'match_diagnosis': None,
+    }
+    if not file_row.get('url'):
+        result.update(diagnosis_code='cos_url_missing', diagnosis_message='日志索引存在，但没有 COS 下载地址。', suggested_action='联系设备侧重新上传日志包。')
+        return result
+    if file_row.get('cos_deleted'):
+        result.update(download_status='remote_deleted', diagnosis_code='cos_deleted', diagnosis_message='COS 文件已删除。', suggested_action='联系设备侧重新上传，或查找相邻时间日志包。')
+        return result
+    try:
+        zip_bytes = download_log_zip(file_row['url'])
+        result['download_status'] = 'downloaded'
+        result['http_status'] = 200
+        result['downloaded_size'] = len(zip_bytes)
+        result['size_match_status'] = package_size_match_status(len(zip_bytes), result['expected_size'])
+    except HTTPException as exc:
+        code = 'file_too_large' if exc.status_code == 413 else 'download_failed'
+        result.update(download_status='failed', http_status=exc.status_code, diagnosis_code=code, diagnosis_message=str(exc.detail), suggested_action='日志包超过保护上限时请先缩小范围；其他下载错误可稍后重试。')
+        return result
+    except TimeoutError as exc:
+        result.update(download_status='failed', diagnosis_code='download_timeout', diagnosis_message=str(exc), suggested_action='稍后重试或检查 COS 网络状态。')
+        return result
+    except urllib.error.HTTPError as exc:
+        result.update(download_status='failed', http_status=exc.code, diagnosis_code='download_failed', diagnosis_message=f'COS HTTP {exc.code}', suggested_action='检查 COS 地址是否过期或文件是否已删除。')
+        return result
+    except Exception as exc:
+        result.update(download_status='failed', diagnosis_code='download_failed', diagnosis_message=str(exc)[:300], suggested_action='稍后重试并检查 COS 地址。')
+        return result
+    result['is_zip'] = zipfile.is_zipfile(BytesIO(zip_bytes))
+    if not result['is_zip']:
+        result.update(zip_open_status='failed', diagnosis_code='not_zip', diagnosis_message='下载内容不是 ZIP 文件。', suggested_action='核对 machine_ftp 文件地址和上传内容。')
+        return result
+    try:
+        zf = zipfile.ZipFile(BytesIO(zip_bytes))
+        bad_member = zf.testzip()
+        if bad_member:
+            raise zipfile.BadZipFile(f'CRC error: {bad_member}')
+        result['zip_open_status'] = 'opened'
+    except zipfile.BadZipFile as exc:
+        result.update(zip_open_status='failed', zip_error=str(exc), diagnosis_code='zip_corrupted', diagnosis_message='ZIP 文件损坏或 CRC 校验失败。', suggested_action='重新上传日志包或查看相邻包。')
+        return result
+
+    internal_events = []
+    first_time = None
+    last_time = None
+    detected_kinds = set()
+    with zf:
+        infos = [info for info in zf.infolist() if not info.is_dir()]
+        result['file_list_count'] = len(infos)
+        for info in infos:
+            base = Path(info.filename).name
+            kind = classify_log_file(base)
+            if kind != 'other':
+                detected_kinds.add(kind)
+            detected = {
+                'file_name': info.filename,
+                'base_name': base,
+                'kind': kind,
+                'kind_label': log_kind_label(kind),
+                'size': info.file_size,
+                'first_time': None,
+                'last_time': None,
+                'event_count': 0,
+            }
+            if kind != 'other':
+                try:
+                    text = text_from_zip_member(zf, info, max_bytes=32 * 1024 * 1024)
+                    file_first = None
+                    file_last = None
+                    event_count = 0
+                    for line_no, line in enumerate(text.splitlines(), start=1):
+                        ts = parse_log_ts(line)
+                        if ts:
+                            file_first = file_first or ts
+                            file_last = ts
+                            first_time = ts if first_time is None or ts < first_time else first_time
+                            last_time = ts if last_time is None or ts > last_time else last_time
+                        event = parse_internal_log_event(line, info.filename, kind, line_no)
+                        if event:
+                            internal_events.append(event)
+                            event_count += 1
+                    detected.update(
+                        first_time=file_first.isoformat(sep=' ') if file_first else None,
+                        last_time=file_last.isoformat(sep=' ') if file_last else None,
+                        event_count=event_count,
+                    )
+                except Exception as exc:
+                    detected['parse_error'] = str(exc)[:200]
+            result['detected_files'].append(detected)
+
+    result['detected_log_kinds'] = sorted(detected_kinds)
+    result['has_android_log'] = 'android_app' in detected_kinds
+    result['has_temperature_log'] = 'temperature' in detected_kinds
+    result['has_main_board_log'] = 'main_board' in detected_kinds
+    result['has_oildrum_board_log'] = 'oildrum_board' in detected_kinds
+    result['has_debug_log'] = 'mcu_debug' in detected_kinds
+    result['log_time_start'] = first_time.isoformat(sep=' ') if first_time else None
+    result['log_time_end'] = last_time.isoformat(sep=' ') if last_time else None
+    sessions = build_internal_sessions(internal_events)
+    result['internal_sessions'] = sessions
+
+    db_rows = []
+    if first_time and last_time:
+        db_rows = fetch_all(
+            "SELECT id, recipe_id, recipe_name, create_time, end_time, time AS duration_seconds "
+            "FROM sop_machinelog WHERE sn=%s AND create_time BETWEEN %s AND %s "
+            "ORDER BY create_time ASC LIMIT 140",
+            (file_row.get('sn'), first_time, last_time),
+            source=True,
+            database='btyc',
+        )
+    result['db_production_match_count'] = len(db_rows)
+    if target_job_time:
+        result['match_diagnosis'] = build_target_job_match_diagnosis(
+            target_job_time, first_time, last_time, db_rows, sessions, detected_kinds,
+        )
+        if result['match_diagnosis']:
+            result['match_diagnosis']['searched_file_ids'] = [int(file_row.get('id'))]
+
+    cooking_sessions = [row for row in sessions if row.get('session_type') in ('cooking', 'recipe_recording')]
+    manual_sessions = [row for row in sessions if row.get('session_type') in ('protect_pot', 'manual_action')]
+    if not detected_kinds:
+        result.update(diagnosis_code='key_log_missing', diagnosis_message='ZIP 可打开，但没有识别到关键日志文件。', suggested_action='检查设备日志版本和文件命名规则。')
+    elif not first_time:
+        result.update(diagnosis_code='log_time_not_found', diagnosis_message='关键日志存在，但无法识别日志时间范围。', suggested_action='查看原始时间戳格式并补充解析规则。')
+    elif db_rows:
+        result.update(diagnosis_level='ok', diagnosis_code='db_matched', diagnosis_message='已匹配生产记录。', suggested_action='可继续进入温度、功率或日志结论分析。')
+    elif cooking_sessions:
+        result.update(diagnosis_level='warning', diagnosis_code='internal_work_found', diagnosis_message='DB 未匹配，日志内有作业片段。', suggested_action='查看日志内作业证据，并核对数据库漏记、时区或设备时钟。')
+    elif manual_sessions:
+        result.update(diagnosis_level='warning', diagnosis_code='internal_manual_found', diagnosis_message='DB 未匹配，日志内仅有养锅/手动动作。', suggested_action='查看内部动作证据，确认是否属于非标准烹饪或人工操作。')
+    else:
+        result.update(diagnosis_level='warning', diagnosis_code='no_internal_session', diagnosis_message='DB 未匹配，日志内无有效作业。', suggested_action='检查关键日志是否完整，或选择相邻时间日志包。')
+    return result
 
 def build_device_report(sn: str):
     real_sn, info = resolve_sn(sn)
@@ -7817,6 +8297,65 @@ def log_analysis(file_id: int, request: Request, refresh: int = Query(0), author
         action='log_analysis_view',
     )
 
+@app.get("/api/log-package-diagnostics/{file_id}")
+def log_package_diagnostics(
+    file_id: int,
+    request: Request,
+    refresh: int = Query(0),
+    target_job_time: str = Query(None),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    if refresh and not is_admin(username):
+        raise HTTPException(status_code=403, detail="Only admin can refresh log package diagnostics")
+    row = fetch_one(
+        "SELECT id, sn, file_name, file_length, pic AS url, type, create_time, update_time, cos_deleted "
+        "FROM machine_ftp WHERE id=%s LIMIT 1",
+        (file_id,),
+        source=True,
+        database='btyc',
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            'failure_reason': 'machine_ftp_missing',
+            'message': 'machine_ftp 中未找到日志包索引。',
+            'suggested_next_action': '重新查询设备日志列表，确认 file_id 是否仍然有效。',
+        })
+    cached = None if refresh or target_job_time else read_cached_log_package_diagnostics(file_id)
+    if cached:
+        log_event(username, 'log_package_diagnostics', request, sn=row.get('sn'), detail={'file_id': file_id, 'cache_hit': True})
+        return cached
+    try:
+        payload = build_log_package_diagnostics(row, target_job_time=target_job_time)
+    except Exception as exc:
+        payload = {
+            'diagnostics_version': LOG_PACKAGE_DIAGNOSTICS_VERSION,
+            'file_id': file_id,
+            'sn': row.get('sn'),
+            'file_name': row.get('file_name'),
+            'diagnosis_level': 'error',
+            'diagnosis_code': 'parser_error',
+            'diagnosis_message': f'日志包诊断异常：{str(exc)[:300]}',
+            'suggested_action': '保留该包并提交解析器排查，不要据此判断设备没有生产。',
+            'internal_sessions': [],
+        }
+    if not target_job_time:
+        save_cached_log_package_diagnostics(file_id, payload)
+    payload['cache'] = {'hit': False}
+    log_event(
+        username,
+        'log_package_diagnostics',
+        request,
+        sn=row.get('sn'),
+        detail={
+            'file_id': file_id,
+            'cache_hit': False,
+            'diagnosis_code': payload.get('diagnosis_code'),
+            'internal_session_count': len(payload.get('internal_sessions') or []),
+        },
+    )
+    return payload
+
 @app.get("/api/admin/log-analysis/{file_id}")
 def admin_log_analysis(file_id: int, request: Request, refresh: int = Query(0), authorization: str = Header(None)):
     username = require_admin(authorization=authorization)
@@ -7885,7 +8424,7 @@ def auto_parse_cycle():
             )
         except HTTPException as exc:
             reason = str(exc.detail)
-            parse_status = 'no_production_match' if exc.status_code == 404 and '没有匹配到生产记录' in reason else 'parse_failed'
+            parse_status = 'no_production_match' if exc.status_code == 404 and ('没有匹配到生产记录' in reason or 'DB 未匹配到生产记录' in reason) else 'parse_failed'
             mark_log_package_status(sn, file_id, parse_status=parse_status, error_message=reason)
             execute_local(
                 "UPDATE watched_devices SET last_error=%s, updated_at=%s WHERE sn=%s",
