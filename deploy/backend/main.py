@@ -75,7 +75,7 @@ REPORT_CACHE = {}
 DEVICE_LOOKUP_CACHE = {}
 VERSION_STATS_CACHE = {}
 LOG_ANALYSIS_VERSION = 2
-LOG_PACKAGE_DIAGNOSTICS_VERSION = 3
+LOG_PACKAGE_DIAGNOSTICS_VERSION = 4
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 LOG_EVIDENCE_FILE_CACHE_DIR = CACHE_DIR / 'log_evidence_files'
 LOG_EVIDENCE_FILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -4219,6 +4219,13 @@ def read_cached_log_package_diagnostics(file_id):
         payload = json.loads(path.read_text(encoding='utf-8'))
         if payload.get('diagnostics_version') != LOG_PACKAGE_DIAGNOSTICS_VERSION:
             return None
+        failure_codes = {
+            'download_failed', 'download_timeout', 'zip_corrupted', 'not_zip',
+            'parser_error', 'log_time_not_found', 'key_log_missing',
+        }
+        ttl = 900 if payload.get('diagnosis_code') in failure_codes else 86400
+        if time.time() - path.stat().st_mtime > ttl:
+            return None
         payload['cache'] = {'hit': True}
         return payload
     except Exception:
@@ -4274,6 +4281,8 @@ def parse_internal_log_event(line, source_file, source_kind, line_no):
         event_type, event_label = 'recipe_activity', '菜谱消息页面'
     elif re.search(r'NewCookingActivity\s+onCreate|updateRobotScene\s*:\s*scene\s*=\s*COOKING', raw, re.I):
         event_type, event_label, session_hint = 'cooking_scene', '进入烹饪场景', 'cooking'
+    elif re.search(r'ProtectPotActivity\s+onCreate', raw, re.I):
+        event_type, event_label, session_hint = 'protect_pot_start', '进入养锅场景', 'protect_pot'
     elif re.search(r'烹饪.*结束|COOK_FINISH|COOKING_FINISH', raw, re.I):
         event_type, event_label = 'cook_end', '烹饪结束'
     elif re.search(r'开始检测温度', raw):
@@ -4284,8 +4293,14 @@ def parse_internal_log_event(line, source_file, source_kind, line_no):
         event_type, event_label = 'liquid_material_start', '开始投液料'
     elif re.search(r'投液料_|消耗液料|液料投料记录', raw):
         event_type, event_label = 'liquid_material', '液料投放'
-    elif re.search(r'开始称重', raw):
+    elif re.search(r'开始称重|称重_', raw):
         event_type, event_label = 'weighing_start', '开始称重'
+    elif re.search(r'自动投料|auto\s*feed|投料机构', raw, re.I):
+        event_type, event_label = 'auto_material', '自动投料'
+    elif re.search(r'设置温度上限|温度上限', raw):
+        event_type, event_label = 'temperature_limit', '设置温度上限'
+    elif re.search(r'Set\s+pot\s+at|锅位设置', raw, re.I):
+        event_type, event_label = 'pot_position', '锅位设置'
     elif re.search(r'倾锅操作|lean', raw, re.I):
         event_type, event_label = 'tilt_pot', '倾锅操作'
     elif re.search(r'转锅操作|开始转锅|roll mov|roll start|roll stop', raw, re.I):
@@ -4357,6 +4372,8 @@ def internal_session_summary(events, index):
     power_values = []
     temperature_values = []
     material_count = 0
+    tilt_count = 0
+    roll_count = 0
     evidence = []
     for row in events:
         for value in (row.get('command_power_w'), row.get('actual_power_w')):
@@ -4367,6 +4384,10 @@ def internal_session_summary(events, index):
             temperature_values.append(float(temp['pot_temp']))
         if row.get('event_type') in ('liquid_material_start', 'liquid_material', 'weighing_start'):
             material_count += 1
+        if row.get('event_type') == 'tilt_pot':
+            tilt_count += 1
+        if row.get('event_type') == 'rotate_pot':
+            roll_count += 1
         if len(evidence) < 80:
             evidence.append({
                 'time': row.get('time'),
@@ -4379,6 +4400,22 @@ def internal_session_summary(events, index):
                 'actual_power_w': row.get('actual_power_w'),
                 'temperatures': row.get('temperatures'),
             })
+    max_temp = round(max(temperature_values), 1) if temperature_values else None
+    max_power = round(max(power_values), 1) if power_values else None
+    risk_tags = []
+    if max_temp is not None:
+        if max_temp >= 350:
+            risk_tags.append('超 350℃')
+        elif max_temp >= 300:
+            risk_tags.append('超 300℃')
+        elif max_temp >= 250:
+            risk_tags.append('超 250℃')
+    if max_power is not None and max_power >= 15000:
+        risk_tags.append('15kW 持续')
+    elif max_power is not None and max_power >= 12000:
+        risk_tags.append('高功率')
+    if session_type == 'protect_pot' and max_temp is not None and max_temp >= 250:
+        risk_tags.append('养锅高温')
     return {
         'session_id': f'internal-{index}-{int(start.timestamp())}',
         'session_type': session_type if session_type in ('cooking', 'protect_pot', 'recipe_recording', 'manual_action') else 'unknown',
@@ -4387,8 +4424,11 @@ def internal_session_summary(events, index):
         'duration_seconds': max(0, int((end - start).total_seconds())),
         'recipe_id': recipe_id,
         'recipe_name': recipe_name,
-        'max_power_w': round(max(power_values), 1) if power_values else None,
-        'max_pot_temp': round(max(temperature_values), 1) if temperature_values else None,
+        'source': 'log_internal',
+        'matched_db_job_id': None,
+        'match_confidence': 0,
+        'max_power_w': max_power,
+        'max_pot_temp': max_temp,
         'avg_pot_temp': round(statistics.mean(temperature_values), 1) if temperature_values else None,
         'first_pot_temp': round(temperature_values[0], 1) if temperature_values else None,
         'last_pot_temp': round(temperature_values[-1], 1) if temperature_values else None,
@@ -4396,6 +4436,9 @@ def internal_session_summary(events, index):
         'temperature_sample_count': len(temperature_values),
         'power_event_count': sum(1 for row in events if row.get('command_power_w') is not None or row.get('actual_power_w') is not None),
         'material_event_count': material_count,
+        'tilt_event_count': tilt_count,
+        'roll_event_count': roll_count,
+        'risk_tags': risk_tags,
         'evidence_lines': evidence,
     }
 
@@ -4635,6 +4678,18 @@ def build_log_package_diagnostics(file_row, target_job_time=None):
     result['log_time_end'] = last_time.isoformat(sep=' ') if last_time else None
     sessions = build_internal_sessions(internal_events)
     result['internal_sessions'] = sessions
+    result['internal_session_count'] = len(sessions)
+    result['temperature_sample_count'] = sum(int(row.get('temperature_sample_count') or 0) for row in sessions)
+    result['power_event_count'] = sum(int(row.get('power_event_count') or 0) for row in sessions)
+    result['material_event_count'] = sum(int(row.get('material_event_count') or 0) for row in sessions)
+    result['max_temperature'] = max(
+        [row.get('max_pot_temp') for row in sessions if row.get('max_pot_temp') is not None],
+        default=None,
+    )
+    result['max_power_w'] = max(
+        [row.get('max_power_w') for row in sessions if row.get('max_power_w') is not None],
+        default=None,
+    )
 
     db_rows = []
     if first_time and last_time:
@@ -4647,6 +4702,7 @@ def build_log_package_diagnostics(file_row, target_job_time=None):
             database='btyc',
         )
     result['db_production_match_count'] = len(db_rows)
+    result['db_job_match_count'] = len(db_rows)
     if target_job_time:
         result['match_diagnosis'] = build_target_job_match_diagnosis(
             target_job_time, first_time, last_time, db_rows, sessions, detected_kinds,
@@ -4668,7 +4724,289 @@ def build_log_package_diagnostics(file_row, target_job_time=None):
         result.update(diagnosis_level='warning', diagnosis_code='internal_manual_found', diagnosis_message='DB 未匹配，日志内仅有养锅/手动动作。', suggested_action='查看内部动作证据，确认是否属于非标准烹饪或人工操作。')
     else:
         result.update(diagnosis_level='warning', diagnosis_code='no_internal_session', diagnosis_message='DB 未匹配，日志内无有效作业。', suggested_action='检查关键日志是否完整，或选择相邻时间日志包。')
+    result['failure_reason'] = None if result.get('diagnosis_level') == 'ok' else result.get('diagnosis_code')
     return result
+
+def integrate_internal_session_energy(evidence_lines, session_end=None):
+    rows = []
+    for row in evidence_lines or []:
+        ts = to_mysql_dt(row.get('time'))
+        if ts:
+            rows.append((ts, row))
+    rows.sort(key=lambda item: item[0])
+    command_w = 0.0
+    actual_w = 0.0
+    command_ws = 0.0
+    actual_ws = 0.0
+    points = []
+    for index, (ts, row) in enumerate(rows):
+        if row.get('command_power_w') is not None:
+            command_w = float(row.get('command_power_w') or 0)
+        if row.get('actual_power_w') is not None:
+            actual_w = float(row.get('actual_power_w') or 0)
+        next_ts = rows[index + 1][0] if index + 1 < len(rows) else to_mysql_dt(session_end)
+        duration = max(0.0, min(60.0, (next_ts - ts).total_seconds())) if next_ts else 0.0
+        command_ws += command_w * duration
+        actual_ws += actual_w * duration
+        temp = row.get('temperatures') or {}
+        points.append({
+            'time': row.get('time'),
+            'event_type': row.get('event_type'),
+            'event_label': row.get('event_label'),
+            'command_power_kw': round(command_w / 1000, 3),
+            'actual_power_kw': round(actual_w / 1000, 3),
+            'pot_temp': temp.get('pot_temp'),
+            'raw_triplet': temp.get('raw_triplet'),
+            'raw': row.get('raw'),
+            'source_file': row.get('source_file'),
+            'line_no': row.get('line_no'),
+        })
+    return {
+        'command_energy_kwh': round(command_ws / 3600000, 4),
+        'actual_energy_kwh': round(actual_ws / 3600000, 4),
+        'command_energy_kws': round(command_ws / 1000, 1),
+        'actual_energy_kws': round(actual_ws / 1000, 1),
+        'points': points,
+    }
+
+def thermal_workspace_from_internal(file_row, diagnostics, session):
+    energy = integrate_internal_session_energy(
+        session.get('evidence_lines') or [],
+        session_end=session.get('end_time'),
+    )
+    risk_tags = list(session.get('risk_tags') or [])
+    if session.get('material_event_count') == 0 and (session.get('max_power_w') or 0) >= 12000:
+        risk_tags.append('高功率且未识别投料')
+    return {
+        'source': 'log_internal',
+        'source_label': '日志内部作业片段',
+        'generated_at': datetime.now().isoformat(sep=' ', timespec='seconds'),
+        'file': {
+            'id': file_row.get('id'),
+            'sn': file_row.get('sn'),
+            'file_name': file_row.get('file_name'),
+            'file_length': file_row.get('file_length'),
+            'create_time': file_row.get('create_time'),
+        },
+        'selected_target': compact_internal_session(session),
+        'summary': {
+            'max_pot_temp': session.get('max_pot_temp'),
+            'avg_pot_temp': session.get('avg_pot_temp'),
+            'max_power_w': session.get('max_power_w'),
+            'temperature_sample_count': session.get('temperature_sample_count') or 0,
+            'power_event_count': session.get('power_event_count') or 0,
+            'material_event_count': session.get('material_event_count') or 0,
+            'tilt_event_count': session.get('tilt_event_count') or 0,
+            'roll_event_count': session.get('roll_event_count') or 0,
+            **{key: value for key, value in energy.items() if key != 'points'},
+        },
+        'risk_tags': list(dict.fromkeys(risk_tags)),
+        'risk_disclaimer': '候选风险标签仅用于筛查，不能替代事故结论和人工复核。',
+        'timeline': energy['points'],
+        'temperature_points': [row for row in energy['points'] if row.get('pot_temp') is not None],
+        'power_points': [row for row in energy['points'] if row.get('command_power_kw') or row.get('actual_power_kw')],
+        'events': energy['points'],
+        'raw_evidence_lines': session.get('evidence_lines') or [],
+        'diagnostics': {
+            'diagnosis_code': diagnostics.get('diagnosis_code'),
+            'diagnosis_message': diagnostics.get('diagnosis_message'),
+            'db_job_match_count': diagnostics.get('db_job_match_count') or 0,
+            'log_time_start': diagnostics.get('log_time_start'),
+            'log_time_end': diagnostics.get('log_time_end'),
+            'cache': diagnostics.get('cache') or {},
+        },
+        'failure_reason': 'internal_session_exists_but_no_db_record',
+        'suggested_next_action': '日志内已有作业证据，可继续复核温度、功率和动作；同时核对 DB 漏记或设备时钟偏差。',
+    }
+
+def thermal_workspace_from_db(file_row, analysis, selected):
+    summary = selected.get('summary') or {}
+    max_temp = summary.get('max_temp')
+    max_power = summary.get('max_actual_power_kw') or summary.get('max_command_power_kw')
+    risk_tags = []
+    if max_temp is not None:
+        if max_temp >= 350:
+            risk_tags.append('超 350℃')
+        elif max_temp >= 300:
+            risk_tags.append('超 300℃')
+        elif max_temp >= 250:
+            risk_tags.append('超 250℃')
+    if max_power is not None and float(max_power) >= 15:
+        risk_tags.append('15kW 持续')
+    return {
+        'source': 'db_matched',
+        'source_label': '数据库作业 + 日志证据',
+        'generated_at': datetime.now().isoformat(sep=' ', timespec='seconds'),
+        'file': analysis.get('file') or {
+            'id': file_row.get('id'),
+            'sn': file_row.get('sn'),
+            'file_name': file_row.get('file_name'),
+        },
+        'selected_target': selected.get('cook') or {},
+        'summary': {
+            'max_pot_temp': max_temp,
+            'avg_pot_temp': summary.get('avg_temp'),
+            'max_power_w': round(float(max_power) * 1000, 1) if max_power is not None else None,
+            'temperature_sample_count': summary.get('sample_count') or 0,
+            'power_event_count': summary.get('power_sample_count') or 0,
+            'material_event_count': sum(1 for row in selected.get('steps') or [] if row.get('commands')),
+            'command_energy_kwh': summary.get('command_energy_kwh') or 0,
+            'actual_energy_kwh': summary.get('actual_energy_kwh') or 0,
+            'command_energy_kws': round(float(summary.get('command_energy_kwh') or 0) * 3600, 1),
+            'actual_energy_kws': round(float(summary.get('actual_energy_kwh') or 0) * 3600, 1),
+        },
+        'risk_tags': risk_tags,
+        'risk_disclaimer': '候选风险标签仅用于筛查，不能替代事故结论和人工复核。',
+        'timeline': selected.get('series') or selected.get('power_samples') or [],
+        'temperature_points': selected.get('temperature_samples') or [],
+        'power_points': selected.get('power_samples') or [],
+        'events': selected.get('android_actions') or [],
+        'steps': selected.get('steps') or [],
+        'raw_evidence_lines': selected.get('android_actions') or [],
+        'diagnostics': {
+            'diagnosis_code': 'db_matched',
+            'diagnosis_message': '已匹配数据库生产记录。',
+            'db_job_match_count': analysis.get('cook_count') or len(analysis.get('cooks') or []),
+            'log_time_start': (analysis.get('coverage') or {}).get('start'),
+            'log_time_end': (analysis.get('coverage') or {}).get('end'),
+            'cache': analysis.get('cache') or {},
+        },
+        'failure_reason': None,
+        'suggested_next_action': '可继续对照菜谱设计步骤、真实功率、锅温和原始日志。',
+    }
+
+def build_thermal_safety_workspace(sn, file_id=None, job_id=None, internal_session_id=None, refresh=False):
+    real_sn, _ = resolve_sn(sn)
+    if not file_id:
+        recent = fetch_one(
+            "SELECT id, sn, file_name, file_length, pic AS url, type, create_time, update_time, cos_deleted "
+            "FROM machine_ftp WHERE sn=%s ORDER BY create_time DESC LIMIT 1",
+            (real_sn,),
+            source=True,
+            database='btyc',
+        )
+        if not recent:
+            raise HTTPException(status_code=404, detail='该设备没有可用日志包。')
+        file_row = recent
+    else:
+        file_row = fetch_one(
+            "SELECT id, sn, file_name, file_length, pic AS url, type, create_time, update_time, cos_deleted "
+            "FROM machine_ftp WHERE id=%s AND sn=%s LIMIT 1",
+            (file_id, real_sn),
+            source=True,
+            database='btyc',
+        )
+        if not file_row:
+            raise HTTPException(status_code=404, detail='日志包不存在或不属于当前设备。')
+
+    diagnostics = None if refresh else read_cached_log_package_diagnostics(file_row['id'])
+    try:
+        analysis = build_cook_temperature_analysis(real_sn, file_id=file_row['id'], force_refresh=refresh)
+        cooks = analysis.get('cooks') or []
+        selected = None
+        if job_id is not None:
+            selected = next((row for row in cooks if str((row.get('cook') or {}).get('id')) == str(job_id)), None)
+        selected = selected or (cooks[-1] if cooks else None)
+        if selected:
+            payload = thermal_workspace_from_db(file_row, analysis, selected)
+            payload['available_targets'] = [
+                {'id': (row.get('cook') or {}).get('id'), 'source': 'db_matched', **(row.get('cook') or {})}
+                for row in cooks
+            ]
+            payload['internal_sessions'] = [
+                compact_internal_session(row) for row in (diagnostics or {}).get('internal_sessions') or []
+            ]
+            return payload
+    except HTTPException as exc:
+        if exc.status_code not in (404, 422):
+            raise
+
+    if not diagnostics:
+        diagnostics = build_log_package_diagnostics(file_row)
+        save_cached_log_package_diagnostics(file_row['id'], diagnostics)
+        diagnostics['cache'] = {'hit': False}
+    else:
+        diagnostics.setdefault('cache', {'hit': True})
+    sessions = diagnostics.get('internal_sessions') or []
+    selected_session = next(
+        (row for row in sessions if row.get('session_id') == internal_session_id),
+        None,
+    )
+    selected_session = selected_session or next(
+        (row for row in sessions if row.get('session_type') == 'cooking'),
+        None,
+    ) or (sessions[0] if sessions else None)
+    if not selected_session:
+        raise HTTPException(status_code=422, detail={
+            'failure_reason': diagnostics.get('diagnosis_code') or 'no_internal_session',
+            'message': diagnostics.get('diagnosis_message') or '当前日志包没有可用作业片段。',
+            'suggested_next_action': diagnostics.get('suggested_action') or '选择相邻日志包并先执行日志包诊断。',
+        })
+    payload = thermal_workspace_from_internal(file_row, diagnostics, selected_session)
+    payload['available_targets'] = [compact_internal_session(row) for row in sessions]
+    payload['internal_sessions'] = payload['available_targets']
+    return payload
+
+def build_device_risk_overview(sn):
+    report = get_cached_report(sn)
+    logs = report.get('logs') or []
+    now = datetime.now()
+    def in_days(row, days):
+        ts = to_mysql_dt(row.get('create_time'))
+        return bool(ts and ts >= now - timedelta(days=days))
+    recent_7 = [row for row in logs if in_days(row, 7)]
+    recent_30 = [row for row in logs if in_days(row, 30)]
+    exceptions = [row for row in recent_30 if row.get('is_behavior_exception')]
+    packages = report.get('device_logs') or []
+    package_counts = {}
+    cached_risks = []
+    for row in packages:
+        cached = read_cached_log_package_diagnostics(row.get('id'))
+        status = (cached or {}).get('diagnosis_code') or row.get('analytics_status') or 'not_diagnosed'
+        package_counts[status] = package_counts.get(status, 0) + 1
+        if cached and ((cached.get('max_temperature') or 0) >= 250 or (cached.get('max_power_w') or 0) >= 12000):
+            cached_risks.append({
+                'file_id': row.get('id'),
+                'file_name': row.get('file_name'),
+                'time': cached.get('log_time_start') or row.get('create_time'),
+                'max_temperature': cached.get('max_temperature'),
+                'max_power_w': cached.get('max_power_w'),
+                'internal_session_count': cached.get('internal_session_count') or 0,
+                'diagnosis_message': cached.get('diagnosis_message'),
+            })
+    return {
+        'generated_at': datetime.now().isoformat(sep=' ', timespec='seconds'),
+        'sn': report.get('stats', {}).get('sn'),
+        'device': {
+            'customer': (report.get('customer') or {}).get('common_name') or (report.get('customer') or {}).get('company_name'),
+            'region': (report.get('customer') or {}).get('country_code'),
+            'upper_computer_version': (report.get('software') or {}).get('upper_computer_version'),
+            'last_online_time': (report.get('info') or {}).get('last_online_time'),
+        },
+        'production': {
+            'total': (report.get('stats') or {}).get('total_logs') or 0,
+            'last_7_days': len(recent_7),
+            'last_30_days': len(recent_30),
+            'behavior_exceptions_30d': len(exceptions),
+        },
+        'evidence': {
+            'package_total': len(packages),
+            'status_counts': package_counts,
+            'diagnosed_package_count': sum(1 for row in packages if read_cached_log_package_diagnostics(row.get('id'))),
+            'db_unmatched_with_internal_work': sum(
+                count for key, count in package_counts.items()
+                if key in ('internal_work_found', 'DB 未匹配，日志内有作业片段', 'DB 未匹配，待检查日志证据')
+            ),
+            'high_temperature_package_count': sum(1 for row in cached_risks if (row.get('max_temperature') or 0) >= 250),
+        },
+        'candidate_risks': sorted(cached_risks, key=lambda row: row.get('time') or '', reverse=True)[:20],
+        'risk_disclaimer': '本页为排查入口；候选风险来自已解析日志，不代表事故结论。',
+        'next_actions': [
+            {'id': 'intervals', 'label': '查看作业列表'},
+            {'id': 'logs', 'label': '补齐日志证据'},
+            {'id': 'thermalSafety', 'label': '进入作业热安全分析'},
+        ],
+    }
 
 def build_device_report(sn: str):
     real_sn, info = resolve_sn(sn)
@@ -8355,6 +8693,79 @@ def log_package_diagnostics(
         },
     )
     return payload
+
+@app.get("/api/device-risk-overview/{sn}")
+def device_risk_overview(sn: str, request: Request, authorization: str = Header(None)):
+    username = require_auth(authorization=authorization)
+    payload = build_device_risk_overview(sn)
+    log_event(
+        username,
+        'device_risk_overview',
+        request,
+        sn=payload.get('sn'),
+        detail={
+            'candidate_risk_count': len(payload.get('candidate_risks') or []),
+            'diagnosed_package_count': (payload.get('evidence') or {}).get('diagnosed_package_count'),
+        },
+    )
+    return payload
+
+@app.get("/api/thermal-safety-workspace/{sn}")
+def thermal_safety_workspace(
+    sn: str,
+    request: Request,
+    file_id: int = Query(None),
+    job_id: str = Query(None),
+    internal_session_id: str = Query(None),
+    refresh: int = Query(0),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    if refresh and not is_admin(username):
+        raise HTTPException(status_code=403, detail='Only admin can force refresh thermal safety workspace')
+    payload = build_thermal_safety_workspace(
+        sn,
+        file_id=file_id,
+        job_id=job_id,
+        internal_session_id=internal_session_id,
+        refresh=bool(refresh),
+    )
+    log_event(
+        username,
+        'thermal_safety_workspace',
+        request,
+        sn=sn,
+        detail={
+            'file_id': file_id,
+            'job_id': job_id,
+            'internal_session_id': internal_session_id,
+            'source': payload.get('source'),
+            'risk_tags': payload.get('risk_tags') or [],
+        },
+    )
+    return payload
+
+@app.post("/api/log-package-diagnostics/{file_id}/clear")
+def clear_log_package_diagnostics(file_id: int, request: Request, authorization: str = Header(None)):
+    username = require_admin(authorization=authorization)
+    removed = []
+    path = log_package_diagnostics_cache_path(file_id)
+    if path.exists():
+        path.unlink()
+        removed.append(str(path.name))
+    row = fetch_one(
+        "SELECT sn FROM machine_ftp WHERE id=%s LIMIT 1",
+        (file_id,),
+        source=True,
+        database='btyc',
+    )
+    if row and row.get('sn'):
+        cache_file = cook_temperature_cache_path(row['sn'], file_id)
+        if cache_file.exists():
+            cache_file.unlink()
+            removed.append(str(cache_file.name))
+    log_event(username, 'clear_log_package_diagnostics', request, detail={'file_id': file_id, 'removed': removed})
+    return {'ok': True, 'file_id': file_id, 'removed': removed}
 
 @app.get("/api/admin/log-analysis/{file_id}")
 def admin_log_analysis(file_id: int, request: Request, refresh: int = Query(0), authorization: str = Header(None)):

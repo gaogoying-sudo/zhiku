@@ -1528,6 +1528,49 @@
 	        </div>
 
 	        <section v-if="data" v-show="activeTab === 'overview'">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>单设备起火风险排查入口</span>
+                <button class="btn btn-sm btn-outline-primary" @click="loadDeviceRisk(true)" :disabled="deviceRisk.loading">
+                    {{ deviceRisk.loading ? '读取中' : '刷新概况' }}
+                </button>
+            </div>
+            <div class="card-body">
+                <div v-if="deviceRisk.error" class="alert alert-danger">{{ deviceRisk.error }}</div>
+                <div v-if="deviceRisk.loading && !deviceRisk.result" class="soft-loader"><span class="soft-spinner"></span><span class="soft-thinking">汇总已解析证据</span></div>
+                <template v-if="deviceRisk.result">
+                    <div class="row g-2 mb-3">
+                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.production.last_7_days }}</div><div class="admin-metric-label">近 7 天作业</div></div></div>
+                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.production.last_30_days }}</div><div class="admin-metric-label">近 30 天作业</div></div></div>
+                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.evidence.db_unmatched_with_internal_work }}</div><div class="admin-metric-label">DB 未匹配但有作业</div></div></div>
+                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.evidence.package_total }}</div><div class="admin-metric-label">日志包</div></div></div>
+                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.evidence.diagnosed_package_count }}</div><div class="admin-metric-label">已诊断包</div></div></div>
+                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.candidate_risks.length }}</div><div class="admin-metric-label">候选风险证据</div></div></div>
+                    </div>
+                    <div class="alert alert-warning py-2">{{ deviceRisk.result.risk_disclaimer }}</div>
+                    <div class="d-flex gap-2 flex-wrap">
+                        <button class="btn btn-primary" @click="setActiveTab('intervals')">查看作业列表</button>
+                        <button class="btn btn-outline-primary" @click="setActiveTab('logs')">补齐日志证据</button>
+                        <button class="btn btn-outline-danger" @click="openThermalSafety()">热安全分析</button>
+                    </div>
+                    <div v-if="deviceRisk.result.candidate_risks.length" class="table-responsive mt-3">
+                        <table class="table table-sm table-striped mb-0">
+                            <thead><tr><th>时间</th><th>日志包</th><th>最高锅温</th><th>最高功率</th><th>内部作业</th><th>操作</th></tr></thead>
+                            <tbody>
+                                <tr v-for="row in deviceRisk.result.candidate_risks" :key="row.file_id">
+                                    <td>{{ row.time || '-' }}</td>
+                                    <td class="text-break">{{ row.file_name }}</td>
+                                    <td>{{ row.max_temperature == null ? '-' : `${row.max_temperature}℃` }}</td>
+                                    <td>{{ row.max_power_w == null ? '-' : `${(row.max_power_w / 1000).toFixed(1)}kW` }}</td>
+                                    <td>{{ row.internal_session_count }}</td>
+                                    <td><button class="btn btn-sm btn-outline-danger" @click="openThermalSafety({id: row.file_id})">复核</button></td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </template>
+            </div>
+        </div>
         <!-- Device Info -->
         <div class="card">
 	            <div class="card-header bg-primary text-white">设备档案</div>
@@ -1635,6 +1678,100 @@
                 </table>
             </div>
         </div>
+        </section>
+
+        <section v-if="data" v-show="activeTab === 'thermalSafety'">
+            <div class="card">
+                <div class="card-header">选择日志包和单次作业</div>
+                <div class="card-body">
+                    <div class="row g-2 align-items-end">
+                        <div class="col-lg-7">
+                            <label class="filter-label">日志包</label>
+                            <select class="form-select" v-model="thermalSafety.fileId">
+                                <option value="">最近一个日志包</option>
+                                <option v-for="log in logAnalysisOptions" :key="log.id" :value="String(log.id)">{{ formatLogFileShort(log) }}</option>
+                            </select>
+                        </div>
+                        <div class="col-lg-3" v-if="thermalSafety.result && thermalSafety.result.available_targets?.length">
+                            <label class="filter-label">作业片段</label>
+                            <select class="form-select" v-model="thermalSafety.targetId" @change="loadThermalSafety(false)">
+                                <option v-for="target in thermalSafety.result.available_targets" :key="target.id || target.session_id" :value="String(target.id || target.session_id)">
+                                    {{ target.recipe_name || target.session_type || '未命名作业' }} · {{ target.start_time || '-' }}
+                                </option>
+                            </select>
+                        </div>
+                        <div class="col-lg-2">
+                            <button class="btn btn-primary w-100" @click="loadThermalSafety(false)" :disabled="thermalSafety.loading">
+                                {{ thermalSafety.loading ? '读取中' : '读取工作区' }}
+                            </button>
+                        </div>
+                    </div>
+                    <div class="history-meta mt-2">优先使用已解析缓存；DB 没有匹配生产记录时，自动降级展示日志内部作业片段。</div>
+                </div>
+            </div>
+            <div v-if="thermalSafety.error" class="alert alert-danger">{{ thermalSafety.error }}</div>
+            <div v-if="thermalSafety.loading" class="soft-loader mb-3"><span class="soft-spinner"></span><span class="soft-thinking">组织温度、功率与动作证据</span></div>
+            <template v-if="thermalSafety.result">
+                <div class="alert alert-info d-flex justify-content-between flex-wrap gap-2">
+                    <span><strong>{{ thermalSafety.result.source_label }}</strong> · {{ thermalSafety.result.selected_target.recipe_name || thermalSafety.result.selected_target.session_type || '未命名作业' }}</span>
+                    <span>{{ thermalSafety.result.selected_target.start_time || '-' }} ~ {{ thermalSafety.result.selected_target.end_time || '-' }}</span>
+                </div>
+                <div class="row g-2 mb-3">
+                    <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ thermalSafety.result.summary.max_pot_temp == null ? '-' : `${thermalSafety.result.summary.max_pot_temp}℃` }}</div><div class="admin-metric-label">最高锅温</div></div></div>
+                    <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ thermalSafety.result.summary.max_power_w == null ? '-' : `${(thermalSafety.result.summary.max_power_w / 1000).toFixed(1)}kW` }}</div><div class="admin-metric-label">最高功率</div></div></div>
+                    <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ Number(thermalSafety.result.summary.actual_energy_kwh || 0).toFixed(4) }}</div><div class="admin-metric-label">实际能量 kWh</div></div></div>
+                    <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ Number(thermalSafety.result.summary.command_energy_kwh || 0).toFixed(4) }}</div><div class="admin-metric-label">指令能量 kWh</div></div></div>
+                    <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ thermalSafety.result.summary.temperature_sample_count || 0 }}</div><div class="admin-metric-label">温度证据</div></div></div>
+                    <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ thermalSafety.result.summary.material_event_count || 0 }}</div><div class="admin-metric-label">投料证据</div></div></div>
+                </div>
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between flex-wrap gap-2">
+                        <span>候选风险与数据口径</span>
+                        <span>
+                            <span v-for="tag in thermalSafety.result.risk_tags || []" :key="tag" class="badge bg-warning text-dark ms-1">{{ tag }}</span>
+                            <span v-if="!(thermalSafety.result.risk_tags || []).length" class="badge bg-secondary">未命中候选标签</span>
+                        </span>
+                    </div>
+                    <div class="card-body">
+                        <div>{{ thermalSafety.result.risk_disclaimer }}</div>
+                        <div class="history-meta mt-1">{{ thermalSafety.result.suggested_next_action }}</div>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">温度与功率证据轨迹</div>
+                    <div class="card-body">
+                        <svg viewBox="0 0 1000 260" style="width:100%;height:300px;border:1px solid #dbe3ef;background:#fff">
+                            <line x1="40" y1="230" x2="970" y2="230" stroke="#cbd5e1"/>
+                            <line x1="40" y1="20" x2="40" y2="230" stroke="#cbd5e1"/>
+                            <polyline v-if="workspaceTempLine" :points="workspaceTempLine" fill="none" stroke="#dc2626" stroke-width="3"/>
+                            <polyline v-if="workspaceCommandPowerLine" :points="workspaceCommandPowerLine" fill="none" stroke="#f97316" stroke-width="2.5" stroke-dasharray="8 5"/>
+                            <polyline v-if="workspaceActualPowerLine" :points="workspaceActualPowerLine" fill="none" stroke="#16a34a" stroke-width="3"/>
+                            <text x="48" y="38" fill="#dc2626">锅温</text>
+                            <text x="760" y="38" fill="#f97316">指令功率</text>
+                            <text x="880" y="38" fill="#16a34a">实际功率</text>
+                        </svg>
+                    </div>
+                </div>
+                <div class="card">
+                    <div class="card-header">动作与原始证据</div>
+                    <div class="card-body p-0 table-responsive" style="max-height:560px;overflow:auto;">
+                        <table class="table table-sm table-striped mb-0">
+                            <thead class="sticky-top"><tr><th>时间</th><th>类型</th><th>指令 kW</th><th>实际 kW</th><th>锅温</th><th>来源</th><th>原始日志</th></tr></thead>
+                            <tbody>
+                                <tr v-for="(row, idx) in thermalSafety.result.events || []" :key="`${row.time}-${idx}`">
+                                    <td>{{ row.time || row.timestamp || '-' }}</td>
+                                    <td>{{ row.event_label || row.event_type || row.type || '-' }}</td>
+                                    <td>{{ row.command_power_kw == null ? '-' : row.command_power_kw }}</td>
+                                    <td>{{ row.actual_power_kw == null ? '-' : row.actual_power_kw }}</td>
+                                    <td>{{ row.pot_temp == null ? '-' : `${row.pot_temp}℃` }}</td>
+                                    <td>{{ row.source_file || '-' }}</td>
+                                    <td class="text-break">{{ row.raw || row.raw_line || '-' }}</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </template>
         </section>
 
 	        <section v-if="data" v-show="activeTab === 'recipes'">
@@ -1825,6 +1962,7 @@
                                     <button class="btn btn-sm btn-outline-secondary ms-2" @click="diagnoseLogPackage(log)">
                                         {{ logPackageDiagnostics.loadingId === String(log.id) ? '诊断中' : '诊断' }}
                                     </button>
+                                    <button class="btn btn-sm btn-outline-danger ms-2" @click="openThermalSafety(log)">热安全</button>
                                 </template>
                                 <span v-else class="text-muted">-</span>
                             </td>
@@ -3517,6 +3655,18 @@
                     error: '',
                     expandedSessionId: '',
                 },
+                deviceRisk: {
+                    loading: false,
+                    error: '',
+                    result: null,
+                },
+                thermalSafety: {
+                    loading: false,
+                    error: '',
+                    result: null,
+                    fileId: '',
+                    targetId: '',
+                },
                 cookTemperatureProgress: {
                     status: 'idle',
                     stepIndex: 0,
@@ -3545,16 +3695,17 @@
 		                monthLoading: '',
 		                monthDetails: {},
 				                activeTab: 'home',
-		                appVersion: '2026.06.12-log-package-diagnostics1',
+		                appVersion: '2026.06.12-fire-risk-workbench1',
 		                navGroups: [
 		                    { title: '工作台', tabs: [
 		                        { id: 'home', label: '工作台', icon: '⌂', desc: '搜索、历史、入口' },
 		                    ]},
 		                    { title: '单设备分析', tabs: [
-		                        { id: 'overview', label: '设备档案', icon: '1', desc: '档案、版本、月度' },
-		                        { id: 'intervals', label: '生产记录', icon: '2', desc: '记录、间隔、异常' },
-		                        { id: 'recipes', label: '菜谱资源', icon: '3', desc: '步骤、配料、资源' },
-		                        { id: 'logs', label: '日志包', icon: '4', desc: '下载、选择、入库' },
+		                        { id: 'overview', label: '设备风险总览', icon: '1', desc: '概况、风险、入口' },
+		                        { id: 'intervals', label: '作业列表', icon: '2', desc: '记录、间隔、异常' },
+		                        { id: 'logs', label: '日志证据中心', icon: '3', desc: '包体、诊断、证据' },
+		                        { id: 'thermalSafety', label: '作业热安全分析', icon: '4', desc: '温度、功率、动作' },
+		                        { id: 'recipes', label: '菜谱与资源', icon: '5', desc: '步骤、配料、资源' },
 		                    ]},
 		                    { title: '全局检索', tabs: [
 		                        { id: 'recipeSearch', label: '菜谱检索', icon: 'R', desc: '跨客户和时间' },
@@ -3679,10 +3830,11 @@
 		            pageTitle() {
 		                const titles = {
 		                    home: '工作台',
-		                    overview: '设备档案',
-		                    intervals: '生产记录',
-		                    recipes: '菜谱资源',
-		                    logs: '日志包',
+		                    overview: '设备风险总览',
+		                    intervals: '作业列表',
+		                    recipes: '菜谱与资源',
+		                    logs: '日志证据中心',
+                            thermalSafety: '作业热安全分析',
 		                    recipeSearch: '菜谱检索',
 		                    versionStats: '版本治理',
 		                    thermalKnowledge: '热物性库',
@@ -3709,6 +3861,7 @@
 		                if (this.activeTab === 'cookTemperature') return '对齐单次烹饪的菜谱步骤、真实动作和锅体温度';
                         if (this.activeTab === 'temperatureCalibration') return '按设备和日期范围检索自动温度校正动作及原始日志证据';
                         if (this.activeTab === 'logEvidence') return '查看命中原始日志行、来源文件、日志包及前后上下文';
+                        if (this.activeTab === 'thermalSafety') return '把单次作业的温度、功率、能量、动作和原始日志证据放在同一工作区';
 		                if (this.activeTab === 'powerDiagnosis') return '对齐指令功率、实际输出功率、温度和能量值';
 		                if (this.activeTab === 'thermalModel') return '把单道菜的能量输入、投料吸热、理论锅温和实测偏差放到同一张图里';
 		                if (this.activeTab === 'admin') return '查看账号、缓存、导出和系统使用审计';
@@ -3719,6 +3872,42 @@
 		            },
             isAdmin() {
                 return this.auth.role === 'admin';
+            },
+            workspaceTempLine() {
+                const rows = (this.thermalSafety.result?.temperature_points || [])
+                    .map(row => Number(row.pot_temp ?? row.temperature ?? row.temp))
+                    .filter(Number.isFinite);
+                if (rows.length < 2) return '';
+                const max = Math.max(400, ...rows);
+                return rows.map((value, index) => {
+                    const x = 40 + (930 * index / Math.max(1, rows.length - 1));
+                    const y = 230 - (200 * value / max);
+                    return `${x.toFixed(1)},${y.toFixed(1)}`;
+                }).join(' ');
+            },
+            workspaceCommandPowerLine() {
+                const rows = (this.thermalSafety.result?.power_points || [])
+                    .map(row => Number(row.command_power_kw ?? row.command_kw))
+                    .filter(Number.isFinite);
+                if (rows.length < 2) return '';
+                const max = Math.max(18, ...rows);
+                return rows.map((value, index) => {
+                    const x = 40 + (930 * index / Math.max(1, rows.length - 1));
+                    const y = 230 - (200 * value / max);
+                    return `${x.toFixed(1)},${y.toFixed(1)}`;
+                }).join(' ');
+            },
+            workspaceActualPowerLine() {
+                const rows = (this.thermalSafety.result?.power_points || [])
+                    .map(row => Number(row.actual_power_kw ?? row.actual_kw))
+                    .filter(Number.isFinite);
+                if (rows.length < 2) return '';
+                const max = Math.max(18, ...rows);
+                return rows.map((value, index) => {
+                    const x = 40 + (930 * index / Math.max(1, rows.length - 1));
+                    const y = 230 - (200 * value / max);
+                    return `${x.toFixed(1)},${y.toFixed(1)}`;
+                }).join(' ');
             },
 	            visibleNavGroups() {
 	                return this.navGroups
@@ -3737,7 +3926,7 @@
 	                return this.activeGroup ? this.activeGroup.tabs : [];
 	            },
 		            isDeviceTab() {
-		                return ['overview', 'recipes', 'intervals', 'logs', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'logEvidence', 'powerDiagnosis', 'thermalModel'].includes(this.activeTab);
+		                return ['overview', 'recipes', 'intervals', 'logs', 'thermalSafety', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'logEvidence', 'powerDiagnosis', 'thermalModel'].includes(this.activeTab);
 		            },
 	            showDeviceSearch() {
 	                return this.isDeviceTab;
@@ -5302,6 +5491,7 @@
             },
             setActiveTab(tabId) {
                 this.activeTab = tabId;
+                if (tabId === 'overview' && this.data) this.loadDeviceRisk(false);
                 if (tabId === 'admin') this.loadAdminStatus();
                 if (tabId === 'emergency') this.loadEmergencyDevices();
                 if (tabId === 'oilThermal') this.loadOilThermal();
@@ -5312,9 +5502,65 @@
                 if (tabId === 'logAnalysis') this.prepareLogAnalysis();
                 if (tabId === 'temperatureCalibration' && this.data) this.loadTemperatureCalibrations(true);
                 if (tabId === 'logEvidence' && this.data) this.loadLogEvidenceDetail();
+                if (tabId === 'thermalSafety' && this.data && !this.thermalSafety.fileId && this.logAnalysisOptions.length) {
+                    this.thermalSafety.fileId = String(this.logAnalysisOptions[0].id);
+                }
                 if ((tabId === 'cookTemperature' || tabId === 'powerDiagnosis') && this.data && !this.selectedCookTemperatureFileIds.length && this.logAnalysisOptions.length) {
                     this.selectedCookTemperatureFileIds = [String(this.logAnalysisOptions[0].id)];
                     this.syncPrimaryTemperatureLog();
+                }
+            },
+            async loadDeviceRisk(force = false) {
+                if (!this.data || (this.deviceRisk.result && !force)) return;
+                this.deviceRisk.loading = true;
+                this.deviceRisk.error = '';
+                try {
+                    const res = await fetch(`/api/device-risk-overview/${encodeURIComponent(this.data.stats.sn)}`, { headers: this.authHeaders() });
+                    if (!res.ok) {
+                        const payload = await res.json().catch(() => ({}));
+                        throw new Error(payload.detail || '设备风险概况读取失败');
+                    }
+                    this.deviceRisk.result = await res.json();
+                } catch (e) {
+                    this.deviceRisk.error = e.message || '设备风险概况读取失败';
+                } finally {
+                    this.deviceRisk.loading = false;
+                }
+            },
+            openThermalSafety(log = null) {
+                if (log?.id) this.thermalSafety.fileId = String(log.id);
+                if (!this.thermalSafety.fileId && this.logAnalysisOptions.length) {
+                    this.thermalSafety.fileId = String(this.logAnalysisOptions[0].id);
+                }
+                this.thermalSafety.targetId = '';
+                this.setActiveTab('thermalSafety');
+                this.loadThermalSafety(false);
+            },
+            async loadThermalSafety(refresh = false) {
+                if (!this.data) return;
+                this.thermalSafety.loading = true;
+                this.thermalSafety.error = '';
+                try {
+                    const params = new URLSearchParams();
+                    if (this.thermalSafety.fileId) params.set('file_id', this.thermalSafety.fileId);
+                    if (this.thermalSafety.targetId) {
+                        if (this.thermalSafety.targetId.startsWith('internal-')) params.set('internal_session_id', this.thermalSafety.targetId);
+                        else params.set('job_id', this.thermalSafety.targetId);
+                    }
+                    if (refresh) params.set('refresh', '1');
+                    const res = await fetch(`/api/thermal-safety-workspace/${encodeURIComponent(this.data.stats.sn)}?${params.toString()}`, { headers: this.authHeaders() });
+                    const payload = await res.json().catch(() => ({}));
+                    if (!res.ok) {
+                        const detail = payload.detail || {};
+                        throw new Error(detail.message || detail || '热安全工作区读取失败');
+                    }
+                    this.thermalSafety.result = payload;
+                    const selected = payload.selected_target || {};
+                    this.thermalSafety.targetId = String(selected.id || selected.session_id || '');
+                } catch (e) {
+                    this.thermalSafety.error = e.message || '热安全工作区读取失败';
+                } finally {
+                    this.thermalSafety.loading = false;
                 }
             },
             async loadThermalKnowledge(offset = 0) {
@@ -6780,6 +7026,12 @@
 	                this.logAnalysis = null;
                 this.logAnalysisError = '';
                 this.cookTemperature = null;
+                this.deviceRisk.result = null;
+                this.deviceRisk.error = '';
+                this.thermalSafety.result = null;
+                this.thermalSafety.error = '';
+                this.thermalSafety.targetId = '';
+                this.thermalSafety.fileId = this.selectedLogFileId || '';
                 this.selectedCookTemperatureIndex = 0;
                 this.cookTemperatureError = '';
                 this.stopTemperatureCalibrationPolling();
@@ -6797,6 +7049,11 @@
                 }
                 if (this.activeTab === 'temperatureCalibration') this.loadTemperatureCalibrations(true);
                 if (this.activeTab === 'logEvidence') this.loadLogEvidenceDetail();
+                if (this.activeTab === 'overview') this.loadDeviceRisk(false);
+                if (this.activeTab === 'thermalSafety' && this.logAnalysisOptions.length) {
+                    this.thermalSafety.fileId = this.thermalSafety.fileId || String(this.logAnalysisOptions[0].id);
+                    this.loadThermalSafety(false);
+                }
             },
             reportCacheKey(sn) {
                 return `zhiku_device_report_v4_${sn}`;
