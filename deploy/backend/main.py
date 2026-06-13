@@ -1510,7 +1510,7 @@ def to_mysql_dt(value):
 
 def analytics_ui_status(download_status, parse_status, storage_status):
     if storage_status == 'stored':
-        return '已匹配生产记录'
+        return '已入库'
     if parse_status == 'parsed':
         return '已解析'
     if parse_status == 'parsing':
@@ -1567,7 +1567,7 @@ def upsert_log_package_index(sn, rows):
                 ELSE VALUES(download_status)
             END,
             ui_status = CASE
-                WHEN storage_status = 'stored' THEN '已匹配生产记录'
+                WHEN storage_status = 'stored' THEN '已入库'
                 WHEN parse_status = 'parsed' THEN '已解析'
                 WHEN parse_status = 'parsing' THEN '解析中'
                 WHEN parse_status = 'queued' THEN '等待后台解析'
@@ -2168,6 +2168,189 @@ def structured_cook_temperature_by_day(sn, day, limit=300):
             'detail_included': include_details,
             'detail_limit': STRUCTURED_DAY_DETAIL_LIMIT,
         },
+    }
+
+def workflow_failure(stage, failure_reason, message, suggested_action, can_retry=True, retry_action='', data_available=False):
+    return {
+        'stage': stage,
+        'failure_reason': failure_reason,
+        'message': message,
+        'suggested_action': suggested_action,
+        'can_retry': bool(can_retry),
+        'retry_action': retry_action,
+        'data_available': bool(data_available),
+    }
+
+def parse_optional_date(value, end_of_day=False):
+    if not value:
+        return None
+    try:
+        parsed = datetime.strptime(str(value)[:10], "%Y-%m-%d")
+    except Exception:
+        raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD")
+    return parsed + timedelta(days=1) if end_of_day else parsed
+
+def structured_device_jobs(sn, start_date=None, end_date=None, keyword=None, limit=300):
+    if not ensure_analytics_db():
+        return {
+            'sn': sn,
+            'source': 'structured_db',
+            'source_label': '云端结构化库',
+            'items': [],
+            'summary': {},
+            'failure': workflow_failure(
+                'read_structured_db',
+                'structured_db_unavailable',
+                '云端结构化作业库尚未就绪。',
+                '先补齐最近日志并等待后台入库，再刷新作业列表。',
+                retry_action='补齐最近日志',
+            ),
+        }
+    start = parse_optional_date(start_date) or (datetime.now() - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = parse_optional_date(end_date, end_of_day=True) or (datetime.now() + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if end <= start:
+        raise HTTPException(status_code=400, detail="结束日期必须晚于开始日期")
+    safe_limit = max(1, min(int(limit or 300), 1000))
+    clauses = ["cj.sn=%s", "cj.cook_start_time >= %s", "cj.cook_start_time < %s"]
+    params = [sn, start, end]
+    keyword_text = str(keyword or '').strip()
+    if keyword_text:
+        clauses.append("(cj.recipe_name LIKE %s OR CAST(cj.recipe_id AS CHAR) LIKE %s)")
+        like = f"%{keyword_text}%"
+        params.extend([like, like])
+    params.append(safe_limit)
+    rows = fetch_all(
+        f"""
+        SELECT cj.id, cj.source_file_id, cj.machine_log_id, cj.recipe_id, cj.recipe_name,
+               cj.cook_start_time, cj.cook_end_time, cj.duration_seconds, cj.max_pot_temp,
+               cj.avg_pot_temp, cj.sample_count, cj.step_count, cj.android_action_count,
+               cj.payload_json, cj.updated_at,
+               lp.file_name, lp.download_status, lp.parse_status, lp.storage_status, lp.ui_status,
+               lp.error_message AS package_error, lp.log_start_time, lp.log_end_time
+        FROM cook_jobs cj
+        LEFT JOIN device_log_packages lp
+          ON lp.sn=cj.sn AND lp.source_file_id=cj.source_file_id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY cj.cook_start_time DESC
+        LIMIT %s
+        """,
+        tuple(params),
+    )
+    job_ids = [int(row['id']) for row in rows if row.get('id')]
+    power_map = {}
+    alert_map = {}
+    if job_ids:
+        placeholders = ','.join(['%s'] * len(job_ids))
+        power_rows = fetch_all(
+            f"""
+            SELECT cook_job_id, MAX(command_power_kw) AS max_command_power_kw,
+                   MAX(actual_power_kw) AS max_actual_power_kw,
+                   COUNT(*) AS power_sample_count
+            FROM cook_power_events
+            WHERE cook_job_id IN ({placeholders})
+            GROUP BY cook_job_id
+            """,
+            tuple(job_ids),
+        )
+        power_map = {int(row['cook_job_id']): row for row in power_rows}
+        alert_rows = fetch_all(
+            f"""
+            SELECT cook_job_id, COUNT(*) AS alert_count,
+                   SUM(risk_level='high' AND dismissed=0) AS high_alert_count
+            FROM safety_scan_alerts
+            WHERE cook_job_id IN ({placeholders})
+            GROUP BY cook_job_id
+            """,
+            tuple(job_ids),
+        )
+        alert_map = {int(row['cook_job_id']): row for row in alert_rows}
+    items = []
+    for row in rows:
+        job_id = int(row.get('id') or 0)
+        payload = {}
+        try:
+            payload = json.loads(row.get('payload_json') or '{}')
+        except Exception:
+            payload = {}
+        payload_summary = payload.get('summary') or {}
+        power = power_map.get(job_id) or {}
+        alerts = alert_map.get(job_id) or {}
+        max_temp = float(row['max_pot_temp']) if row.get('max_pot_temp') is not None else None
+        avg_temp = float(row['avg_pot_temp']) if row.get('avg_pot_temp') is not None else None
+        max_command = power.get('max_command_power_kw')
+        max_actual = power.get('max_actual_power_kw')
+        max_command = float(max_command) if max_command is not None else payload_summary.get('max_command_power_kw')
+        max_actual = float(max_actual) if max_actual is not None else payload_summary.get('max_actual_power_kw')
+        actual_energy = float(payload_summary.get('actual_energy_kwh') or 0)
+        command_energy = float(payload_summary.get('command_energy_kwh') or 0)
+        risk_tags = []
+        if max_temp is None:
+            risk_tags.append('缺温度')
+        elif max_temp >= 350:
+            risk_tags.append('超350℃')
+        elif max_temp >= 300:
+            risk_tags.append('超300℃')
+        elif max_temp >= 250:
+            risk_tags.append('超250℃')
+        if max_actual is not None and float(max_actual) >= 15:
+            risk_tags.append('高功率')
+        if int(alerts.get('high_alert_count') or 0):
+            risk_tags.append('高危告警')
+        elif int(alerts.get('alert_count') or 0):
+            risk_tags.append('有告警')
+        if row.get('machine_log_id') is None:
+            risk_tags.append('DB未匹配')
+        items.append({
+            'id': job_id,
+            'source_file_id': row.get('source_file_id'),
+            'machine_log_id': row.get('machine_log_id'),
+            'recipe_id': row.get('recipe_id'),
+            'recipe_name': row.get('recipe_name'),
+            'start_time': row.get('cook_start_time'),
+            'end_time': row.get('cook_end_time'),
+            'duration_seconds': row.get('duration_seconds'),
+            'max_pot_temp': max_temp,
+            'avg_pot_temp': avg_temp,
+            'sample_count': int(row.get('sample_count') or 0),
+            'step_count': int(row.get('step_count') or 0),
+            'max_command_power_kw': max_command,
+            'max_actual_power_kw': max_actual,
+            'command_energy_kwh': round(command_energy, 5),
+            'actual_energy_kwh': round(actual_energy, 5),
+            'file_name': row.get('file_name'),
+            'log_status': row.get('ui_status') or analytics_ui_status(
+                row.get('download_status'),
+                row.get('parse_status'),
+                row.get('storage_status'),
+            ),
+            'parse_status': row.get('parse_status'),
+            'storage_status': row.get('storage_status'),
+            'db_match_status': 'matched' if row.get('machine_log_id') is not None else 'unmatched',
+            'alert_count': int(alerts.get('alert_count') or 0),
+            'risk_tags': risk_tags,
+            'data_source': 'structured_db',
+            'updated_at': row.get('updated_at'),
+            'package_error': row.get('package_error'),
+        })
+    max_values = [row['max_pot_temp'] for row in items if row.get('max_pot_temp') is not None]
+    return {
+        'sn': sn,
+        'source': 'structured_db',
+        'source_label': '云端结构化库',
+        'start_date': start.strftime('%Y-%m-%d'),
+        'end_date': (end - timedelta(days=1)).strftime('%Y-%m-%d'),
+        'generated_at': datetime.now().isoformat(sep=' ', timespec='seconds'),
+        'summary': {
+            'total': len(items),
+            'high_250': sum(1 for row in items if (row.get('max_pot_temp') or 0) >= 250),
+            'high_300': sum(1 for row in items if (row.get('max_pot_temp') or 0) >= 300),
+            'high_350': sum(1 for row in items if (row.get('max_pot_temp') or 0) >= 350),
+            'alert_jobs': sum(1 for row in items if row.get('alert_count')),
+            'db_unmatched': sum(1 for row in items if row.get('db_match_status') == 'unmatched'),
+            'max_temp': max(max_values) if max_values else None,
+        },
+        'items': items,
+        'failure': None,
     }
 
 def queue_recent_log_packages_for_device(sn, limit=3):
@@ -4949,6 +5132,7 @@ def build_thermal_safety_workspace(sn, file_id=None, job_id=None, internal_sessi
 
 def build_device_risk_overview(sn):
     report = get_cached_report(sn)
+    real_sn = (report.get('stats') or {}).get('sn') or sn
     logs = report.get('logs') or []
     now = datetime.now()
     def in_days(row, days):
@@ -4974,9 +5158,98 @@ def build_device_risk_overview(sn):
                 'internal_session_count': cached.get('internal_session_count') or 0,
                 'diagnosis_message': cached.get('diagnosis_message'),
             })
+    structured = device_structured_summary(real_sn)
+    risk_summary = {
+        'max_temperature': None,
+        'avg_high_temperature': None,
+        'high_250_jobs': 0,
+        'high_300_jobs': 0,
+        'high_350_jobs': 0,
+        'high_power_jobs': 0,
+        'high_energy_jobs': 0,
+        'alert_jobs': 0,
+        'latest_job_time': None,
+    }
+    coverage = {'last_7_days': 0, 'last_30_days': 0}
+    if structured.get('enabled'):
+        risk_row = fetch_one(
+            """
+            SELECT MAX(max_pot_temp) AS max_temperature,
+                   AVG(CASE WHEN max_pot_temp >= 250 THEN max_pot_temp END) AS avg_high_temperature,
+                   SUM(max_pot_temp >= 250) AS high_250_jobs,
+                   SUM(max_pot_temp >= 300) AS high_300_jobs,
+                   SUM(max_pot_temp >= 350) AS high_350_jobs,
+                   MAX(cook_start_time) AS latest_job_time,
+                   COUNT(DISTINCT CASE WHEN cook_start_time >= NOW() - INTERVAL 7 DAY THEN DATE(cook_start_time) END) AS covered_days_7,
+                   COUNT(DISTINCT CASE WHEN cook_start_time >= NOW() - INTERVAL 30 DAY THEN DATE(cook_start_time) END) AS covered_days_30
+            FROM cook_jobs
+            WHERE sn=%s
+            """,
+            (real_sn,),
+        ) or {}
+        power_row = fetch_one(
+            """
+            SELECT COUNT(DISTINCT pe.cook_job_id) AS high_power_jobs
+            FROM cook_power_events pe
+            JOIN cook_jobs cj ON cj.id=pe.cook_job_id
+            WHERE cj.sn=%s AND pe.actual_power_kw >= 15
+            """,
+            (real_sn,),
+        ) or {}
+        alert_row = fetch_one(
+            """
+            SELECT COUNT(DISTINCT cook_job_id) AS alert_jobs,
+                   COUNT(DISTINCT CASE WHEN actual_energy_kwh >= 0.8 THEN cook_job_id END) AS high_energy_jobs
+            FROM safety_scan_alerts
+            WHERE sn=%s AND dismissed=0
+            """,
+            (real_sn,),
+        ) or {}
+        risk_summary.update({
+            'max_temperature': float(risk_row['max_temperature']) if risk_row.get('max_temperature') is not None else None,
+            'avg_high_temperature': round(float(risk_row['avg_high_temperature']), 1) if risk_row.get('avg_high_temperature') is not None else None,
+            'high_250_jobs': int(risk_row.get('high_250_jobs') or 0),
+            'high_300_jobs': int(risk_row.get('high_300_jobs') or 0),
+            'high_350_jobs': int(risk_row.get('high_350_jobs') or 0),
+            'high_power_jobs': int(power_row.get('high_power_jobs') or 0),
+            'high_energy_jobs': int(alert_row.get('high_energy_jobs') or 0),
+            'alert_jobs': int(alert_row.get('alert_jobs') or 0),
+            'latest_job_time': risk_row.get('latest_job_time'),
+        })
+        coverage = {
+            'last_7_days': round(min(7, int(risk_row.get('covered_days_7') or 0)) * 100 / 7, 1),
+            'last_30_days': round(min(30, int(risk_row.get('covered_days_30') or 0)) * 100 / 30, 1),
+        }
+    unmatched_count = sum(
+        count for key, count in package_counts.items()
+        if key in ('internal_work_found', 'DB 未匹配，日志内有作业片段', 'DB 未匹配，待检查日志证据')
+    )
+    if risk_summary['high_350_jobs'] or risk_summary['alert_jobs']:
+        risk_level = 'high'
+    elif risk_summary['high_300_jobs'] or cached_risks:
+        risk_level = 'medium'
+    elif structured.get('stored_packages'):
+        risk_level = 'normal'
+    else:
+        risk_level = 'unknown'
+    next_actions = []
+    if structured.get('completion_rate', 0) < 80:
+        next_actions.append({'id': 'watch', 'label': '补齐最近日志', 'reason': '结构化入库覆盖尚未完成'})
+    if structured.get('failed_packages'):
+        next_actions.append({'id': 'logs_failed', 'label': '查看失败日志包', 'reason': f"{structured.get('failed_packages')} 个包待处理"})
+    if risk_summary['high_300_jobs']:
+        next_actions.append({'id': 'jobs_high_temp', 'label': '查看高温作业', 'reason': f"{risk_summary['high_300_jobs']} 次超过 300℃"})
+    if risk_summary['alert_jobs']:
+        next_actions.append({'id': 'alerts', 'label': '查看告警明细', 'reason': f"{risk_summary['alert_jobs']} 个作业命中规则"})
+    if unmatched_count:
+        next_actions.append({'id': 'logs_internal', 'label': '查看日志内作业', 'reason': 'DB 未匹配不代表没有作业'})
+    if not next_actions:
+        next_actions.append({'id': 'intervals', 'label': '查看作业列表', 'reason': '当前没有优先故障项'})
     return {
         'generated_at': datetime.now().isoformat(sep=' ', timespec='seconds'),
-        'sn': report.get('stats', {}).get('sn'),
+        'sn': real_sn,
+        'data_source': 'structured_db' if structured.get('stored_packages') else ('server_cache' if (report.get('cache') or {}).get('hit') else 'source_db'),
+        'risk_level': risk_level,
         'device': {
             'customer': (report.get('customer') or {}).get('common_name') or (report.get('customer') or {}).get('company_name'),
             'region': (report.get('customer') or {}).get('country_code'),
@@ -4993,19 +5266,15 @@ def build_device_risk_overview(sn):
             'package_total': len(packages),
             'status_counts': package_counts,
             'diagnosed_package_count': sum(1 for row in packages if read_cached_log_package_diagnostics(row.get('id'))),
-            'db_unmatched_with_internal_work': sum(
-                count for key, count in package_counts.items()
-                if key in ('internal_work_found', 'DB 未匹配，日志内有作业片段', 'DB 未匹配，待检查日志证据')
-            ),
+            'db_unmatched_with_internal_work': unmatched_count,
             'high_temperature_package_count': sum(1 for row in cached_risks if (row.get('max_temperature') or 0) >= 250),
         },
+        'structured': structured,
+        'coverage': coverage,
+        'risk_summary': risk_summary,
         'candidate_risks': sorted(cached_risks, key=lambda row: row.get('time') or '', reverse=True)[:20],
         'risk_disclaimer': '本页为排查入口；候选风险来自已解析日志，不代表事故结论。',
-        'next_actions': [
-            {'id': 'intervals', 'label': '查看作业列表'},
-            {'id': 'logs', 'label': '补齐日志证据'},
-            {'id': 'thermalSafety', 'label': '进入作业热安全分析'},
-        ],
+        'next_actions': next_actions,
     }
 
 def build_device_report(sn: str):
@@ -7740,6 +8009,41 @@ def cook_temperature_structured(sn: str, request: Request, day: str = Query(None
             'day': target_day,
             'cook_count': result.get('cook_count'),
             'package_count': result.get('summary_day', {}).get('package_count'),
+        },
+    )
+    return result
+
+@app.get("/api/device-jobs/{sn}")
+def device_jobs(
+    sn: str,
+    request: Request,
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    keyword: str = Query(None),
+    limit: int = Query(300),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    mark_device_watched(real_sn, username=username, priority=20)
+    result = structured_device_jobs(
+        real_sn,
+        start_date=start_date,
+        end_date=end_date,
+        keyword=keyword,
+        limit=limit,
+    )
+    log_event(
+        username,
+        'device_jobs_structured',
+        request,
+        sn=real_sn,
+        detail={
+            'start_date': result.get('start_date'),
+            'end_date': result.get('end_date'),
+            'keyword': keyword,
+            'count': len(result.get('items') or []),
+            'source': result.get('source'),
         },
     )
     return result

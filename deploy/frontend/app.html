@@ -130,10 +130,34 @@
         .page-guide-action.primary { border-color: var(--brand); background: var(--brand); color: #fff; }
         .page-guide-action:hover { border-color: var(--brand); color: var(--brand); }
         .page-guide-action.primary:hover { background: var(--brand-dark); border-color: var(--brand-dark); color: #fff; }
-        .device-context-strip { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 18px; border-bottom: 1px solid var(--line-soft); background: #fbfdff; }
+        .device-context-strip { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 10px 18px; border-bottom: 1px solid var(--line-soft); background: #fbfdff; }
         .context-pill { display: inline-flex; max-width: 100%; align-items: baseline; gap: 5px; border: 1px solid #dbe4f0; background: #fff; border-radius: 999px; padding: 4px 9px; font-size: 12px; }
         .context-pill strong { color: var(--text); }
         .context-pill strong { max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .context-pill.risk-high { border-color: #ffb4aa; background: #fff2f0; color: #b42318; }
+        .context-pill.risk-medium { border-color: #ffd39a; background: #fff8ed; color: #a15c00; }
+        .context-pill.risk-normal { border-color: #bde7cf; background: #f2fbf6; color: #0f7a3b; }
+        .context-date { width: 128px; min-height: 28px; padding: 2px 6px; border: 1px solid #d5dce8; border-radius: 3px; background: #fff; font-size: 12px; }
+        .context-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+        .context-action { border: 1px solid #d5dce8; background: #fff; color: #334155; border-radius: 3px; padding: 4px 8px; font-size: 12px; }
+        .context-action.primary { border-color: var(--brand); color: var(--brand); }
+        .context-action:hover { border-color: var(--brand); background: #f5f9ff; }
+        .workflow-status-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+        .workflow-status { border: 1px solid var(--line); border-left: 3px solid var(--brand); background: #fff; border-radius: 3px; padding: 10px; cursor: pointer; min-height: 78px; }
+        .workflow-status:hover { background: #f5f9ff; border-color: #9dccff; }
+        .workflow-status.warning { border-left-color: var(--accent); }
+        .workflow-status.danger { border-left-color: var(--danger); }
+        .workflow-status.success { border-left-color: var(--success); }
+        .workflow-status-value { font-size: 20px; font-weight: 800; line-height: 1.1; }
+        .workflow-status-label { font-size: 12px; color: var(--muted); margin-top: 5px; }
+        .workflow-status-note { font-size: 11px; color: var(--muted); margin-top: 3px; }
+        .source-tag { display: inline-flex; align-items: center; border: 1px solid #bde7cf; background: #f2fbf6; color: #0f7a3b; border-radius: 999px; padding: 2px 7px; font-size: 11px; font-weight: 600; }
+        .failure-panel { border: 1px solid #ffb4aa; border-left: 3px solid var(--danger); background: #fff7f5; border-radius: 3px; padding: 10px 12px; }
+        .action-stack { display: flex; gap: 5px; flex-wrap: wrap; }
+        .table-sticky-head thead th { position: sticky; top: 0; z-index: 3; background: #f1f5fb; }
+        .log-batch-bar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 9px 12px; background: #f8fafc; border-bottom: 1px solid var(--line); }
+        .clickable-metric { cursor: pointer; }
+        .clickable-metric:hover { border-color: var(--brand); background: #f5f9ff; }
         .empty-state { border: 1px dashed #cbd5e1; background: #fbfdff; border-radius: 4px; padding: 22px; text-align: center; color: var(--muted); }
         .empty-state-title { color: var(--text); font-weight: 700; font-size: 15px; margin-bottom: 5px; }
         .global-busy { position: fixed; right: 318px; bottom: 18px; z-index: 900; background: rgba(255,255,255,.95); border: 1px solid var(--line); box-shadow: 0 8px 24px rgba(15,23,42,.12); border-radius: 999px; padding: 8px 12px; }
@@ -278,7 +302,9 @@
             .analysis-grid, .spec-list, .search-metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .workbench-hero { grid-template-columns: 1fr; }
             .workflow-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .workflow-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .command-grid { grid-template-columns: 1fr; }
+            .context-actions { margin-left: 0; width: 100%; }
         }
         @media (max-width: 1200px) {
             .emergency-grid { grid-template-columns: 1fr; }
@@ -297,6 +323,7 @@
             .search-metric-grid { grid-template-columns: 1fr; }
             .home-grid { grid-template-columns: 1fr; }
             .workflow-strip { grid-template-columns: 1fr; }
+            .workflow-status-grid { grid-template-columns: 1fr; }
             .search-line { grid-template-columns: 1fr; }
             .search-line .form-control { min-width: 100%; }
             .filter-bar { top: 0; position: static; }
@@ -419,8 +446,18 @@
                     <span class="context-pill"><span>客户</span><strong>{{ data.customer.common_name || data.customer.company_name || '-' }}</strong></span>
                     <span class="context-pill"><span>地区</span><strong>{{ data.customer.geo_cityname || data.customer.geo_pname || data.customer.area_code || '-' }}</strong></span>
                     <span class="context-pill"><span>版本</span><strong>{{ data.info.software_version || data.info.latest_update_package || '-' }}</strong></span>
-                    <span class="context-pill"><span>生产</span><strong>{{ data.stats.total_logs || 0 }} 次</strong></span>
-                    <span class="context-pill"><span>日志</span><strong>{{ (data.device_logs || []).length }} 包</strong></span>
+                    <span class="context-pill"><span>日期</span><input class="context-date" type="date" v-model="globalContext.startDate" @change="onGlobalDateChange"><span>至</span><input class="context-date" type="date" v-model="globalContext.endDate" @change="onGlobalDateChange"></span>
+                    <span class="context-pill"><span>来源</span><strong>{{ globalDataSourceLabel }}</strong></span>
+                    <span class="context-pill"><span>进度</span><strong>{{ globalParseProgressLabel }}</strong></span>
+                    <span class="context-pill" :class="globalRiskClass"><span>风险</span><strong>{{ globalRiskLabel }}</strong></span>
+                    <span class="context-pill"><span>更新</span><strong>{{ globalUpdatedLabel }}</strong></span>
+                    <div class="context-actions">
+                        <button class="context-action" @click="search(true)">刷新当前数据</button>
+                        <button class="context-action primary" @click="watchStructuredDevice">补齐最近日志</button>
+                        <button class="context-action" @click="openThermalSafety()">进入热安全分析</button>
+                        <button class="context-action" @click="exportExcel">导出当前证据</button>
+                        <button class="context-action" @click="clearDeviceLocalCache">清除当前 SN 缓存</button>
+                    </div>
                 </div>
 	                <div class="content-wrap" v-if="isDeviceTab && !data">
 	                    <div class="empty-state">
@@ -447,8 +484,8 @@
 	                <template v-if="safetyDashboard.overview && safetyDashboard.overview.summary">
 	                    <div class="row g-3 mb-3">
 	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ safetyDashboard.overview.summary.total_jobs || 0 }}</div><div class="admin-metric-label">已入库作业</div></div></div>
-	                        <div class="col-md-3"><div class="admin-metric" style="border-left: 3px solid var(--danger);"><div class="admin-metric-value text-danger">{{ safetyDashboard.overview.summary.critical_jobs || 0 }}</div><div class="admin-metric-label">临界高温作业</div></div></div>
-	                        <div class="col-md-3"><div class="admin-metric" style="border-left: 3px solid var(--accent);"><div class="admin-metric-value text-warning">{{ safetyDashboard.overview.summary.warning_jobs || 0 }}</div><div class="admin-metric-label">警示作业</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric clickable-metric" style="border-left: 3px solid var(--danger);" @click="openSafetyAlerts('high')"><div class="admin-metric-value text-danger">{{ safetyDashboard.overview.summary.critical_jobs || 0 }}</div><div class="admin-metric-label">临界高温作业 · 查看明细</div></div></div>
+	                        <div class="col-md-3"><div class="admin-metric clickable-metric" style="border-left: 3px solid var(--accent);" @click="openSafetyAlerts('medium')"><div class="admin-metric-value text-warning">{{ safetyDashboard.overview.summary.warning_jobs || 0 }}</div><div class="admin-metric-label">警示作业 · 查看明细</div></div></div>
 	                        <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ safetyDashboard.overview.summary.all_time_max_temp || '-' }}℃</div><div class="admin-metric-label">历史最高锅温</div></div></div>
 	                    </div>
 	                    <div class="row g-3 mb-3">
@@ -477,7 +514,7 @@
 	                                <table class="table table-sm table-striped mb-0">
 	                                    <thead><tr><th>SN</th><th>次数</th><th>最高温</th><th>平均高温</th></tr></thead>
 	                                    <tbody>
-	                                        <tr v-for="d in (safetyDashboard.overview.top_devices || []).slice(0, 10)" :key="d.sn" class="recipe-row" @click="snInput = d.sn; search();">
+	                                        <tr v-for="d in (safetyDashboard.overview.top_devices || []).slice(0, 10)" :key="d.sn" class="recipe-row" @click="openSafetyDevice(d.sn)">
 	                                            <td class="fw-bold">{{ d.sn }}</td><td>{{ d.high_count }}</td><td>{{ d.worst_temp }}℃</td><td>{{ d.avg_high_temp }}℃</td>
 	                                        </tr>
 	                                    </tbody>
@@ -491,7 +528,7 @@
 	                                <table class="table table-sm table-striped mb-0">
 	                                    <thead><tr><th>菜谱</th><th>次数</th><th>最高温</th><th>平均高温</th></tr></thead>
 	                                    <tbody>
-	                                        <tr v-for="r in (safetyDashboard.overview.top_recipes || []).slice(0, 10)" :key="r.recipe_name">
+	                                        <tr v-for="r in (safetyDashboard.overview.top_recipes || []).slice(0, 10)" :key="r.recipe_name" class="recipe-row" @click="openSafetyRecipe(r.recipe_name)">
 	                                            <td>{{ r.recipe_name || '(未命名菜谱)' }}</td><td>{{ r.high_count }}</td><td>{{ r.worst_temp }}℃</td><td>{{ r.avg_high_temp }}℃</td>
 	                                        </tr>
 	                                    </tbody>
@@ -590,20 +627,20 @@
                         </div>
                         <div class="workflow-strip">
                             <div class="workflow-step" @click="setActiveTab('overview')">
-                                <div class="workflow-step-title">单设备复盘</div>
-                                <div class="workflow-step-desc">档案、月度、生产、菜谱和日志沿同一台设备展开。</div>
+                                <div class="workflow-step-title">1. 风险总览</div>
+                                <div class="workflow-step-desc">先确认设备、数据覆盖和需要优先复核的风险。</div>
                             </div>
-                            <div class="workflow-step" @click="setActiveTab('recipeSearch')">
-                                <div class="workflow-step-title">跨设备查菜谱</div>
-                                <div class="workflow-step-desc">按客户、设备、日期找菜谱和资源覆盖。</div>
+                            <div class="workflow-step" @click="setActiveTab('intervals')">
+                                <div class="workflow-step-title">2. 选择作业</div>
+                                <div class="workflow-step-desc">从结构化库按日期、菜谱和风险标签定位单次作业。</div>
                             </div>
-                            <div class="workflow-step" @click="setActiveTab('logAnalysis')">
-                                <div class="workflow-step-title">日志诊断</div>
-                                <div class="workflow-step-desc">从日志包进入故障、温度、油路和证据链。</div>
+                            <div class="workflow-step" @click="setActiveTab('thermalSafety')">
+                                <div class="workflow-step-title">3. 热安全分析</div>
+                                <div class="workflow-step-desc">同屏核对温度、功率、能量、动作和原始证据。</div>
                             </div>
-                            <div class="workflow-step" @click="setActiveTab('versionStats')">
-                                <div class="workflow-step-title">版本治理</div>
-                                <div class="workflow-step-desc">查看上位机版本分布、升级时间和客户覆盖。</div>
+                            <div class="workflow-step" @click="setActiveTab('logs')">
+                                <div class="workflow-step-title">4. 补齐证据</div>
+                                <div class="workflow-step-desc">仅在数据缺失或匹配失败时诊断日志包并重建作业。</div>
                             </div>
                         </div>
                     </div>
@@ -619,6 +656,28 @@
                             <div class="history-meta">版本 {{ item.version || '-' }} · {{ item.total_logs || 0 }} 次</div>
                         </div>
                         <button class="btn btn-sm btn-outline-secondary w-100 mt-1" @click="clearAllLocalCaches">清理本地缓存</button>
+                    </div>
+                </div>
+                <div v-if="data" class="workflow-status-grid mb-3">
+                    <div class="workflow-status" @click="setActiveTab('overview')">
+                        <div class="workflow-status-value">{{ globalRiskLabel }}</div>
+                        <div class="workflow-status-label">当前设备风险状态</div>
+                        <div class="workflow-status-note">{{ data.stats.sn }}</div>
+                    </div>
+                    <div class="workflow-status success" @click="setActiveTab('intervals')">
+                        <div class="workflow-status-value">{{ globalParseProgressLabel }}</div>
+                        <div class="workflow-status-label">结构化入库进度</div>
+                        <div class="workflow-status-note">优先读取云端本地库</div>
+                    </div>
+                    <div class="workflow-status warning" @click="setActiveTab('logs')">
+                        <div class="workflow-status-value">{{ data.structured_summary?.failed_packages || 0 }}</div>
+                        <div class="workflow-status-label">失败/待补齐日志包</div>
+                        <div class="workflow-status-note">失败包可跳过，不阻断成功结果</div>
+                    </div>
+                    <div class="workflow-status danger" @click="setActiveTab('safetyAlerts')">
+                        <div class="workflow-status-value">{{ deviceRisk.result?.risk_summary?.alert_jobs || 0 }}</div>
+                        <div class="workflow-status-label">候选告警作业</div>
+                        <div class="workflow-status-note">风险标签不代表事故结论</div>
                     </div>
                 </div>
                 <div class="home-search">
@@ -1532,26 +1591,40 @@
             <div class="card-header d-flex justify-content-between align-items-center">
                 <span>单设备起火风险排查入口</span>
                 <button class="btn btn-sm btn-outline-primary" @click="loadDeviceRisk(true)" :disabled="deviceRisk.loading">
-                    {{ deviceRisk.loading ? '读取中' : '刷新概况' }}
+                    {{ deviceRisk.loading ? '读取中' : '刷新风险概况' }}
                 </button>
             </div>
             <div class="card-body">
                 <div v-if="deviceRisk.error" class="alert alert-danger">{{ deviceRisk.error }}</div>
                 <div v-if="deviceRisk.loading && !deviceRisk.result" class="soft-loader"><span class="soft-spinner"></span><span class="soft-thinking">汇总已解析证据</span></div>
                 <template v-if="deviceRisk.result">
+                    <div class="row g-2 mb-2">
+                        <div class="col-lg-3 col-6"><div class="admin-metric clickable-metric" @click="setActiveTab('intervals')"><div class="admin-metric-value">{{ deviceRisk.result.production.total || 0 }}</div><div class="admin-metric-label">生产记录</div></div></div>
+                        <div class="col-lg-3 col-6"><div class="admin-metric clickable-metric" @click="setActiveTab('logs')"><div class="admin-metric-value">{{ deviceRisk.result.evidence.package_total || 0 }}</div><div class="admin-metric-label">日志包</div></div></div>
+                        <div class="col-lg-3 col-6"><div class="admin-metric clickable-metric" @click="setActiveTab('intervals')"><div class="admin-metric-value">{{ deviceRisk.result.structured.stored_packages || 0 }}</div><div class="admin-metric-label">已入库包</div></div></div>
+                        <div class="col-lg-3 col-6"><div class="admin-metric clickable-metric" @click="setActiveTab('logs')"><div class="admin-metric-value">{{ deviceRisk.result.structured.failed_packages || 0 }}</div><div class="admin-metric-label">失败/待复核包</div></div></div>
+                    </div>
                     <div class="row g-2 mb-3">
-                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.production.last_7_days }}</div><div class="admin-metric-label">近 7 天作业</div></div></div>
-                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.production.last_30_days }}</div><div class="admin-metric-label">近 30 天作业</div></div></div>
-                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.evidence.db_unmatched_with_internal_work }}</div><div class="admin-metric-label">DB 未匹配但有作业</div></div></div>
-                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.evidence.package_total }}</div><div class="admin-metric-label">日志包</div></div></div>
-                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.evidence.diagnosed_package_count }}</div><div class="admin-metric-label">已诊断包</div></div></div>
-                        <div class="col-lg-2 col-6"><div class="admin-metric"><div class="admin-metric-value">{{ deviceRisk.result.candidate_risks.length }}</div><div class="admin-metric-label">候选风险证据</div></div></div>
+                        <div class="col-lg-2 col-6"><div class="admin-metric clickable-metric" @click="deviceJobs.minTemp=250; setActiveTab('intervals')"><div class="admin-metric-value">{{ deviceRisk.result.risk_summary.high_250_jobs || 0 }}</div><div class="admin-metric-label">超 250℃</div></div></div>
+                        <div class="col-lg-2 col-6"><div class="admin-metric clickable-metric" @click="deviceJobs.minTemp=300; setActiveTab('intervals')"><div class="admin-metric-value">{{ deviceRisk.result.risk_summary.high_300_jobs || 0 }}</div><div class="admin-metric-label">超 300℃</div></div></div>
+                        <div class="col-lg-2 col-6"><div class="admin-metric clickable-metric" @click="deviceJobs.minTemp=350; setActiveTab('intervals')"><div class="admin-metric-value text-danger">{{ deviceRisk.result.risk_summary.high_350_jobs || 0 }}</div><div class="admin-metric-label">超 350℃</div></div></div>
+                        <div class="col-lg-2 col-6"><div class="admin-metric clickable-metric" @click="setActiveTab('intervals')"><div class="admin-metric-value">{{ deviceRisk.result.risk_summary.high_power_jobs || 0 }}</div><div class="admin-metric-label">高功率作业</div></div></div>
+                        <div class="col-lg-2 col-6"><div class="admin-metric clickable-metric" @click="handleRiskAction({id:'alerts'})"><div class="admin-metric-value">{{ deviceRisk.result.risk_summary.alert_jobs || 0 }}</div><div class="admin-metric-label">告警作业</div></div></div>
+                        <div class="col-lg-2 col-6"><div class="admin-metric clickable-metric" @click="setActiveTab('logs')"><div class="admin-metric-value">{{ deviceRisk.result.evidence.db_unmatched_with_internal_work || 0 }}</div><div class="admin-metric-label">DB 未匹配但有作业</div></div></div>
+                    </div>
+                    <div class="row g-2 mb-3">
+                        <div class="col-md-4"><div class="detail-card"><strong>结构化覆盖</strong><div>近 7 天 {{ deviceRisk.result.coverage.last_7_days || 0 }}% · 近 30 天 {{ deviceRisk.result.coverage.last_30_days || 0 }}%</div></div></div>
+                        <div class="col-md-4"><div class="detail-card"><strong>温度摘要</strong><div>最高 {{ deviceRisk.result.risk_summary.max_temperature == null ? '-' : `${deviceRisk.result.risk_summary.max_temperature}℃` }} · 高温均值 {{ deviceRisk.result.risk_summary.avg_high_temperature == null ? '-' : `${deviceRisk.result.risk_summary.avg_high_temperature}℃` }}</div></div></div>
+                        <div class="col-md-4"><div class="detail-card"><strong>数据来源</strong><div>{{ globalDataSourceLabel }} · 最近入库 {{ deviceRisk.result.structured.last_stored_at || '-' }}</div></div></div>
                     </div>
                     <div class="alert alert-warning py-2">{{ deviceRisk.result.risk_disclaimer }}</div>
-                    <div class="d-flex gap-2 flex-wrap">
-                        <button class="btn btn-primary" @click="setActiveTab('intervals')">查看作业列表</button>
-                        <button class="btn btn-outline-primary" @click="setActiveTab('logs')">补齐日志证据</button>
-                        <button class="btn btn-outline-danger" @click="openThermalSafety()">热安全分析</button>
+                    <div class="card mb-3">
+                        <div class="card-header">建议下一步</div>
+                        <div class="card-body action-stack">
+                            <button v-for="action in deviceRisk.result.next_actions || []" :key="action.id" class="btn btn-sm" :class="action.id === 'jobs_high_temp' || action.id === 'alerts' ? 'btn-outline-danger' : 'btn-outline-primary'" @click="handleRiskAction(action)">
+                                {{ action.label }}<span v-if="action.reason" class="ms-1 history-meta">· {{ action.reason }}</span>
+                            </button>
+                        </div>
                     </div>
                     <div v-if="deviceRisk.result.candidate_risks.length" class="table-responsive mt-3">
                         <table class="table table-sm table-striped mb-0">
@@ -1682,17 +1755,27 @@
 
         <section v-if="data" v-show="activeTab === 'thermalSafety'">
             <div class="card">
-                <div class="card-header">选择日志包和单次作业</div>
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <span>选择单次作业与证据来源</span>
+                    <div class="action-stack"><button class="btn btn-sm btn-outline-primary" @click="setActiveTab('intervals')">从作业列表选择</button><button class="btn btn-sm btn-outline-secondary" @click="setActiveTab('logs')">查看关联日志证据</button></div>
+                </div>
                 <div class="card-body">
                     <div class="row g-2 align-items-end">
-                        <div class="col-lg-7">
-                            <label class="filter-label">日志包</label>
+                        <div class="col-lg-4">
+                            <label class="filter-label">结构化库作业（优先）</label>
+                            <select class="form-select" v-model="thermalSafety.structuredJobId" @change="selectThermalStructuredJob">
+                                <option value="">未指定结构化作业</option>
+                                <option v-for="job in deviceJobs.result?.items || []" :key="`thermal-job-${job.id}`" :value="String(job.id)">{{ job.start_time }} · {{ job.recipe_name || job.recipe_id || '未命名' }}</option>
+                            </select>
+                        </div>
+                        <div class="col-lg-4">
+                            <label class="filter-label">日志包证据（补充/降级）</label>
                             <select class="form-select" v-model="thermalSafety.fileId">
                                 <option value="">最近一个日志包</option>
                                 <option v-for="log in logAnalysisOptions" :key="log.id" :value="String(log.id)">{{ formatLogFileShort(log) }}</option>
                             </select>
                         </div>
-                        <div class="col-lg-3" v-if="thermalSafety.result && thermalSafety.result.available_targets?.length">
+                        <div class="col-lg-2" v-if="thermalSafety.result && thermalSafety.result.available_targets?.length">
                             <label class="filter-label">作业片段</label>
                             <select class="form-select" v-model="thermalSafety.targetId" @change="loadThermalSafety(false)">
                                 <option v-for="target in thermalSafety.result.available_targets" :key="target.id || target.session_id" :value="String(target.id || target.session_id)">
@@ -1702,11 +1785,11 @@
                         </div>
                         <div class="col-lg-2">
                             <button class="btn btn-primary w-100" @click="loadThermalSafety(false)" :disabled="thermalSafety.loading">
-                                {{ thermalSafety.loading ? '读取中' : '读取工作区' }}
+                                {{ thermalSafety.loading ? '读取中' : '读取热安全证据' }}
                             </button>
                         </div>
                     </div>
-                    <div class="history-meta mt-2">优先使用已解析缓存；DB 没有匹配生产记录时，自动降级展示日志内部作业片段。</div>
+                    <div class="history-meta mt-2">优先使用结构化库和已解析缓存；DB 没有匹配生产记录时，自动降级展示日志内部作业片段，不会写成“未生产”。</div>
                 </div>
             </div>
             <div v-if="thermalSafety.error" class="alert alert-danger">{{ thermalSafety.error }}</div>
@@ -1796,8 +1879,8 @@
                     </tbody>
                 </table>
                 <hr class="m-0">
-                <table class="table table-sm table-hover mb-0">
-	                    <thead><tr><th>菜谱</th><th>分类</th><th>次数</th><th>资源归类</th><th>油脂专项</th></tr></thead>
+	                <table class="table table-sm table-hover mb-0">
+	                    <thead><tr><th>菜谱</th><th>分类</th><th>次数</th><th>资源归类</th><th>油脂专项</th><th>关联入口</th></tr></thead>
                     <tbody>
                         <template v-for="r in filteredRecipeArchive" :key="r.id">
                             <tr class="recipe-row" @click="toggleRecipe(r.id)" :class="{'table-danger': r.has_lard}">
@@ -1811,9 +1894,10 @@
                                     <span v-if="r.has_lard" class="badge bg-danger">有</span>
                                     <span v-else class="badge bg-secondary">无</span>
                                 </td>
+                                <td><div class="action-stack"><button class="btn btn-sm btn-outline-primary" @click.stop="openRecipeJobs(r)">查看相关作业</button><button class="btn btn-sm btn-outline-danger" @click.stop="openRecipeRisks(r)">查看相关风险</button></div></td>
                             </tr>
                             <tr v-if="selectedRecipeId === r.id">
-                                <td colspan="5" class="detail-panel">
+                                <td colspan="6" class="detail-panel">
                                     <div class="row g-2">
                                         <div class="col-md-4">
                                             <div><strong>首次/末次:</strong></div>
@@ -1854,9 +1938,71 @@
         </section>
 
 	        <section v-if="data" v-show="activeTab === 'intervals'">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <span>结构化作业库</span>
+                <span class="source-tag">优先读取云端结构化库</span>
+            </div>
+            <div class="card-body border-bottom">
+                <div class="row g-2 align-items-end">
+                    <div class="col-lg-4">
+                        <label class="filter-label">菜谱名 / 菜谱 ID</label>
+                        <input class="form-control form-control-sm" v-model="deviceJobs.keyword" placeholder="输入关键词后读取结构化作业" @keyup.enter="loadDeviceJobs(true)">
+                    </div>
+                    <div class="col-lg-2">
+                        <label class="filter-label">最高温度至少</label>
+                        <input class="form-control form-control-sm" type="number" min="0" v-model="deviceJobs.minTemp" placeholder="例如 300">
+                    </div>
+                    <div class="col-lg-2">
+                        <label class="filter-label">异常筛选</label>
+                        <button class="btn btn-sm w-100" :class="deviceJobs.onlyAnomaly ? 'btn-warning' : 'btn-outline-secondary'" @click="deviceJobs.onlyAnomaly=!deviceJobs.onlyAnomaly">只看风险标签</button>
+                    </div>
+                    <div class="col-lg-4 action-stack">
+                        <button class="btn btn-sm btn-primary" @click="loadDeviceJobs(true)" :disabled="deviceJobs.loading">{{ deviceJobs.loading ? '读取中...' : '从结构化库读取' }}</button>
+                        <button class="btn btn-sm btn-outline-primary" @click="watchStructuredDevice">补齐最近日志</button>
+                        <button class="btn btn-sm btn-outline-secondary" @click="deviceJobs.keyword='';deviceJobs.minTemp='';deviceJobs.onlyAnomaly=false">清除作业筛选</button>
+                    </div>
+                </div>
+                <div class="history-meta mt-2">当前范围 {{ globalContext.startDate }} 至 {{ globalContext.endDate }}。日志包是证据来源，日常分析先从单次作业进入。</div>
+            </div>
+            <div v-if="deviceJobs.error" class="failure-panel m-3">
+                <strong>结构化作业读取未完成</strong>
+                <div>{{ deviceJobs.error }}</div>
+                <div class="history-meta mt-1">可先补齐最近日志；旧生产记录仍保留在下方作为源数据库参考。</div>
+            </div>
+            <div v-if="deviceJobs.loading" class="soft-loader"><span class="soft-spinner"></span><span class="soft-thinking">读取结构化作业</span></div>
+            <template v-if="deviceJobs.result">
+                <div class="workflow-status-grid p-3 border-bottom">
+                    <div class="workflow-status"><div class="workflow-status-value">{{ deviceJobs.result.summary.total || 0 }}</div><div class="workflow-status-label">当前范围作业</div></div>
+                    <div class="workflow-status warning" @click="deviceJobs.minTemp=300"><div class="workflow-status-value">{{ deviceJobs.result.summary.high_300 || 0 }}</div><div class="workflow-status-label">超 300℃</div></div>
+                    <div class="workflow-status danger" @click="deviceJobs.onlyAnomaly=true"><div class="workflow-status-value">{{ deviceJobs.result.summary.alert_jobs || 0 }}</div><div class="workflow-status-label">有告警作业</div></div>
+                    <div class="workflow-status warning"><div class="workflow-status-value">{{ deviceJobs.result.summary.db_unmatched || 0 }}</div><div class="workflow-status-label">DB 未匹配</div><div class="workflow-status-note">不等于没有作业</div></div>
+                </div>
+                <div class="table-responsive" style="max-height:620px;overflow:auto;">
+                    <table class="table table-sm table-striped table-hover mb-0 table-sticky-head">
+                        <thead><tr><th>开始时间</th><th>菜谱</th><th>耗时</th><th>最高/平均温度</th><th>最高实际功率</th><th>实际能量</th><th>日志状态</th><th>风险标签</th><th>来源</th><th>操作</th></tr></thead>
+                        <tbody>
+                            <tr v-for="row in filteredStructuredJobs" :key="row.id">
+                                <td>{{ row.start_time || '-' }}</td>
+                                <td><strong>{{ row.recipe_name || '未命名菜谱' }}</strong><div class="history-meta">ID {{ row.recipe_id || '-' }}</div></td>
+                                <td>{{ row.duration_seconds == null ? '-' : `${row.duration_seconds}s` }}</td>
+                                <td>{{ row.max_pot_temp == null ? '-' : `${row.max_pot_temp}℃` }} / {{ row.avg_pot_temp == null ? '-' : `${row.avg_pot_temp}℃` }}</td>
+                                <td>{{ row.max_actual_power_kw == null ? '-' : `${Number(row.max_actual_power_kw).toFixed(2)}kW` }}</td>
+                                <td>{{ Number(row.actual_energy_kwh || 0).toFixed(4) }} kWh</td>
+                                <td><span class="badge" :class="structuredStatusClass(row.log_status)">{{ row.log_status || '-' }}</span><div class="history-meta">{{ row.db_match_status === 'matched' ? '已匹配 DB 作业' : 'DB 未匹配' }}</div></td>
+                                <td><span v-for="tag in row.risk_tags || []" :key="`${row.id}-${tag}`" class="badge bg-warning text-dark me-1">{{ tag }}</span><span v-if="!(row.risk_tags || []).length" class="text-muted">-</span></td>
+                                <td><span class="source-tag">结构化库</span></td>
+                                <td><div class="action-stack"><button class="btn btn-sm btn-outline-danger" @click="openJobThermalSafety(row)">进入热安全分析</button><button class="btn btn-sm btn-outline-secondary" @click="openJobLogs(row)">查看日志证据</button></div></td>
+                            </tr>
+                            <tr v-if="!filteredStructuredJobs.length"><td colspan="10" class="text-center text-muted py-4">当前条件没有已入库作业。可调整日期或补齐最近日志。</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </template>
+        </div>
         <!-- Interval Analysis -->
         <div class="card">
-	            <div class="card-header bg-warning">生产记录与间隔分析</div>
+	            <div class="card-header bg-warning">源数据库生产记录与间隔参考</div>
             <div class="interval-toolbar">
                 <div class="row g-2 align-items-end">
                     <div class="col-md-3">
@@ -1938,12 +2084,25 @@
                     <div class="col-md-9 text-muted small">可按日期过滤日志包；不选日期时展示该设备最近 300 条日志记录。</div>
                 </div>
             </div>
+            <div class="log-batch-bar">
+                <strong>批量证据处理</strong>
+                <span class="selection-summary">已选 {{ selectedEvidenceLogs.length }} 包 · {{ selectedEvidenceSizeLabel }}</span>
+                <button class="btn btn-sm btn-outline-primary" @click="batchDiagnoseEvidenceLogs" :disabled="batchEvidence.loading || !selectedEvidenceLogs.length">批量诊断</button>
+                <button class="btn btn-sm btn-primary" @click="batchParseEvidenceLogs" :disabled="batchEvidence.loading || !selectedEvidenceLogs.length">批量解析入库</button>
+                <button class="btn btn-sm btn-outline-secondary" @click="selectedEvidenceLogIds=[]">清空选择</button>
+                <span v-if="batchEvidence.loading" class="history-meta">处理中 {{ batchEvidence.processed }}/{{ batchEvidence.total }}，失败包会跳过继续</span>
+                <span v-else-if="batchEvidence.total" class="history-meta">本次成功 {{ batchEvidence.succeeded }}，跳过 {{ batchEvidence.failed }}</span>
+            </div>
+            <div v-if="batchEvidence.notes.length" class="alert alert-warning m-2 py-2">
+                <strong>失败/跳过备注：</strong>{{ batchEvidence.notes.join('；') }}
+            </div>
             <div class="card-body p-0">
                 <table class="table table-sm table-striped mb-0">
-                    <thead><tr><th>设备序列号</th><th>日志时间</th><th>文件名</th><th>大小</th><th>上传时间</th><th>状态</th><th>操作</th></tr></thead>
+                    <thead><tr><th style="width:34px"><input type="checkbox" @change="toggleAllEvidenceLogs($event)" :checked="selectedEvidenceLogs.length && selectedEvidenceLogs.length === filteredDeviceLogs.length"></th><th>设备序列号</th><th>日志时间</th><th>文件名</th><th>大小</th><th>上传时间</th><th>状态</th><th>操作</th></tr></thead>
                     <tbody>
                         <template v-for="log in filteredDeviceLogs" :key="log.id">
                         <tr>
+                            <td><input type="checkbox" :value="String(log.id)" v-model="selectedEvidenceLogIds"></td>
                             <td>{{ log.sn }}</td>
                             <td>{{ log.log_time_hint || log.create_time || '-' }}</td>
                             <td>{{ log.file_name }}</td>
@@ -1957,18 +2116,20 @@
                             </td>
                             <td>
                                 <template v-if="log.downloadable">
-                                    <a :href="`/api/device-log-download/${log.id}?token=${encodeURIComponent(auth.token)}`" target="_blank">下载</a>
-                                    <button class="btn btn-sm btn-outline-primary ms-2" @click="openLogAnalysis(log)">分析</button>
-                                    <button class="btn btn-sm btn-outline-secondary ms-2" @click="diagnoseLogPackage(log)">
-                                        {{ logPackageDiagnostics.loadingId === String(log.id) ? '诊断中' : '诊断' }}
+                                    <div class="action-stack">
+                                    <a class="btn btn-sm btn-outline-success" :href="`/api/device-log-download/${log.id}?token=${encodeURIComponent(auth.token)}`" target="_blank">下载原包</a>
+                                    <button class="btn btn-sm btn-outline-primary" @click="openLogAnalysis(log)">查看日志结论</button>
+                                    <button class="btn btn-sm btn-outline-secondary" @click="diagnoseLogPackage(log)">
+                                        {{ logPackageDiagnostics.loadingId === String(log.id) ? '诊断中' : '查看包体诊断' }}
                                     </button>
-                                    <button class="btn btn-sm btn-outline-danger ms-2" @click="openThermalSafety(log)">热安全</button>
+                                    <button class="btn btn-sm btn-outline-danger" @click="openThermalSafety(log)">进入热安全分析</button>
+                                    </div>
                                 </template>
                                 <span v-else class="text-muted">-</span>
                             </td>
                         </tr>
                         <tr v-if="logPackageDiagnostics.openId === String(log.id)">
-                            <td colspan="7" class="p-3 bg-light">
+                            <td colspan="8" class="p-3 bg-light">
                                 <div v-if="logPackageDiagnostics.loadingId === String(log.id)" class="alert alert-info mb-0">正在下载并体检当前日志包，仅处理这一个包...</div>
                                 <div v-else-if="logPackageDiagnostics.error" class="alert alert-danger mb-0">{{ logPackageDiagnostics.error }}</div>
                                 <template v-else-if="logPackageDiagnostics.result">
@@ -3660,12 +3821,34 @@
                     error: '',
                     result: null,
                 },
+                deviceJobs: {
+                    loading: false,
+                    error: '',
+                    result: null,
+                    keyword: '',
+                    minTemp: '',
+                    onlyAnomaly: false,
+                },
+                globalContext: {
+                    startDate: '',
+                    endDate: '',
+                },
+                selectedEvidenceLogIds: [],
+                batchEvidence: {
+                    loading: false,
+                    processed: 0,
+                    total: 0,
+                    succeeded: 0,
+                    failed: 0,
+                    notes: [],
+                },
                 thermalSafety: {
                     loading: false,
                     error: '',
                     result: null,
                     fileId: '',
                     targetId: '',
+                    structuredJobId: '',
                 },
                 cookTemperatureProgress: {
                     status: 'idle',
@@ -3695,37 +3878,35 @@
 		                monthLoading: '',
 		                monthDetails: {},
 				                activeTab: 'home',
-		                appVersion: '2026.06.12-fire-risk-workbench1',
+		                appVersion: '2026.06.14-system-ux-linkage1',
 		                navGroups: [
 		                    { title: '工作台', tabs: [
-		                        { id: 'home', label: '工作台', icon: '⌂', desc: '搜索、历史、入口' },
+		                        { id: 'home', label: '工作台总览', icon: '0', desc: '任务、风险、入口' },
 		                    ]},
-		                    { title: '单设备分析', tabs: [
+		                    { title: '单设备排查', tabs: [
 		                        { id: 'overview', label: '设备风险总览', icon: '1', desc: '概况、风险、入口' },
-		                        { id: 'intervals', label: '作业列表', icon: '2', desc: '记录、间隔、异常' },
-		                        { id: 'logs', label: '日志证据中心', icon: '3', desc: '包体、诊断、证据' },
-		                        { id: 'thermalSafety', label: '作业热安全分析', icon: '4', desc: '温度、功率、动作' },
+		                        { id: 'intervals', label: '作业列表', icon: '2', desc: '结构化作业、异常' },
+		                        { id: 'thermalSafety', label: '作业热安全分析', icon: '3', desc: '温度、功率、动作' },
+		                        { id: 'logs', label: '日志证据中心', icon: '4', desc: '包体、诊断、证据' },
 		                        { id: 'recipes', label: '菜谱与资源', icon: '5', desc: '步骤、配料、资源' },
 		                    ]},
 		                    { title: '全局检索', tabs: [
 		                        { id: 'recipeSearch', label: '菜谱检索', icon: 'R', desc: '跨客户和时间' },
+                                { id: 'safetyOverview', label: '安全总览', icon: 'S', desc: '风险面、分布、趋势' },
+                                { id: 'safetyAlerts', label: '告警明细', icon: '△', desc: '规则命中、追溯' },
+                                { id: 'emergency', label: '重点设备', icon: '!', desc: '重点设备复盘', adminOnly: true },
 		                    ]},
-		                    { title: '日志诊断', tabs: [
-		                        { id: 'logAnalysis', label: '日志结论', icon: 'D', desc: '故障、油路、证据' },
-		                        { id: 'cookTemperature', label: '温度诊断', icon: 'T', desc: '单次锅体温度' },
-                                { id: 'temperatureCalibration', label: '温度校正', icon: 'C', desc: '校准动作、时间、证据' },
-		                        { id: 'powerDiagnosis', label: '功率诊断', icon: 'P', desc: '指令、输出、能量' },
-		                        { id: 'thermalModel', label: '热过程分析', icon: 'H', desc: '能量、投料、预测' },
-		                    ]},
-		                    { title: '管理与治理', tabs: [
+		                    { title: '治理工具', tabs: [
 		                        { id: 'versionStats', label: '版本治理', icon: 'V', desc: '上位机版本' },
 		                        { id: 'thermalKnowledge', label: '热物性库', icon: 'K', desc: '食材、比热、燃点' },
+                                { id: 'temperatureCalibration', label: '温度校正', icon: 'C', desc: '校准动作、时间、证据' },
 		                        { id: 'admin', label: '系统审计', icon: 'A', desc: '账号、缓存、导出', adminOnly: true },
-		                        { id: 'emergency', label: '重点设备', icon: '!', desc: '重点设备复盘', adminOnly: true },
 		                    ]},
-		                    { title: '安全治理', tabs: [
-		                        { id: 'safetyOverview', label: '安全总览', icon: 'S', desc: '风险面、分布、趋势' },
-		                        { id: 'safetyAlerts', label: '告警明细', icon: '⚠', desc: '规则命中、追溯' },
+		                    { title: '调试入口', tabs: [
+		                        { id: 'logAnalysis', label: '原日志结论', icon: 'D', desc: '故障、油路、证据' },
+		                        { id: 'cookTemperature', label: '原温度诊断', icon: 'T', desc: '单次锅体温度' },
+		                        { id: 'powerDiagnosis', label: '原功率诊断', icon: 'P', desc: '指令、输出、能量' },
+		                        { id: 'thermalModel', label: '原热过程分析', icon: 'H', desc: '能量、投料、预测' },
 		                    ]},
 		                ],
                 displayIntervals: [],
@@ -3824,12 +4005,13 @@
 	            this.initRecipeSearchDates();
 	            this.initStructuredTemperatureDate();
                 this.initTemperatureCalibrationDates();
+                this.initGlobalContextDates();
                 this.restoreEvidenceRoute();
 	        },
 	        computed: {
 		            pageTitle() {
 		                const titles = {
-		                    home: '工作台',
+		                    home: '工作台总览',
 		                    overview: '设备风险总览',
 		                    intervals: '作业列表',
 		                    recipes: '菜谱与资源',
@@ -3872,6 +4054,53 @@
 		            },
             isAdmin() {
                 return this.auth.role === 'admin';
+            },
+            globalDataSourceLabel() {
+                const source = this.deviceJobs.result?.source || this.deviceRisk.result?.data_source;
+                if (source === 'structured_db') return '结构化库';
+                if (source === 'server_cache') return '服务端缓存';
+                if (source === 'browser_cache') return '浏览器缓存';
+                if (source === 'realtime_parse') return '实时解析';
+                if (source === 'source_db') return '源数据库';
+                if (this.data?.cache?.local) return '浏览器缓存';
+                if (this.data?.cache?.hit) return '服务端缓存';
+                return '源数据库';
+            },
+            globalParseProgressLabel() {
+                const summary = this.deviceRisk.result?.structured || this.data?.structured_summary;
+                if (!summary || !summary.total_packages) return '待补齐';
+                return `${summary.stored_packages || 0}/${summary.total_packages} 包 · ${summary.completion_rate || 0}%`;
+            },
+            globalRiskLabel() {
+                const level = this.deviceRisk.result?.risk_level || 'unknown';
+                return { high: '高风险待复核', medium: '中风险待复核', normal: '未见高风险', unknown: '数据不足' }[level] || '数据不足';
+            },
+            globalRiskClass() {
+                const level = this.deviceRisk.result?.risk_level || 'unknown';
+                return level === 'high' ? 'risk-high' : (level === 'medium' ? 'risk-medium' : (level === 'normal' ? 'risk-normal' : ''));
+            },
+            globalUpdatedLabel() {
+                const value = this.deviceRisk.result?.generated_at || this.data?.cache?.created_at;
+                if (!value) return '-';
+                return typeof value === 'number' ? this.formatCacheTime(value) : value;
+            },
+            filteredStructuredJobs() {
+                const rows = this.deviceJobs.result?.items || [];
+                const minTemp = Number(this.deviceJobs.minTemp);
+                return rows.filter(row => {
+                    if (this.deviceJobs.minTemp !== '' && (!Number.isFinite(minTemp) || Number(row.max_pot_temp || 0) < minTemp)) return false;
+                    if (this.deviceJobs.onlyAnomaly && !(row.risk_tags || []).length) return false;
+                    return true;
+                });
+            },
+            selectedEvidenceLogs() {
+                if (!this.data) return [];
+                const selected = new Set((this.selectedEvidenceLogIds || []).map(String));
+                return (this.data.device_logs || []).filter(log => selected.has(String(log.id)));
+            },
+            selectedEvidenceSizeLabel() {
+                const mb = this.selectedEvidenceLogs.reduce((sum, log) => sum + this.logSizeMb(log), 0);
+                return `${mb.toFixed(1)}MB`;
             },
             workspaceTempLine() {
                 const rows = (this.thermalSafety.result?.temperature_points || [])
@@ -3916,7 +4145,7 @@
 	            },
 	            activeGroup() {
 	                return this.visibleNavGroups.find(group => group.tabs.some(tab => tab.id === this.activeTab))
-                        || (this.activeTab === 'logEvidence' ? this.visibleNavGroups.find(group => group.title === '日志诊断') : null)
+                        || (this.activeTab === 'logEvidence' ? this.visibleNavGroups.find(group => group.title === '调试入口') : null)
                         || null;
 	            },
 	            activeGroupTitle() {
@@ -3967,13 +4196,13 @@
                                 ],
                             },
                             intervals: {
-                                title: '判断生产是否正常',
-                                text: '重点看执行过短、长间隔、失败取消和手动控制，先定位哪天、哪道菜、哪类异常。',
-                                meta: hasDevice ? [`当前展示 ${this.filteredIntervals.length || 0} 条`, `阈值 ${this.filters.intervalThresholdMinutes || 0} 分钟`, '支持行为筛选'] : ['需要先选择设备'],
+                                title: '先从结构化库选择一次作业',
+                                text: '作业是温度、功率、热过程和日志证据的共同分析对象。源数据库生产记录保留在下方作为参考。',
+                                meta: hasDevice ? [`结构化作业 ${this.filteredStructuredJobs.length || 0} 条`, `${this.globalContext.startDate}~${this.globalContext.endDate}`, this.globalDataSourceLabel] : ['需要先选择设备'],
                                 actions: [
-                                    { id: 'recipes', label: '关联菜谱', primary: true },
-                                    { id: 'logs', label: '日志证据' },
-                                    { id: 'cookTemperature', label: '温度诊断' },
+                                    { id: 'thermalSafety', label: '进入热安全分析', primary: true },
+                                    { id: 'logs', label: '查看日志证据' },
+                                    { id: 'recipes', label: '查看菜谱资源' },
                                 ],
                             },
                             recipes: {
@@ -3987,12 +4216,13 @@
                                 ],
                             },
                             logs: {
-                                title: '选择日志包进入证据链',
-                                text: '这里负责找包、看大小、下载状态和时间范围；诊断、温度和功率分析从日志包继续。',
-                                meta: hasDevice ? [`${(this.data.device_logs || []).length} 个日志包`, '支持下载', '可跳转诊断'] : ['需要先选择设备'],
+                                title: '治理日志证据和失败链路',
+                                text: '日志包用于补齐和复核证据，不是日常分析起点。支持多选、跳过失败、复用已入库结果。',
+                                meta: hasDevice ? [`当前范围 ${this.filteredDeviceLogs.length} 个包`, `已选 ${this.selectedEvidenceLogs.length} 包`, 'DB 未匹配不等于未生产'] : ['需要先选择设备'],
                                 actions: [
-                                    { id: 'logAnalysis', label: '日志结论', primary: true },
-                                    { id: 'cookTemperature', label: '温度诊断' },
+                                    { id: 'intervals', label: '返回作业列表', primary: true },
+                                    { id: 'thermalSafety', label: '进入热安全分析' },
+                                    { id: 'logAnalysis', label: '原日志结论' },
                                 ],
                             },
                             recipeSearch: {
@@ -4163,7 +4393,7 @@
 		                return `${this.recipeTop.job.stage || '处理中'}，请稍等。`;
 		            },
 		            isBusy() {
-		                return this.searchLoading || this.deviceLookup.loading || this.versionStats.loading || this.recipeSearch.loading || this.recipeAnalysis.loading || this.recipeTop.loading || this.logAnalysisLoading || this.cookTemperatureLoading || this.emergencyLoading || this.oilThermalLoading || this.adminLoading || !!this.monthLoading;
+		                return this.searchLoading || this.deviceLookup.loading || this.versionStats.loading || this.recipeSearch.loading || this.recipeAnalysis.loading || this.recipeTop.loading || this.logAnalysisLoading || this.cookTemperatureLoading || this.deviceJobs.loading || this.batchEvidence.loading || this.emergencyLoading || this.oilThermalLoading || this.adminLoading || !!this.monthLoading;
 		            },
 		            cookTemperatureCooks() {
 		                if (!this.cookTemperature) return [];
@@ -4474,6 +4704,9 @@
                         ...rowResources
                     ].join(' ').toLowerCase();
                     if (keyword && !text.includes(keyword)) return false;
+                    const day = String(row.create_time || '').slice(0, 10);
+                    if (this.globalContext.startDate && day && day < this.globalContext.startDate) return false;
+                    if (this.globalContext.endDate && day && day > this.globalContext.endDate) return false;
                     if (this.filters.category && row.category !== this.filters.category) return false;
                     if (this.filters.resources.length && !this.filters.resources.every(res => rowResources.includes(res))) return false;
                     if (this.filters.onlyLard && !row.has_lard) return false;
@@ -4513,6 +4746,9 @@
                 if (!this.data) return [];
                 const keyword = this.filters.keyword.trim().toLowerCase();
                 return (this.data.device_logs || []).filter(log => {
+                    const day = String(log.log_time_hint || log.create_time || '').slice(0, 10);
+                    if (this.globalContext.startDate && day && day < this.globalContext.startDate) return false;
+                    if (this.globalContext.endDate && day && day > this.globalContext.endDate) return false;
                     if (this.filters.logDate && !String(log.create_time || '').startsWith(this.filters.logDate)) return false;
                     if (!keyword) return true;
                     return [log.sn, log.file_name, log.file_length, log.create_time, log.update_time]
@@ -4734,6 +4970,16 @@
                     const start = new Date(end.getTime() - 41 * 24 * 3600 * 1000);
                     this.temperatureCalibration.startDate = this.formatDateInput(start);
                     this.temperatureCalibration.endDate = this.formatDateInput(end);
+                },
+                initGlobalContextDates() {
+                    const end = new Date();
+                    const start = new Date(end.getTime() - 29 * 24 * 3600 * 1000);
+                    this.globalContext.startDate = this.formatDateInput(start);
+                    this.globalContext.endDate = this.formatDateInput(end);
+                },
+                onGlobalDateChange() {
+                    this.deviceJobs.result = null;
+                    if (this.activeTab === 'intervals') this.loadDeviceJobs(true);
                 },
                 evidenceRouteParams(route = this.logEvidence.route) {
                     const params = new URLSearchParams();
@@ -5057,6 +5303,78 @@
                     } finally {
                         this.logPackageDiagnostics.loadingId = '';
                     }
+                },
+                toggleAllEvidenceLogs(event) {
+                    this.selectedEvidenceLogIds = event.target.checked
+                        ? this.filteredDeviceLogs.map(log => String(log.id))
+                        : [];
+                },
+                async batchDiagnoseEvidenceLogs() {
+                    const logs = this.selectedEvidenceLogs.slice();
+                    if (!logs.length) return;
+                    this.batchEvidence = { loading: true, processed: 0, total: logs.length, succeeded: 0, failed: 0, notes: [] };
+                    for (const log of logs) {
+                        try {
+                            const res = await fetch(`/api/log-package-diagnostics/${encodeURIComponent(log.id)}`, { headers: this.authHeaders() });
+                            const payload = await res.json().catch(() => ({}));
+                            if (!res.ok) throw new Error(payload.detail?.message || payload.detail || '诊断失败');
+                            log.diagnostics_status = payload.diagnosis_message;
+                            log.diagnostics_code = payload.diagnosis_code;
+                            log.internal_session_count = (payload.internal_sessions || []).length;
+                            this.batchEvidence.succeeded += 1;
+                        } catch (e) {
+                            this.batchEvidence.failed += 1;
+                            this.batchEvidence.notes.push(`${log.file_name}: ${e.message || '诊断失败'}`);
+                        } finally {
+                            this.batchEvidence.processed += 1;
+                        }
+                    }
+                    this.batchEvidence.loading = false;
+                },
+                async batchParseEvidenceLogs() {
+                    const selected = this.selectedEvidenceLogs.slice();
+                    if (!selected.length) return;
+                    const waiting = selected.filter(log => ['queued', 'parsing'].includes(log.parse_status));
+                    const ready = selected.filter(log => !['queued', 'parsing'].includes(log.parse_status));
+                    const ids = ready.map(log => String(log.id));
+                    this.batchEvidence = {
+                        loading: true,
+                        processed: waiting.length,
+                        total: selected.length,
+                        succeeded: 0,
+                        failed: waiting.length,
+                        notes: waiting.map(log => `${log.file_name}: 正在后台排队/解析，本次跳过`),
+                    };
+                    if (!ids.length) {
+                        this.batchEvidence.loading = false;
+                        return;
+                    }
+                    const readyMb = ready.reduce((sum, log) => sum + this.logSizeMb(log), 0);
+                    if (readyMb > 90) {
+                        this.batchEvidence.failed += ready.length;
+                        this.batchEvidence.processed = selected.length;
+                        this.batchEvidence.notes.push(`可处理日志合计 ${readyMb.toFixed(1)}MB，超过单次 90MB 安全上限，请拆分选择`);
+                        this.batchEvidence.loading = false;
+                        return;
+                    }
+                    this.selectedCookTemperatureFileIds = ids;
+                    this.syncPrimaryTemperatureLog();
+                    this.cookTemperature = null;
+                    await this.loadCookTemperature();
+                    const skipped = (this.cookTemperature?.analysis_failures || []).map(row => `${row.label || row.file_id || '未知包'}: ${row.reason || '解析失败'}`);
+                    this.batchEvidence.failed += skipped.length;
+                    this.batchEvidence.succeeded = Math.max(0, ids.length - skipped.length);
+                    this.batchEvidence.processed = selected.length;
+                    this.batchEvidence.notes.push(...skipped);
+                    this.batchEvidence.loading = false;
+                    const completedBatch = {
+                        ...this.batchEvidence,
+                        notes: [...this.batchEvidence.notes],
+                    };
+                    const selectedIds = [...this.selectedEvidenceLogIds];
+                    await this.search(true);
+                    this.batchEvidence = completedBatch;
+                    this.selectedEvidenceLogIds = selectedIds;
                 },
 	            structuredSummaryLabel() {
 	                const s = this.data && this.data.structured_summary;
@@ -5456,7 +5774,7 @@
             runPageGuideAction(action) {
                 if (!action || !action.id) return;
                 const id = action.id;
-                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'logEvidence', 'powerDiagnosis', 'thermalModel', 'thermalKnowledge', 'versionStats', 'admin', 'emergency'].includes(id)) {
+                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'logEvidence', 'powerDiagnosis', 'thermalModel', 'thermalKnowledge', 'versionStats', 'admin', 'emergency', 'safetyOverview', 'safetyAlerts'].includes(id)) {
                     this.setActiveTab(id);
                     return;
                 }
@@ -5492,6 +5810,8 @@
             setActiveTab(tabId) {
                 this.activeTab = tabId;
                 if (tabId === 'overview' && this.data) this.loadDeviceRisk(false);
+                if (tabId === 'intervals' && this.data) this.loadDeviceJobs(false);
+                if (tabId === 'thermalSafety' && this.data) this.loadDeviceJobs(false);
                 if (tabId === 'admin') this.loadAdminStatus();
                 if (tabId === 'emergency') this.loadEmergencyDevices();
                 if (tabId === 'oilThermal') this.loadOilThermal();
@@ -5527,13 +5847,86 @@
                     this.deviceRisk.loading = false;
                 }
             },
+            async loadDeviceJobs(force = false) {
+                if (!this.data || (this.deviceJobs.result && !force)) return;
+                this.deviceJobs.loading = true;
+                this.deviceJobs.error = '';
+                try {
+                    const params = new URLSearchParams({
+                        start_date: this.globalContext.startDate,
+                        end_date: this.globalContext.endDate,
+                        limit: '500',
+                    });
+                    if (this.deviceJobs.keyword.trim()) params.set('keyword', this.deviceJobs.keyword.trim());
+                    const res = await fetch(`/api/device-jobs/${encodeURIComponent(this.data.stats.sn)}?${params.toString()}`, { headers: this.authHeaders() });
+                    const payload = await res.json().catch(() => ({}));
+                    if (!res.ok) throw new Error(payload.detail || '结构化作业读取失败');
+                    this.deviceJobs.result = payload;
+                    if (payload.failure) this.deviceJobs.error = payload.failure.message;
+                } catch (e) {
+                    this.deviceJobs.error = e.message || '结构化作业读取失败';
+                } finally {
+                    this.deviceJobs.loading = false;
+                }
+            },
+            openJobThermalSafety(row) {
+                if (!row) return;
+                this.thermalSafety.structuredJobId = String(row.id || '');
+                this.thermalSafety.fileId = row.source_file_id ? String(row.source_file_id) : '';
+                this.thermalSafety.targetId = row.machine_log_id ? String(row.machine_log_id) : '';
+                this.setActiveTab('thermalSafety');
+                this.loadThermalSafety(false);
+            },
+            openJobLogs(row) {
+                if (!row) return;
+                const day = String(row.start_time || '').slice(0, 10);
+                this.filters.logDate = day;
+                this.selectedEvidenceLogIds = row.source_file_id ? [String(row.source_file_id)] : [];
+                this.setActiveTab('logs');
+            },
+            openRecipeJobs(recipe) {
+                this.deviceJobs.keyword = String(recipe?.id || recipe?.name || '');
+                this.setActiveTab('intervals');
+                this.loadDeviceJobs(true);
+            },
+            openRecipeRisks(recipe) {
+                this.recipeSearch.form.recipe_keyword = recipe?.name || '';
+                this.recipeSearch.form.keyword = this.data?.stats?.sn || '';
+                this.recipeSearch.form.scope = 'device';
+                this.setActiveTab('recipeSearch');
+            },
+            handleRiskAction(action) {
+                const id = action?.id;
+                if (id === 'watch') return this.watchStructuredDevice();
+                if (id === 'logs_failed' || id === 'logs_internal') return this.setActiveTab('logs');
+                if (id === 'jobs_high_temp') {
+                    this.deviceJobs.minTemp = 300;
+                    this.deviceJobs.onlyAnomaly = true;
+                    this.setActiveTab('intervals');
+                    return;
+                }
+                if (id === 'alerts') {
+                    this.safetyDashboard.alertsFilters.sn = this.data?.stats?.sn || '';
+                    this.setActiveTab('safetyAlerts');
+                    return;
+                }
+                this.setActiveTab(id || 'intervals');
+            },
             openThermalSafety(log = null) {
                 if (log?.id) this.thermalSafety.fileId = String(log.id);
                 if (!this.thermalSafety.fileId && this.logAnalysisOptions.length) {
                     this.thermalSafety.fileId = String(this.logAnalysisOptions[0].id);
                 }
                 this.thermalSafety.targetId = '';
+                this.thermalSafety.structuredJobId = '';
                 this.setActiveTab('thermalSafety');
+                this.loadThermalSafety(false);
+            },
+            selectThermalStructuredJob() {
+                const row = (this.deviceJobs.result?.items || []).find(item => String(item.id) === String(this.thermalSafety.structuredJobId));
+                if (!row) return;
+                this.thermalSafety.fileId = row.source_file_id ? String(row.source_file_id) : '';
+                this.thermalSafety.targetId = row.machine_log_id ? String(row.machine_log_id) : '';
                 this.loadThermalSafety(false);
             },
             async loadThermalSafety(refresh = false) {
@@ -5707,9 +6100,25 @@
                 this.safetyDashboard.alertsFilters = { riskLevel: '', ruleKey: '', sn: '', dismissed: '' };
                 this.loadSafetyAlerts(0);
             },
+            openSafetyAlerts(level = '') {
+                this.safetyDashboard.alertsFilters.riskLevel = level;
+                this.setActiveTab('safetyAlerts');
+            },
+            openSafetyDevice(sn) {
+                if (!sn) return;
+                this.snInput = sn;
+                this.activeTab = 'overview';
+                this.search(false);
+            },
+            openSafetyRecipe(recipeName) {
+                this.recipeSearch.form.recipe_keyword = recipeName || '';
+                this.recipeSearch.mode = 'search';
+                this.setActiveTab('recipeSearch');
+            },
             jumpToDeviceFromAlert(alert) {
                 if (!alert || !alert.sn) return;
                 this.snInput = alert.sn;
+                this.activeTab = 'overview';
                 this.search();
             },
             safetyRiskBadgeClass(level) {
@@ -7028,9 +7437,14 @@
                 this.cookTemperature = null;
                 this.deviceRisk.result = null;
                 this.deviceRisk.error = '';
+                this.deviceJobs.result = null;
+                this.deviceJobs.error = '';
+                this.selectedEvidenceLogIds = [];
+                this.batchEvidence = { loading: false, processed: 0, total: 0, succeeded: 0, failed: 0, notes: [] };
                 this.thermalSafety.result = null;
                 this.thermalSafety.error = '';
                 this.thermalSafety.targetId = '';
+                this.thermalSafety.structuredJobId = '';
                 this.thermalSafety.fileId = this.selectedLogFileId || '';
                 this.selectedCookTemperatureIndex = 0;
                 this.cookTemperatureError = '';
@@ -7050,7 +7464,9 @@
                 if (this.activeTab === 'temperatureCalibration') this.loadTemperatureCalibrations(true);
                 if (this.activeTab === 'logEvidence') this.loadLogEvidenceDetail();
                 if (this.activeTab === 'overview') this.loadDeviceRisk(false);
+                if (this.activeTab === 'intervals') this.loadDeviceJobs(false);
                 if (this.activeTab === 'thermalSafety' && this.logAnalysisOptions.length) {
+                    this.loadDeviceJobs(false);
                     this.thermalSafety.fileId = this.thermalSafety.fileId || String(this.logAnalysisOptions[0].id);
                     this.loadThermalSafety(false);
                 }
