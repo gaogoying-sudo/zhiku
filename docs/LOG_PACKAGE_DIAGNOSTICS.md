@@ -105,3 +105,65 @@ machine_ftp 索引
 4. 内部作业时间与目标时间接近但 DB 无记录时，检查数据库漏记、时区和设备时钟漂移。
 5. 温度或功率信号缺失时，换相邻日志包或确认设备日志版本。
 6. `parser_error` 必须保留原始包、文件名和错误信息，补充解析规则后再诊断。
+
+## LOG-RECON-001 数据对账
+
+当页面最终数据和预期不一致时，优先跑日志包对账，不要先改 UI 文案。
+
+入口：
+
+- Admin API：`GET /api/debug/log-reconciliation/{file_id}`
+- 脚本：`python deploy/backend/scripts/reconcile_log_package.py --file-id <file_id>`
+
+输出：
+
+- `output/log_reconciliation_<file_id>.json`
+- `output/log_reconciliation_<file_id>.md`
+
+对账层级：
+
+| 层级 | 来源 |
+| --- | --- |
+| 原始日志包 | `machine_ftp` ZIP 与解压目录 |
+| 语义解析产物 | `deploy/backend/log_semantics` 的 `ParseResult` |
+| integration_payload | `log_semantics/exporters.py` 导出的入库候选 |
+| 云端结构化库 | `device_log_packages`、`cook_jobs`、`cook_temperature_samples`、`cook_power_events`、`cook_action_events` |
+| 生命周期中心 | `device_log_packages` 五阶段状态和摘要字段 |
+| 作业列表 | `cook_jobs` 与事件表聚合 |
+| 热安全分析 | `build_thermal_safety_workspace`，优先结构化库，失败回退内部作业 |
+| 服务端缓存 | `log_package_diagnostics` 与 `cook_temperature` 磁盘缓存 |
+| 浏览器缓存 | 服务端不可直接读取，异常时需强刷或清本地缓存复测 |
+
+核心字段：
+
+- `session_id`
+- `recipe_id`
+- `recipe_name`
+- `start_time`
+- `end_time`
+- `duration_seconds`
+- `max_temperature`
+- `avg_temperature`
+- `max_command_power_kw`
+- `max_actual_power_kw`
+- `temperature_sample_count`
+- `power_event_count`
+- `action_event_count`
+- `risk_tags`
+- `source_file_id`
+- `parser_version`
+
+差异分类：
+
+- 解析问题：原始日志可见，但 `log_semantics` 或旧诊断没有解析出来。
+- 入库问题：解析产物存在，但 `cook_jobs` 或事件表没有对应行。
+- 缓存问题：服务端磁盘缓存版本不一致，或浏览器本地仍读旧数据。
+- 页面映射问题：结构化库数据正确，但页面取错字段或只读取部分来源。
+- 导出问题：页面正确，但导出没有包含同一批字段。
+- 口径未确认：两套解析器切分规则不同，暂不硬修，只记录差异。
+
+状态保护：
+
+- `stored` 和 `partial_stored` 都属于已有成果，missing-only 后台补齐和自动解析 worker 不应重新排队覆盖。
+- 刷新远端索引只更新远端元数据，不得覆盖本地下载、解压、解析、入库阶段。
+- 同一个 `source_file_id` 在 `cook_jobs` 中不得重复插入导致统计翻倍。

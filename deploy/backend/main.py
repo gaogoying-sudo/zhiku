@@ -107,6 +107,7 @@ LOG_LIFECYCLE_MAX_DAYS = int(os.getenv('LOG_LIFECYCLE_MAX_DAYS', '180'))
 LOG_PACKAGE_RETRY_LIMIT = int(os.getenv('LOG_PACKAGE_RETRY_LIMIT', '3'))
 LOG_PACKAGE_ZIP_RETENTION_DAYS = int(os.getenv('LOG_PACKAGE_ZIP_RETENTION_DAYS', '7'))
 LOG_PACKAGE_UNZIP_RETENTION_DAYS = int(os.getenv('LOG_PACKAGE_UNZIP_RETENTION_DAYS', '3'))
+LOG_RECONCILIATION_OUTPUT_DIR = Path(os.getenv('LOG_RECONCILIATION_OUTPUT_DIR', 'output'))
 
 LOG_KIND_DEFS = {
     'oildrum_board': {
@@ -2127,6 +2128,16 @@ def mark_log_package_status(sn, file_id, download_status=None, parse_status=None
     next_download = download_status or (existing or {}).get('download_status') or 'remote_available'
     next_parse = parse_status or (existing or {}).get('parse_status') or 'not_started'
     next_storage = storage_status or (existing or {}).get('storage_status') or 'not_stored'
+    existing_parse = (existing or {}).get('parse_status')
+    existing_storage = (existing or {}).get('storage_status')
+    failure_parse_statuses = {
+        'parse_failed', 'no_temperature_data', 'no_production_match', 'key_log_missing',
+        'no_time_range', 'no_internal_session', 'skipped', 'not_started',
+    }
+    if existing_storage in ('stored', 'partial_stored') and next_storage in ('not_stored', 'store_failed'):
+        next_storage = existing_storage
+    if existing_parse in ('parsed', 'partial_success') and next_parse in failure_parse_statuses:
+        next_parse = existing_parse
     error_code = next_parse if next_parse in (
         'parse_failed', 'no_temperature_data', 'no_production_match', 'key_log_missing',
         'no_time_range', 'no_internal_session',
@@ -2154,7 +2165,7 @@ def read_cook_temperature_from_db(sn, file_id):
         SELECT source_file_id, file_name, file_size_mb, remote_create_time, log_start_time, log_end_time,
                cook_count, sample_count, parse_version, parsed_at, stored_at
         FROM device_log_packages
-        WHERE sn=%s AND source_file_id=%s AND storage_status='stored'
+        WHERE sn=%s AND source_file_id=%s AND storage_status IN ('stored','partial_stored')
         """,
         (sn, int(file_id)),
     )
@@ -2713,7 +2724,7 @@ def queue_recent_log_packages_for_device(sn, limit=3):
         FROM device_log_packages
         WHERE sn=%s
           AND remote_status='available'
-          AND storage_status != 'stored'
+          AND storage_status NOT IN ('stored','partial_stored')
           AND parse_status IN ('not_started','parse_failed','no_temperature_data')
           AND file_size_mb > 0
           AND file_size_mb <= 50
@@ -2730,7 +2741,7 @@ def queue_recent_log_packages_for_device(sn, limit=3):
             SET download_status=CASE WHEN download_status='downloaded' THEN download_status ELSE 'queued' END,
                 unzip_status=CASE WHEN unzip_status='unzipped' THEN unzip_status ELSE 'queued' END,
                 parse_status='queued', lifecycle_status='queued', ui_status='等待解析', updated_at=%s
-            WHERE sn=%s AND source_file_id=%s AND storage_status!='stored'
+            WHERE sn=%s AND source_file_id=%s AND storage_status NOT IN ('stored','partial_stored')
             """,
             (now, sn, int(row['source_file_id'])),
         )
@@ -2900,7 +2911,7 @@ def process_log_lifecycle_task(task_id):
                 (sn, file_id),
             ) or {}
             mode = task.get('mode') or 'missing_only'
-            if package.get('storage_status') == 'stored' and mode == 'missing_only':
+            if package.get('storage_status') in ('stored', 'partial_stored') and mode == 'missing_only':
                 finish_task_item(task_id, file_id, 'completed', reused_from='structured_db')
                 update_lifecycle_task_counts(task_id)
                 continue
@@ -3067,7 +3078,7 @@ def create_log_lifecycle_task(sn, start, end, mode, max_packages, username):
         if row.get('file_size_bytes') and int(row['file_size_bytes']) > MAX_LOG_ANALYSIS_DOWNLOAD_MB * 1024 * 1024:
             continue
         if mode == 'missing_only':
-            if row.get('storage_status') == 'stored':
+            if row.get('storage_status') in ('stored', 'partial_stored'):
                 continue
             if row.get('parse_status') in ('queued', 'parsing'):
                 continue
@@ -6186,6 +6197,770 @@ def build_thermal_safety_workspace(sn, file_id=None, job_id=None, internal_sessi
     payload['package_lifecycle'] = package_lifecycle
     payload['data_source_note'] = '当前作业来自日志内部片段，DB 未匹配不代表没有生产。'
     return payload
+
+def _json_value(value):
+    if isinstance(value, (datetime,)):
+        return value.isoformat(sep=' ', timespec='seconds')
+    return value
+
+def _round_number(value, digits=3):
+    if value is None:
+        return None
+    try:
+        return round(float(value), digits)
+    except Exception:
+        return value
+
+def _normal_time(value):
+    parsed = to_mysql_dt(value)
+    return parsed.isoformat(sep=' ', timespec='seconds') if parsed else (str(value) if value is not None else None)
+
+def _same_value(left, right, tolerance=0.01):
+    if left is None and right in (None, ''):
+        return True
+    if right is None and left in (None, ''):
+        return True
+    try:
+        return abs(float(left) - float(right)) <= tolerance
+    except Exception:
+        return str(left or '') == str(right or '')
+
+def _diff_item(field, left_source, left, right_source, right, severity='warning', reason=''):
+    return {
+        'field': field,
+        'left_source': left_source,
+        'left_value': _json_value(left),
+        'right_source': right_source,
+        'right_value': _json_value(right),
+        'severity': severity,
+        'reason': reason,
+    }
+
+def _package_source_row_for_reconciliation(file_id):
+    local = fetch_one("SELECT * FROM device_log_packages WHERE source_file_id=%s LIMIT 1", (int(file_id),)) or {}
+    source = None
+    if local.get('sn'):
+        try:
+            source = fetch_log_package_source_row(local.get('sn'), int(file_id))
+        except Exception:
+            source = None
+    if not source:
+        try:
+            source = fetch_one(
+                "SELECT id, sn, file_name, file_length, pic AS url, type, create_time, update_time, cos_deleted "
+                "FROM machine_ftp WHERE id=%s LIMIT 1",
+                (int(file_id),),
+                source=True,
+                database='btyc',
+            )
+        except Exception:
+            source = None
+    if source:
+        return source, local
+    if local:
+        return {
+            'id': int(file_id),
+            'sn': local.get('sn'),
+            'file_name': local.get('file_name'),
+            'file_length': local.get('file_size_mb') or local.get('file_size_label'),
+            'create_time': local.get('remote_create_time') or local.get('log_time_hint'),
+            'update_time': local.get('remote_update_time'),
+            'cos_deleted': local.get('cos_deleted'),
+            'url': None,
+            'type': None,
+        }, local
+    return None, {}
+
+def _summarize_lifecycle_row(row):
+    if not row:
+        return {'source': 'cloud_mysql_structured_db', 'available': False}
+    recomputed = lifecycle_status_value(
+        row.get('remote_status') or 'available',
+        row.get('download_status') or 'not_started',
+        row.get('unzip_status') or 'not_started',
+        row.get('parse_status') or 'not_started',
+        row.get('storage_status') or 'not_stored',
+    )
+    job_count = int(row.get('job_count') or 0)
+    cook_count = int(row.get('cook_count') or 0)
+    return {
+        'source': 'cloud_mysql_structured_db.device_log_packages',
+        'available': True,
+        'remote_status': row.get('remote_status'),
+        'download_status': row.get('download_status'),
+        'unzip_status': row.get('unzip_status'),
+        'parse_status': row.get('parse_status'),
+        'storage_status': row.get('storage_status'),
+        'lifecycle_status': row.get('lifecycle_status'),
+        'ui_status': row.get('ui_status'),
+        'recomputed_lifecycle_status': recomputed,
+        'parse_version': row.get('parse_version'),
+        'job_count': job_count,
+        'cook_count': cook_count,
+        'effective_job_count': job_count or cook_count,
+        'event_count': int(row.get('event_count') or 0),
+        'sample_count': int(row.get('sample_count') or 0),
+        'max_pot_temp': _round_number(row.get('max_pot_temp'), 2),
+        'max_power_w': _round_number(row.get('max_power_w'), 2),
+        'log_start_time': _normal_time(row.get('log_start_time')),
+        'log_end_time': _normal_time(row.get('log_end_time')),
+        'parsed_at': _normal_time(row.get('parsed_at')),
+        'stored_at': _normal_time(row.get('stored_at')),
+        'error_stage': row.get('error_stage'),
+        'error_code': row.get('error_code'),
+        'error_message': row.get('error_message'),
+        'suggested_action': row.get('suggested_action'),
+    }
+
+def _summarize_diagnostics(payload):
+    if not payload:
+        return {'source': 'server_cache_or_realtime_diagnostics', 'available': False}
+    return {
+        'source': 'server_cache_or_realtime_diagnostics.log_package_diagnostics',
+        'available': True,
+        'diagnostics_version': payload.get('diagnostics_version'),
+        'cache': payload.get('cache') or {},
+        'download_status': payload.get('download_status'),
+        'zip_open_status': payload.get('zip_open_status'),
+        'detected_log_kinds': payload.get('detected_log_kinds') or [],
+        'file_list_count': payload.get('file_list_count') or 0,
+        'log_time_start': _normal_time(payload.get('log_time_start')),
+        'log_time_end': _normal_time(payload.get('log_time_end')),
+        'diagnosis_code': payload.get('diagnosis_code'),
+        'diagnosis_message': payload.get('diagnosis_message'),
+        'db_production_match_count': int(payload.get('db_production_match_count') or 0),
+        'internal_sessions': len(payload.get('internal_sessions') or []),
+        'temperature_sample_count': int(payload.get('temperature_sample_count') or 0),
+        'power_event_count': int(payload.get('power_event_count') or 0),
+        'material_event_count': int(payload.get('material_event_count') or 0),
+        'max_temperature': _round_number(payload.get('max_temperature'), 2),
+        'max_power_w': _round_number(payload.get('max_power_w'), 2),
+    }
+
+def _semantic_session_summary(session):
+    return {
+        'session_id': session.get('session_id'),
+        'session_type': session.get('session_type'),
+        'recipe_id': session.get('recipe_id'),
+        'recipe_name': session.get('recipe_name'),
+        'start_time': _normal_time(session.get('start_time')),
+        'end_time': _normal_time(session.get('end_time')),
+        'duration_seconds': int(session.get('duration_seconds') or 0),
+        'max_temperature': _round_number(session.get('max_output_temp_c'), 2),
+        'avg_temperature': _round_number(session.get('avg_output_temp_c'), 2),
+        'max_command_power_kw': _round_number(session.get('max_command_power_kw'), 3),
+        'max_actual_power_kw': _round_number(session.get('max_actual_power_kw'), 3),
+        'temperature_sample_count': int(session.get('temperature_sample_count') or 0),
+        'power_event_count': int(session.get('power_event_count') or 0),
+        'action_event_count': int(session.get('action_event_count') or 0),
+        'risk_tags': session.get('risk_tags') or [],
+        'source': session.get('source') or 'log_semantics',
+    }
+
+def _db_job_payload(row):
+    try:
+        return json.loads(row.get('payload_json') or '{}')
+    except Exception:
+        return {}
+
+def _db_job_summary(row, power=None, actions=None):
+    payload = _db_job_payload(row)
+    summary = payload.get('summary') or {}
+    cook = payload.get('cook') or {}
+    power = power or {}
+    actions = actions or {}
+    risk_tags = payload.get('risk_tags') or summary.get('risk_tags') or []
+    return {
+        'id': int(row.get('id') or 0),
+        'session_id': payload.get('session_id') or cook.get('session_id') or payload.get('internal_session_id'),
+        'machine_log_id': row.get('machine_log_id'),
+        'source_file_id': row.get('source_file_id'),
+        'parser_version': row.get('parse_version'),
+        'recipe_id': row.get('recipe_id'),
+        'recipe_name': row.get('recipe_name'),
+        'start_time': _normal_time(row.get('cook_start_time')),
+        'end_time': _normal_time(row.get('cook_end_time')),
+        'duration_seconds': int(row.get('duration_seconds') or 0),
+        'max_temperature': _round_number(row.get('max_pot_temp'), 2),
+        'avg_temperature': _round_number(row.get('avg_pot_temp'), 2),
+        'max_command_power_kw': _round_number(power.get('max_command_power_kw') or summary.get('max_command_power_kw'), 3),
+        'max_actual_power_kw': _round_number(power.get('max_actual_power_kw') or summary.get('max_actual_power_kw'), 3),
+        'temperature_sample_count': int(row.get('sample_count') or 0),
+        'power_event_count': int(power.get('power_event_count') or summary.get('power_sample_count') or 0),
+        'action_event_count': int(actions.get('action_event_count') or row.get('android_action_count') or 0),
+        'risk_tags': risk_tags,
+        'payload_shape': sorted(payload.keys())[:40],
+    }
+
+def _build_structured_reconciliation(sn, file_id):
+    job_rows = fetch_all(
+        """
+        SELECT id, sn, source_file_id, machine_log_id, recipe_id, recipe_name, cook_start_time,
+               cook_end_time, duration_seconds, max_pot_temp, avg_pot_temp, sample_count,
+               step_count, android_action_count, payload_json, parse_version, created_at, updated_at
+        FROM cook_jobs
+        WHERE sn=%s AND source_file_id=%s
+        ORDER BY cook_start_time ASC, id ASC
+        """,
+        (sn, int(file_id)),
+    )
+    job_ids = [int(row['id']) for row in job_rows if row.get('id')]
+    power_map = {}
+    action_map = {}
+    if job_ids:
+        placeholders = ','.join(['%s'] * len(job_ids))
+        power_rows = fetch_all(
+            f"""
+            SELECT cook_job_id, COUNT(*) AS power_event_count,
+                   MAX(command_power_kw) AS max_command_power_kw,
+                   MAX(actual_power_kw) AS max_actual_power_kw
+            FROM cook_power_events
+            WHERE cook_job_id IN ({placeholders})
+            GROUP BY cook_job_id
+            """,
+            tuple(job_ids),
+        )
+        power_map = {int(row['cook_job_id']): row for row in power_rows}
+        action_rows = fetch_all(
+            f"""
+            SELECT cook_job_id, COUNT(*) AS action_event_count
+            FROM cook_action_events
+            WHERE cook_job_id IN ({placeholders})
+            GROUP BY cook_job_id
+            """,
+            tuple(job_ids),
+        )
+        action_map = {int(row['cook_job_id']): row for row in action_rows}
+    temp_stats = fetch_one(
+        """
+        SELECT COUNT(*) AS count, MAX(pot_temp) AS max_pot_temp, AVG(pot_temp) AS avg_pot_temp,
+               MIN(sample_time) AS first_time, MAX(sample_time) AS last_time
+        FROM cook_temperature_samples
+        WHERE sn=%s AND source_file_id=%s
+        """,
+        (sn, int(file_id)),
+    ) or {}
+    power_stats = fetch_one(
+        """
+        SELECT COUNT(*) AS count, MAX(command_power_kw) AS max_command_power_kw,
+               MAX(actual_power_kw) AS max_actual_power_kw
+        FROM cook_power_events
+        WHERE sn=%s AND source_file_id=%s
+        """,
+        (sn, int(file_id)),
+    ) or {}
+    action_stats = fetch_one(
+        """
+        SELECT COUNT(*) AS count
+        FROM cook_action_events
+        WHERE sn=%s AND source_file_id=%s
+        """,
+        (sn, int(file_id)),
+    ) or {}
+    duplicate_rows = fetch_all(
+        """
+        SELECT machine_log_id, recipe_id, recipe_name, cook_start_time, COUNT(*) AS count
+        FROM cook_jobs
+        WHERE sn=%s AND source_file_id=%s
+        GROUP BY machine_log_id, recipe_id, recipe_name, cook_start_time
+        HAVING COUNT(*) > 1
+        """,
+        (sn, int(file_id)),
+    )
+    jobs = [
+        _db_job_summary(row, power_map.get(int(row['id'])), action_map.get(int(row['id'])))
+        for row in job_rows
+    ]
+    return {
+        'source': 'cloud_mysql_structured_db',
+        'cook_jobs': {
+            'count': len(jobs),
+            'first_time': _normal_time(job_rows[0].get('cook_start_time')) if job_rows else None,
+            'last_time': _normal_time(job_rows[-1].get('cook_end_time')) if job_rows else None,
+            'rows': jobs,
+        },
+        'temperature_samples': {
+            'count': int(temp_stats.get('count') or 0),
+            'first_time': _normal_time(temp_stats.get('first_time')),
+            'last_time': _normal_time(temp_stats.get('last_time')),
+            'max_temperature': _round_number(temp_stats.get('max_pot_temp'), 2),
+            'avg_temperature': _round_number(temp_stats.get('avg_pot_temp'), 2),
+        },
+        'power_events': {
+            'count': int(power_stats.get('count') or 0),
+            'max_command_power_kw': _round_number(power_stats.get('max_command_power_kw'), 3),
+            'max_actual_power_kw': _round_number(power_stats.get('max_actual_power_kw'), 3),
+        },
+        'action_events': {
+            'count': int(action_stats.get('count') or 0),
+        },
+        'duplicate_job_groups': duplicate_rows,
+    }
+
+def _build_semantic_artifact(file_row, force_refresh=False):
+    artifact = {
+        'source': 'log_semantics_realtime_or_export_artifact',
+        'available': False,
+        'error': None,
+        'output_dir': None,
+        'integration_payload_path': None,
+        'summary': {},
+        'integration_payload': {},
+        'sessions': [],
+    }
+    try:
+        import subprocess
+        import sys
+        zip_path, _ = ensure_log_package_downloaded(file_row, force=force_refresh)
+        unzip_dir, manifest, _ = ensure_log_package_unzipped(file_row, zip_path, force=force_refresh)
+        output_dir = LOG_RECONCILIATION_OUTPUT_DIR / f'log_reconciliation_{int(file_row.get("id"))}_semantics'
+        output_dir.mkdir(parents=True, exist_ok=True)
+        compact_path = output_dir / 'semantic_reconciliation_summary.json'
+        script = r'''
+import json
+import sys
+from pathlib import Path
+from log_semantics import LOG_SEMANTICS_VERSION, SCHEMA_VERSION, parse_log_directory
+from log_semantics.exporters import export_result
+
+def n(value, digits=3):
+    if value is None:
+        return None
+    try:
+        return round(float(value), digits)
+    except Exception:
+        return value
+
+def sess(row):
+    return {
+        "session_id": row.get("session_id"),
+        "session_type": row.get("session_type"),
+        "recipe_id": row.get("recipe_id"),
+        "recipe_name": row.get("recipe_name"),
+        "start_time": row.get("start_time"),
+        "end_time": row.get("end_time"),
+        "duration_seconds": int(row.get("duration_seconds") or 0),
+        "max_temperature": n(row.get("max_output_temp_c"), 2),
+        "avg_temperature": n(row.get("avg_output_temp_c"), 2),
+        "max_command_power_kw": n(row.get("max_command_power_kw"), 3),
+        "max_actual_power_kw": n(row.get("max_actual_power_kw"), 3),
+        "temperature_sample_count": int(row.get("temperature_sample_count") or 0),
+        "power_event_count": int(row.get("power_event_count") or 0),
+        "action_event_count": int(row.get("action_event_count") or 0),
+        "risk_tags": row.get("risk_tags") or [],
+        "source": row.get("source") or "log_semantics",
+    }
+
+input_dir, output_dir, compact_path = sys.argv[1], sys.argv[2], sys.argv[3]
+result = parse_log_directory(input_dir)
+export_result(result, output_dir)
+counts = result.summary.get("counts") or {}
+thermal = result.summary.get("thermal_summary") or {}
+power = result.summary.get("power_summary") or {}
+sessions = [sess(row) for row in result.sessions or []]
+payload = {
+    "parser_version": LOG_SEMANTICS_VERSION,
+    "schema_version": SCHEMA_VERSION,
+    "summary": {
+        "parser_version": result.summary.get("parser_version"),
+        "time_range": result.summary.get("time_range") or {},
+        "session_count": int(counts.get("session_count") or 0),
+        "temperature_sample_count": int(counts.get("temperature_sample_count") or 0),
+        "power_event_count": int(counts.get("power_event_count") or 0),
+        "action_event_count": int(counts.get("action_event_count") or 0),
+        "max_output_temp_c": n(thermal.get("max_output_temp_c"), 2),
+        "max_android_output_temp_c": n(thermal.get("max_android_output_temp_c"), 2),
+        "max_command_power_kw": n(power.get("max_command_power_kw"), 3),
+        "max_actual_power_kw": n(power.get("max_actual_power_kw"), 3),
+    },
+    "file_inventory": result.file_inventory or {},
+    "sessions_truncated": len(sessions) > 120,
+    "sessions_returned": min(len(sessions), 120),
+    "sessions": sessions[:120],
+}
+Path(compact_path).write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
+'''
+        completed = subprocess.run(
+            [sys.executable, '-c', script, str(unzip_dir), str(output_dir), str(compact_path)],
+            text=True,
+            capture_output=True,
+            timeout=int(os.getenv('LOG_RECONCILIATION_SEMANTIC_TIMEOUT_SECONDS', '90')),
+        )
+        if completed.returncode != 0:
+            artifact['error'] = (completed.stderr or completed.stdout or f'log_semantics subprocess exited {completed.returncode}')[-1000:]
+            artifact['returncode'] = completed.returncode
+            return artifact
+        integration_path = output_dir / 'integration_payload.json'
+        compact = json.loads(compact_path.read_text(encoding='utf-8'))
+        artifact.update({
+            'available': True,
+            'parser_version': compact.get('parser_version'),
+            'schema_version': compact.get('schema_version'),
+            'output_dir': str(output_dir),
+            'integration_payload_path': str(integration_path),
+            'summary': compact.get('summary') or {},
+            'file_inventory': compact.get('file_inventory') or {},
+            'sessions_truncated': bool(compact.get('sessions_truncated')),
+            'sessions_returned': int(compact.get('sessions_returned') or 0),
+            'sessions': compact.get('sessions') or [],
+        })
+    except subprocess.TimeoutExpired as exc:
+        artifact['error'] = f'log_semantics subprocess timeout: {exc}'
+        artifact['timeout_seconds'] = int(os.getenv('LOG_RECONCILIATION_SEMANTIC_TIMEOUT_SECONDS', '90'))
+    except Exception as exc:
+        artifact['error'] = str(exc)[:500]
+    return artifact
+
+def _summarize_thermal_workspace(sn, file_id):
+    try:
+        payload = build_thermal_safety_workspace(sn, file_id=file_id, refresh=False)
+        summary = payload.get('summary') or {}
+        selected = payload.get('selected_target') or {}
+        return {
+            'source': payload.get('source'),
+            'source_label': payload.get('source_label'),
+            'data_source_note': payload.get('data_source_note'),
+            'selected_session_id': selected.get('session_id'),
+            'selected_job_id': selected.get('id'),
+            'recipe_id': selected.get('recipe_id'),
+            'recipe_name': selected.get('recipe_name'),
+            'start_time': _normal_time(selected.get('start_time') or selected.get('create_time')),
+            'end_time': _normal_time(selected.get('end_time') or selected.get('end_time_calc')),
+            'max_temperature': _round_number(summary.get('max_pot_temp'), 2),
+            'avg_temperature': _round_number(summary.get('avg_pot_temp'), 2),
+            'max_power_w': _round_number(summary.get('max_power_w'), 2),
+            'temperature_sample_count': int(summary.get('temperature_sample_count') or 0),
+            'power_event_count': int(summary.get('power_event_count') or 0),
+            'material_event_count': int(summary.get('material_event_count') or 0),
+            'risk_tags': payload.get('risk_tags') or [],
+            'available_targets_count': len(payload.get('available_targets') or []),
+            'failure_reason': payload.get('failure_reason'),
+        }
+    except HTTPException as exc:
+        return {'source': 'thermal_safety_workspace', 'available': False, 'error': exc.detail}
+    except Exception as exc:
+        return {'source': 'thermal_safety_workspace', 'available': False, 'error': str(exc)[:500]}
+
+def _compare_reconciliation(recon):
+    diffs = []
+    lifecycle = recon.get('lifecycle_page_summary') or {}
+    diagnostics = recon.get('log_package_diagnostics') or {}
+    semantics = recon.get('log_semantics_artifact') or {}
+    structured = recon.get('cloud_mysql_structured') or {}
+    jobs = ((structured.get('cook_jobs') or {}).get('rows') or [])
+    semantic_sessions = semantics.get('sessions') or []
+    if lifecycle.get('available') and lifecycle.get('lifecycle_status') != lifecycle.get('recomputed_lifecycle_status'):
+        diffs.append(_diff_item(
+            'lifecycle_status',
+            'device_log_packages.lifecycle_status',
+            lifecycle.get('lifecycle_status'),
+            'recomputed_lifecycle_status',
+            lifecycle.get('recomputed_lifecycle_status'),
+            'error',
+            '生命周期状态字段与五阶段状态重新计算结果不一致。',
+        ))
+    lifecycle_job_count = lifecycle.get('effective_job_count') or 0
+    if lifecycle_job_count and not jobs:
+        severity = 'error' if lifecycle.get('storage_status') in ('stored', 'partial_stored') else 'warning'
+        diffs.append(_diff_item(
+            'cook_jobs.count',
+            'device_log_packages.effective_job_count',
+            lifecycle_job_count,
+            'cook_jobs',
+            len(jobs),
+            severity,
+            '生命周期摘要存在作业数量，但结构化作业表没有对应行；即使当前状态未入库，页面若只读 cook_jobs 仍会看不到日志内证据。',
+        ))
+    if semantics.get('available'):
+        sem_summary = semantics.get('summary') or {}
+        comparisons = [
+            ('internal_sessions/count', sem_summary.get('session_count'), len(jobs), 'log_semantics.sessions', 'cook_jobs'),
+            ('temperature_sample_count', sem_summary.get('temperature_sample_count'), (structured.get('temperature_samples') or {}).get('count'), 'log_semantics.temperature_samples', 'cook_temperature_samples'),
+            ('power_event_count', sem_summary.get('power_event_count'), (structured.get('power_events') or {}).get('count'), 'log_semantics.power_events', 'cook_power_events'),
+            ('action_event_count', sem_summary.get('action_event_count'), (structured.get('action_events') or {}).get('count'), 'log_semantics.action_events', 'cook_action_events'),
+        ]
+        for field, left, right, left_source, right_source in comparisons:
+            if not _same_value(left, right, tolerance=0):
+                diffs.append(_diff_item(
+                    field, left_source, left, right_source, right, 'warning',
+                    '语义解析产物与结构化库数量不一致；需要确认是否已入库、是否使用不同解析器口径。',
+                ))
+        sem_max_temp = sem_summary.get('max_output_temp_c')
+        db_max_temp = (structured.get('temperature_samples') or {}).get('max_temperature')
+        if sem_max_temp is not None and db_max_temp is not None and not _same_value(sem_max_temp, db_max_temp, tolerance=1):
+            diffs.append(_diff_item(
+                'max_temperature',
+                'log_semantics.summary.thermal_summary.max_output_temp_c',
+                sem_max_temp,
+                'cook_temperature_samples.MAX(pot_temp)',
+                db_max_temp,
+                'warning',
+                '最高温度不一致，可能来自温度字段口径或入库覆盖范围不同。',
+            ))
+    if diagnostics.get('available'):
+        if diagnostics.get('internal_sessions') and not jobs:
+            diffs.append(_diff_item(
+                'internal_sessions_without_cook_jobs',
+                'log_package_diagnostics.internal_sessions',
+                diagnostics.get('internal_sessions'),
+                'cook_jobs',
+                len(jobs),
+                'warning',
+                '日志诊断能识别内部作业片段，但结构化作业表没有落行；页面若只读 MySQL 作业表会看不到。',
+            ))
+        if not _same_value(diagnostics.get('internal_sessions'), lifecycle.get('effective_job_count'), tolerance=0):
+            diffs.append(_diff_item(
+                'internal_session_count/job_count',
+                'log_package_diagnostics.internal_sessions',
+                diagnostics.get('internal_sessions'),
+                'device_log_packages.effective_job_count',
+                lifecycle.get('effective_job_count'),
+                'info',
+                '诊断缓存与生命周期摘要的作业数量不同，可能来自缓存版本或刷新时机。',
+            ))
+    duplicates = structured.get('duplicate_job_groups') or []
+    if duplicates:
+        diffs.append(_diff_item(
+            'duplicate_cook_jobs',
+            'cook_jobs duplicate groups',
+            len(duplicates),
+            'expected',
+            0,
+            'error',
+            '同一日志包存在重复结构化作业，统计可能翻倍。',
+        ))
+    cache_checks = recon.get('cache_pollution_checks') or {}
+    if cache_checks.get('cook_temperature_cache_version_mismatch'):
+        diffs.append(_diff_item(
+            'cook_temperature_cache_version',
+            'disk_cache',
+            cache_checks.get('cook_temperature_cache_version'),
+            'runtime',
+            COOK_TEMPERATURE_CACHE_VERSION,
+            'warning',
+            '服务端磁盘缓存版本与当前解析版本不同，应刷新缓存后再判断。',
+        ))
+    return diffs
+
+def _build_cache_pollution_checks(sn, file_id, lifecycle):
+    diag_path = log_package_diagnostics_cache_path(file_id)
+    cook_path = cook_temperature_cache_path(sn, file_id)
+    cook_cache_version = None
+    if cook_path.exists():
+        try:
+            wrapper = json.loads(cook_path.read_text(encoding='utf-8'))
+            cook_cache_version = wrapper.get('version')
+        except Exception:
+            cook_cache_version = 'unreadable'
+    return {
+        'browser_cache': {
+            'observable_from_server': False,
+            'risk': '浏览器本地缓存无法由服务端直接判断；用户侧异常时应强刷或清本地缓存后复测。',
+        },
+        'server_diagnostics_cache': {
+            'path': str(diag_path),
+            'exists': diag_path.exists(),
+            'mtime': _normal_time(datetime.fromtimestamp(diag_path.stat().st_mtime)) if diag_path.exists() else None,
+        },
+        'cook_temperature_disk_cache': {
+            'path': str(cook_path),
+            'exists': cook_path.exists(),
+            'mtime': _normal_time(datetime.fromtimestamp(cook_path.stat().st_mtime)) if cook_path.exists() else None,
+            'version': cook_cache_version,
+        },
+        'cook_temperature_cache_version': cook_cache_version,
+        'cook_temperature_cache_version_mismatch': bool(
+            cook_cache_version not in (None, COOK_TEMPERATURE_CACHE_VERSION)
+        ),
+        'structured_parser_version': lifecycle.get('parse_version'),
+        'runtime_cook_temperature_parser_version': COOK_TEMPERATURE_CACHE_VERSION,
+    }
+
+def _upsert_integrity_checks(sn, file_id, lifecycle, structured):
+    stage_regressions = []
+    if lifecycle.get('unzip_status') == 'unzipped' and lifecycle.get('download_status') not in ('downloaded',):
+        stage_regressions.append('unzipped_without_downloaded')
+    if lifecycle.get('parse_status') in ('parsed', 'partial_success') and lifecycle.get('unzip_status') != 'unzipped':
+        stage_regressions.append('parsed_without_unzipped')
+    if lifecycle.get('storage_status') in ('stored', 'partial_stored') and lifecycle.get('parse_status') not in ('parsed', 'partial_success'):
+        stage_regressions.append('stored_without_successful_parse')
+    if lifecycle.get('parse_status') == 'queued' and lifecycle.get('storage_status') in ('stored', 'partial_stored'):
+        stage_regressions.append('queued_over_existing_storage')
+    return {
+        'source': 'cloud_mysql_structured_db',
+        'stage_regressions': stage_regressions,
+        'duplicate_job_groups': structured.get('duplicate_job_groups') or [],
+        'refresh_index_should_preserve_stages': True,
+        'known_guardrails': [
+            'upsert_log_package_index keeps local stage fields when any local stage has progressed',
+            'missing_only background tasks should not downgrade stored or partial_stored packages',
+        ],
+    }
+
+def _write_reconciliation_reports(recon):
+    LOG_RECONCILIATION_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    file_id = int(recon.get('file_id'))
+    json_path = LOG_RECONCILIATION_OUTPUT_DIR / f'log_reconciliation_{file_id}.json'
+    md_path = LOG_RECONCILIATION_OUTPUT_DIR / f'log_reconciliation_{file_id}.md'
+    json_path.write_text(json.dumps(recon, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
+    lines = [
+        f"# 日志数据对账报告 {file_id}",
+        "",
+        f"- SN: `{recon.get('sn')}`",
+        f"- 文件名: `{recon.get('file_name')}`",
+        f"- 生成时间: {recon.get('generated_at')}",
+        f"- 解析版本: cook_temperature={COOK_TEMPERATURE_CACHE_VERSION}, log_semantics={(recon.get('log_semantics_artifact') or {}).get('parser_version')}",
+        "",
+        "## 数据来源",
+        "",
+    ]
+    for item in recon.get('data_sources') or []:
+        lines.append(f"- `{item['name']}`: {item['description']}")
+    lines.extend(["", "## 关键计数", ""])
+    lifecycle = recon.get('lifecycle_page_summary') or {}
+    diag = recon.get('log_package_diagnostics') or {}
+    sem = (recon.get('log_semantics_artifact') or {}).get('summary') or {}
+    structured = recon.get('cloud_mysql_structured') or {}
+    lines.extend([
+        f"- 生命周期状态: {lifecycle.get('lifecycle_status')} / UI: {lifecycle.get('ui_status')}",
+        f"- 诊断内部作业: {diag.get('internal_sessions')}；诊断最高温: {diag.get('max_temperature')}；诊断最高功率 W: {diag.get('max_power_w')}",
+        f"- log_semantics sessions: {sem.get('session_count')}；temperature: {sem.get('temperature_sample_count')}；power: {sem.get('power_event_count')}；action: {sem.get('action_event_count')}",
+        f"- MySQL cook_jobs: {(structured.get('cook_jobs') or {}).get('count')}；temperature: {(structured.get('temperature_samples') or {}).get('count')}；power: {(structured.get('power_events') or {}).get('count')}；action: {(structured.get('action_events') or {}).get('count')}",
+    ])
+    lines.extend(["", "## 差异列表", ""])
+    diffs = recon.get('differences') or []
+    if not diffs:
+        lines.append("- 未发现确定性差异。")
+    else:
+        for diff in diffs:
+            lines.append(
+                f"- [{diff.get('severity')}] `{diff.get('field')}`: "
+                f"{diff.get('left_source')}={diff.get('left_value')} vs "
+                f"{diff.get('right_source')}={diff.get('right_value')}。{diff.get('reason')}"
+            )
+    lines.extend(["", "## 根因判断", ""])
+    for item in recon.get('root_cause_hypotheses') or []:
+        lines.append(f"- {item}")
+    lines.extend(["", "## 推荐修复", ""])
+    for item in recon.get('recommended_fixes') or []:
+        lines.append(f"- {item}")
+    lines.append("")
+    md_path.write_text("\n".join(lines), encoding='utf-8')
+    return {'json': str(json_path), 'markdown': str(md_path)}
+
+def build_log_reconciliation(file_id, write_report=True, refresh=False):
+    if not ensure_analytics_db():
+        raise HTTPException(status_code=503, detail='本地结构化库尚未就绪，无法对账。')
+    file_row, local_package = _package_source_row_for_reconciliation(file_id)
+    if not file_row:
+        raise HTTPException(status_code=404, detail='未找到日志包索引，无法对账。')
+    sn = file_row.get('sn') or local_package.get('sn')
+    if not sn:
+        raise HTTPException(status_code=404, detail='日志包缺少 SN，无法对账。')
+    lifecycle_row = fetch_one("SELECT * FROM device_log_packages WHERE sn=%s AND source_file_id=%s", (sn, int(file_id))) or local_package
+    lifecycle = _summarize_lifecycle_row(lifecycle_row)
+    diagnostics = None if refresh else read_cached_log_package_diagnostics(file_id)
+    diagnostics_source = 'server_cache'
+    if not diagnostics:
+        diagnostics = build_log_package_diagnostics(file_row)
+        save_cached_log_package_diagnostics(file_id, diagnostics)
+        diagnostics['cache'] = {'hit': False, 'source': 'realtime_parse'}
+        diagnostics_source = 'realtime_parse'
+    else:
+        diagnostics.setdefault('cache', {'hit': True, 'source': 'server_cache'})
+    diag_summary = _summarize_diagnostics(diagnostics)
+    diag_summary['cache_source'] = diagnostics_source
+    semantics = _build_semantic_artifact(file_row, force_refresh=refresh)
+    structured = _build_structured_reconciliation(sn, file_id)
+    thermal = _summarize_thermal_workspace(sn, file_id)
+    cache_checks = _build_cache_pollution_checks(sn, file_id, lifecycle)
+    upsert_checks = _upsert_integrity_checks(sn, file_id, lifecycle, structured)
+    recon = {
+        'reconciliation_version': 1,
+        'generated_at': datetime.now().isoformat(sep=' ', timespec='seconds'),
+        'file_id': int(file_id),
+        'sn': sn,
+        'file_name': file_row.get('file_name'),
+        'parser_versions': {
+            'cook_temperature': COOK_TEMPERATURE_CACHE_VERSION,
+            'log_package_diagnostics': LOG_PACKAGE_DIAGNOSTICS_VERSION,
+            'log_semantics': semantics.get('parser_version'),
+            'structured_package_parse_version': lifecycle.get('parse_version'),
+        },
+        'data_sources': [
+            {'name': 'raw_log_package', 'description': '原始 machine_ftp ZIP 与解压后的日志文件，按 file_id 定位。'},
+            {'name': 'log_semantics_artifact', 'description': 'deploy/backend/log_semantics 解析并导出的 integration_payload。'},
+            {'name': 'integration_payload', 'description': 'log_semantics/exporters.py 生成的跨表入库候选数据。'},
+            {'name': 'cloud_mysql_structured_db', 'description': '云端 MySQL 的 device_log_packages、cook_jobs、cook_temperature_samples、cook_power_events、cook_action_events。'},
+            {'name': 'lifecycle_center', 'description': '日志生命周期中心读取 device_log_packages 五阶段状态和摘要字段。'},
+            {'name': 'job_list', 'description': '作业列表主要读取 cook_jobs 与事件表聚合。'},
+            {'name': 'thermal_safety_workspace', 'description': '作业热安全分析优先读取结构化库，失败时回退日志内部作业片段。'},
+            {'name': 'server_cache', 'description': '服务端磁盘缓存，包括 log_package_diagnostics 与 cook_temperature 缓存。'},
+            {'name': 'browser_cache', 'description': '浏览器本地缓存，服务端不可直接读取，需要用户侧清缓存或强刷验证。'},
+        ],
+        'raw_log_package': {
+            'source': 'machine_ftp',
+            'file_id': int(file_id),
+            'sn': sn,
+            'file_name': file_row.get('file_name'),
+            'file_length': file_row.get('file_length'),
+            'create_time': _normal_time(file_row.get('create_time')),
+            'update_time': _normal_time(file_row.get('update_time')),
+            'cos_deleted': bool(file_row.get('cos_deleted')),
+            'has_cos_url': bool(file_row.get('url')),
+        },
+        'lifecycle_page_summary': lifecycle,
+        'log_package_diagnostics': diag_summary,
+        'log_semantics_artifact': semantics,
+        'integration_payload_summary': {
+            'source': 'log_semantics_artifact.integration_payload',
+            'available': semantics.get('available'),
+            'path': semantics.get('integration_payload_path'),
+            'session_count': (semantics.get('summary') or {}).get('session_count'),
+            'temperature_sample_count': (semantics.get('summary') or {}).get('temperature_sample_count'),
+            'power_event_count': (semantics.get('summary') or {}).get('power_event_count'),
+            'action_event_count': (semantics.get('summary') or {}).get('action_event_count'),
+        },
+        'cloud_mysql_structured': structured,
+        'job_list_summary': {
+            'source': 'cloud_mysql_structured_db.cook_jobs',
+            'count': (structured.get('cook_jobs') or {}).get('count'),
+            'first_time': (structured.get('cook_jobs') or {}).get('first_time'),
+            'last_time': (structured.get('cook_jobs') or {}).get('last_time'),
+        },
+        'thermal_safety_page_summary': thermal,
+        'cache_pollution_checks': cache_checks,
+        'upsert_integrity_checks': upsert_checks,
+        'export_summary': {
+            'source': 'generated_reconciliation_export',
+            'integration_payload_path': semantics.get('integration_payload_path'),
+            'report_json_path': None,
+            'report_markdown_path': None,
+        },
+    }
+    recon['differences'] = _compare_reconciliation(recon)
+    root_causes = []
+    fixes = []
+    if any(d.get('field') in ('internal_sessions_without_cook_jobs', 'cook_jobs.count') for d in recon['differences']):
+        root_causes.append('日志生命周期/诊断层保存了日志内部作业证据，但 cook_jobs 结构化明细缺失或未落行，导致只读作业表的页面看不到。')
+        fixes.append('明确 partial_stored 的消费者口径：要么写入 log_internal_sessions/cook_jobs，要么页面读取 diagnostics/internal_sessions。')
+    if any(d.get('field') == 'internal_sessions/count' for d in recon['differences']):
+        root_causes.append('log_semantics 与现有生命周期诊断使用不同解析器，session 切分和事件计数天然可能不一致。')
+        fixes.append('后续应把生命周期中心逐步切到 log_semantics integration_payload，或在文档中声明双解析器口径差异。')
+    if upsert_checks.get('stage_regressions'):
+        root_causes.append(f"五阶段状态存在可疑回退：{', '.join(upsert_checks.get('stage_regressions'))}。")
+        fixes.append('后台补齐和自动解析应跳过 stored/partial_stored，避免把已有成果重新排队。')
+    if not root_causes:
+        root_causes.append('未发现确定性状态覆盖或入库翻倍；若页面仍不一致，优先检查浏览器本地缓存和前端字段映射。')
+    if not fixes:
+        fixes.append('保留本报告作为血缘基线；下一轮针对具体差异字段决定是否统一解析口径。')
+    recon['root_cause_hypotheses'] = root_causes
+    recon['recommended_fixes'] = fixes
+    if write_report:
+        paths = _write_reconciliation_reports(recon)
+        recon['export_summary']['report_json_path'] = paths['json']
+        recon['export_summary']['report_markdown_path'] = paths['markdown']
+    return recon
 
 def build_device_risk_overview(sn):
     report = get_cached_report(sn)
@@ -9322,6 +10097,34 @@ def log_package_lineage(file_id: int, request: Request, authorization: str = Hea
     log_event(username, 'log_package_lineage', request, sn=package.get('sn'), detail={'file_id': file_id})
     return payload
 
+@app.get("/api/debug/log-reconciliation/{file_id}")
+def log_package_reconciliation(
+    file_id: int,
+    request: Request,
+    refresh: int = Query(0),
+    write_report: int = Query(1),
+    authorization: str = Header(None),
+):
+    username = require_admin(authorization=authorization)
+    payload = build_log_reconciliation(
+        file_id,
+        write_report=bool(write_report),
+        refresh=bool(refresh),
+    )
+    log_event(
+        username,
+        'log_package_reconciliation',
+        request,
+        sn=payload.get('sn'),
+        detail={
+            'file_id': file_id,
+            'difference_count': len(payload.get('differences') or []),
+            'write_report': bool(write_report),
+            'refresh': bool(refresh),
+        },
+    )
+    return payload
+
 @app.get("/api/temperature-calibrations/{sn}")
 def temperature_calibrations(
     sn: str,
@@ -10378,7 +11181,7 @@ def auto_parse_cycle():
         FROM device_log_packages p
         JOIN watched_devices w ON w.sn = p.sn AND w.status = 'active'
         WHERE p.parse_status = 'queued'
-          AND p.storage_status != 'stored'
+          AND p.storage_status NOT IN ('stored','partial_stored')
           AND p.remote_status = 'available'
           AND p.download_status IN ('not_started','remote_available','queued','downloaded','download_failed')
           AND COALESCE(p.file_size_mb, 0) > 0

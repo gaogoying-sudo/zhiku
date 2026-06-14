@@ -12,6 +12,17 @@
 - 远端日志索引刷新只更新远端元数据，不覆盖已经下载、解压、解析或入库的本地阶段状态。
 - 状态、API、保留策略和排查口径见 `docs/LOG_LIFECYCLE_CENTER.md`。
 
+## 2026-06-14 LOG-RECON-001 日志数据对账
+
+- 新增日志包血缘对账能力，用于排查“生命周期中心、作业列表、热安全分析、导出结果数据对不上”的具体层级。
+- Admin API：`GET /api/debug/log-reconciliation/{file_id}`。
+- 本地/云端脚本：`python deploy/backend/scripts/reconcile_log_package.py --file-id <file_id>`。
+- 对账范围覆盖原始 ZIP/解压文件、`log_semantics` 语义产物、`integration_payload`、云端 MySQL 结构化表、生命周期摘要、作业列表摘要、热安全分析摘要、服务端缓存和报告导出。
+- 输出文件：`output/log_reconciliation_<file_id>.json` 和 `output/log_reconciliation_<file_id>.md`。
+- 对账报告会明确标注每个字段来源，列出 session、菜谱、时间、温度、功率、样本数、风险标签、parser_version、source_file_id 等差异。
+- 本轮修复状态漂移保护：`partial_stored` 现在不会被 missing-only 后台补齐任务或自动解析 worker 重新当作未完成排队，结构化读取路径也允许读取 `partial_stored` 中已落库的作业。
+- 仍需注意：`log_semantics` 与旧生命周期内部诊断当前是两套解析器，session 切分和计数可能存在口径差异；报告会如实暴露，不应直接改文案掩盖。
+
 更新时间：2026-06-14 CST
 用途：给本项目后续不同对话框、不同 Codex 会话快速同频。新会话请先阅读本文件，再按需阅读 `handover/` 和具体代码。
 
