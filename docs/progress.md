@@ -1,5 +1,33 @@
 # 智库 Agent 进度日志
 
+## 2026-06-14
+
+### 菜谱安全清洗底座与四条核心规则
+- 目标：把 `/Users/kaf/Documents/菜谱原始数据-纯净版.xlsx` 清洗入本地结构化库，形成可筛选、可导出的菜谱安全候选库。
+- 本次修改：
+  - 新增 `deploy/backend/recipe_safety.py`，负责解析 Excel、归一化菜谱步骤/配料、执行规则命中、生成清洗 Excel。
+  - 新增 `deploy/backend/scripts/import_recipe_safety_excel.py`，支持命令行导入和生成清洗结果。
+  - 后端新增菜谱安全表：`recipe_import_batches`、`recipe_safety_base`、`recipe_safety_steps`、`recipe_safety_ingredients`、`recipe_safety_rules`、`recipe_safety_hits`、`recipe_safety_summary`。
+  - 新增 API：批次、汇总、详情、规则、规则开关、导入、导出。
+  - 前端新增“治理工具 / 菜谱安全清洗”页面，支持按批次、风险等级、规则、关键词、生产次数、功率和待复核筛选，并支持详情与导出。
+  - 新增四条用户补充规则：`R011` 润锅后未投油高功率、`R012` 投油后未投食材高功率、`R013` 全程 10kW 以上、`R014` 300℃ 高温占比超 50%。
+- 本地验证：
+  - `make check` 通过。
+  - 本地解析源 Excel：27968 道菜、433026 条步骤、344038 条配料、37615 条规则命中。
+  - 风险候选 12124 道，高风险 9386 道，中风险 1184 道，低风险 1554 道。
+  - 新规则命中：`R011=410`、`R012=2873`、`R013=4968`、`R014=0`。`R014` 为 0 的原因是当前源 Excel 的 `温度曲线JSON` 基本为空。
+  - 已生成本地清洗文件：`output/recipe_safety_cleaned_validation.xlsx`。
+- 部署注意：
+  - 菜谱安全清洗导入会解析约 35MB Excel 并写入 80 万级结构化明细，API/MySQL 容器内存限制已调整为 1024MB，避免导入时 OOM。
+- 云端结果：
+  - 已部署到 `http://82.156.187.35:8085`，批次 `recipe_safety_20260614` 入库成功，`batch_id=1`。
+  - 云端结构化行数：`recipe_safety_base=27968`、`recipe_safety_steps=433026`、`recipe_safety_ingredients=344038`、`recipe_safety_hits=37615`、`recipe_safety_summary=27968`。
+  - 完整清洗导出文件位于云端 `/app/cache/recipe_safety_cleaned_20260614.xlsx`，无筛选导出会优先返回完整清洗包。
+- 说明：
+  - 规则结果只作为候选筛查和人工复核入口，不作为确定事故结论。
+  - 原始 Excel 和清洗输出不提交 Git。
+- 当前锁定模块：菜谱安全清洗 / 云端导入部署。
+
 ## 2026-06-11
 
 ### 日志证据基础层与详情页

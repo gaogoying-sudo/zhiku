@@ -50,6 +50,12 @@
         .resource-chip.danger-chip { background: #fff1f2; color: #b42318; border-color: #fecdd3; }
         .resource-chip.warning-chip { background: #fff7ed; color: #b45309; border-color: #fed7aa; }
         .resource-chip.safe-chip { background: #f0fdf4; color: #15803d; border-color: #bbf7d0; }
+        .resource-chip.active { background: #e8f2ff; color: var(--brand); border-color: #9cc7ff; font-weight: 600; }
+        .chip-toggle { min-height: 28px; display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px; border: 1px solid #dbe4f0; border-radius: 999px; color: #475569; background: #fff; }
+        .chip-toggle.active { border-color: #9cc7ff; background: #e8f2ff; color: var(--brand); font-weight: 600; }
+        .modal-mask { position: fixed; inset: 0; z-index: 1050; background: rgba(15, 23, 42, .38); display: flex; align-items: center; justify-content: center; padding: 24px; }
+        .modal-panel { width: min(760px, 96vw); max-height: 88vh; overflow: auto; background: #fff; border-radius: 4px; border: 1px solid var(--line); box-shadow: 0 20px 60px rgba(15,23,42,.24); padding: 18px; }
+        .modal-panel.modal-wide { width: min(1180px, 96vw); }
         .recipe-row { cursor: pointer; }
         .recipe-row:hover td { background: #f1f7ff; }
         .detail-panel { background: #fbfdff; border-left: 3px solid var(--brand); }
@@ -610,6 +616,176 @@
 	                    <div v-if="!safetyDashboard.alerts.items.length" class="text-center py-5 text-muted">暂无匹配告警。</div>
 	                </template>
 	                <div v-if="!safetyDashboard.alerts && !safetyDashboard.alertsLoading && !safetyDashboard.alertsError" class="text-center py-5 text-muted">暂无告警数据。请先运行安全扫描。</div>
+	            </div>
+
+	            <div class="content-wrap" v-if="activeTab === 'recipeSafety'">
+	                <div class="card mb-3">
+	                    <div class="card-header d-flex justify-content-between align-items-center">
+	                        <span>菜谱安全清洗</span>
+	                        <div class="d-flex gap-2">
+	                            <button class="btn btn-sm btn-outline-secondary" @click="loadRecipeSafetyBatches" :disabled="recipeSafety.loading">刷新批次</button>
+	                            <button class="btn btn-sm btn-outline-success" @click="exportRecipeSafety" :disabled="recipeSafety.exporting || !recipeSafety.result">导出筛选结果</button>
+	                        </div>
+	                    </div>
+	                    <div class="card-body">
+	                        <div class="row g-3 align-items-end">
+	                            <div class="col-xl-2 col-md-4">
+	                                <label class="filter-label">导入批次</label>
+	                                <select class="form-select form-select-sm" v-model="recipeSafety.filters.batchId" @change="loadRecipeSafetySummary(0)">
+	                                    <option value="">最新批次</option>
+	                                    <option v-for="batch in recipeSafety.batches" :key="batch.id" :value="batch.id">{{ batch.batch_code || batch.id }}</option>
+	                                </select>
+	                            </div>
+	                            <div class="col-xl-2 col-md-4">
+	                                <label class="filter-label">风险等级</label>
+	                                <select class="form-select form-select-sm" v-model="recipeSafety.filters.riskLevel" @change="loadRecipeSafetySummary(0)">
+	                                    <option value="">全部</option>
+	                                    <option value="高风险">高风险</option>
+	                                    <option value="中风险">中风险</option>
+	                                    <option value="低风险">低风险</option>
+	                                    <option value="无明显候选">无明显候选</option>
+	                                </select>
+	                            </div>
+	                            <div class="col-xl-3 col-md-4">
+	                                <label class="filter-label">命中规则</label>
+	                                <select class="form-select form-select-sm" v-model="recipeSafety.filters.ruleCode" @change="loadRecipeSafetySummary(0)">
+	                                    <option value="">全部规则</option>
+	                                    <option v-for="rule in recipeSafety.rules" :key="rule.rule_code" :value="rule.rule_code">{{ rule.rule_code }} · {{ rule.rule_name }}</option>
+	                                </select>
+	                            </div>
+	                            <div class="col-xl-3 col-md-6">
+	                                <label class="filter-label">关键词</label>
+	                                <input class="form-control form-control-sm" v-model="recipeSafety.filters.keyword" placeholder="菜谱ID/名称/分类" @keyup.enter="loadRecipeSafetySummary(0)">
+	                            </div>
+	                            <div class="col-xl-2 col-md-3">
+	                                <label class="filter-label">最小生产次数</label>
+	                                <input type="number" min="0" class="form-control form-control-sm" v-model.number="recipeSafety.filters.minProductionCount" @keyup.enter="loadRecipeSafetySummary(0)">
+	                            </div>
+	                            <div class="col-xl-2 col-md-3">
+	                                <label class="filter-label">最小功率 W</label>
+	                                <input type="number" min="0" class="form-control form-control-sm" v-model.number="recipeSafety.filters.minPowerW" @keyup.enter="loadRecipeSafetySummary(0)">
+	                            </div>
+	                            <div class="col-xl-3 col-md-6 d-flex gap-2 align-items-center">
+	                                <label class="chip-toggle" :class="{active: recipeSafety.filters.onlyReview}">
+	                                    <input type="checkbox" v-model="recipeSafety.filters.onlyReview" @change="loadRecipeSafetySummary(0)"> 只看待复核
+	                                </label>
+	                                <button class="btn btn-sm btn-primary" @click="loadRecipeSafetySummary(0)" :disabled="recipeSafety.loading">查询</button>
+	                                <button class="btn btn-sm btn-outline-secondary" @click="resetRecipeSafetyFilters">清筛选</button>
+	                            </div>
+	                        </div>
+	                        <div class="history-meta mt-3">
+	                            这页读取本地入库的菜谱安全清洗结果。规则是候选筛查，不直接等同事故结论；原始 Excel 不会提交到 Git。
+	                        </div>
+	                        <div v-if="recipeSafety.error" class="alert alert-danger mt-2">{{ recipeSafety.error }}</div>
+	                        <div v-if="recipeSafety.loading" class="text-muted mt-2">正在读取菜谱安全清洗结果...</div>
+	                    </div>
+	                </div>
+
+	                <div class="row g-3 mb-3">
+	                    <div class="col-lg-2 col-md-4"><div class="admin-metric"><div class="admin-metric-value">{{ recipeSafetyOverview.total_recipes || 0 }}</div><div class="admin-metric-label">总菜谱</div></div></div>
+	                    <div class="col-lg-2 col-md-4"><div class="admin-metric clickable-metric" @click="recipeSafetyFilterByLevel('高风险')"><div class="admin-metric-value text-danger">{{ recipeSafetyOverview.high_risk || 0 }}</div><div class="admin-metric-label">高风险候选</div></div></div>
+	                    <div class="col-lg-2 col-md-4"><div class="admin-metric clickable-metric" @click="recipeSafetyFilterByRule('R011')"><div class="admin-metric-value">{{ recipeSafetyOverview.after_moisten_no_oil_high_power || 0 }}</div><div class="admin-metric-label">润锅后未投油高功率</div></div></div>
+	                    <div class="col-lg-2 col-md-4"><div class="admin-metric clickable-metric" @click="recipeSafetyFilterByRule('R012')"><div class="admin-metric-value">{{ recipeSafetyOverview.after_oil_no_food_high_power || 0 }}</div><div class="admin-metric-label">投油后未投食材高功率</div></div></div>
+	                    <div class="col-lg-2 col-md-4"><div class="admin-metric clickable-metric" @click="recipeSafetyFilterByRule('R013')"><div class="admin-metric-value">{{ recipeSafetyOverview.all_10kw || 0 }}</div><div class="admin-metric-label">全程 10kW 以上</div></div></div>
+	                    <div class="col-lg-2 col-md-4"><div class="admin-metric clickable-metric" @click="recipeSafetyFilterByRule('R014')"><div class="admin-metric-value">{{ recipeSafetyOverview.hot_300_ratio || 0 }}</div><div class="admin-metric-label">300℃ 占比超 50%</div></div></div>
+	                </div>
+
+	                <div class="card mb-3">
+	                    <div class="card-header">规则口径</div>
+	                    <div class="card-body">
+	                        <div class="d-flex flex-wrap gap-2">
+	                            <button v-for="rule in recipeSafety.rules" :key="rule.rule_code" class="resource-chip" :class="{active: recipeSafety.filters.ruleCode === rule.rule_code}" @click="recipeSafetyFilterByRule(rule.rule_code)">
+	                                {{ rule.rule_code }} {{ rule.rule_name }}
+	                            </button>
+	                        </div>
+	                        <div class="history-meta mt-2">新增四条核心规则：润锅结束后未投油高功率、投油后未投食材高功率、全程 10kW 以上、300℃ 高温占比。</div>
+	                    </div>
+	                </div>
+
+	                <div class="card">
+	                    <div class="card-header d-flex justify-content-between align-items-center">
+	                        <span>风险菜谱清洗结果</span>
+	                        <span class="history-meta">当前显示 {{ (recipeSafety.result?.items || []).length }} / {{ recipeSafety.result?.total || 0 }} 条</span>
+	                    </div>
+	                    <div class="table-responsive">
+	                        <table class="table table-sm table-striped mb-0">
+	                            <thead>
+	                                <tr>
+	                                    <th>菜谱</th>
+	                                    <th>分类</th>
+	                                    <th>生产/设备/客户</th>
+	                                    <th>最大功率</th>
+	                                    <th>首次投料</th>
+	                                    <th>风险分</th>
+	                                    <th>等级</th>
+	                                    <th>命中规则</th>
+	                                    <th>复核</th>
+	                                    <th>操作</th>
+	                                </tr>
+	                            </thead>
+	                            <tbody>
+	                                <tr v-for="item in recipeSafety.result?.items || []" :key="item.recipe_id" class="recipe-row" @click="loadRecipeSafetyDetail(item.recipe_id)">
+	                                    <td><strong>{{ item.recipe_name }}</strong><div class="history-meta">ID {{ item.recipe_id }}</div></td>
+	                                    <td>{{ item.category || '-' }}</td>
+	                                    <td>{{ item.production_count || 0 }} / {{ item.device_count || 0 }} / {{ item.customer_count || 0 }}</td>
+	                                    <td>{{ item.max_power_w ? `${item.max_power_w}W` : '-' }}</td>
+	                                    <td>{{ item.first_feed_time ?? '-' }}s</td>
+	                                    <td>{{ item.risk_score }}</td>
+	                                    <td><span class="resource-chip" :class="recipeSafetyRiskClass(item.risk_level)">{{ item.risk_level }}</span></td>
+	                                    <td><span class="history-meta">{{ (item.hit_rule_codes || []).join('、') || '-' }}</span></td>
+	                                    <td>{{ item.review_status || '-' }}</td>
+	                                    <td><button class="btn btn-sm btn-outline-primary" @click.stop="loadRecipeSafetyDetail(item.recipe_id)">详情</button></td>
+	                                </tr>
+	                                <tr v-if="!(recipeSafety.result?.items || []).length && !recipeSafety.loading"><td colspan="10" class="text-muted">暂无匹配结果。请先导入菜谱清洗批次，或调整筛选条件。</td></tr>
+	                            </tbody>
+	                        </table>
+	                    </div>
+	                    <div class="card-body d-flex justify-content-between align-items-center">
+	                        <div class="history-meta">批次：{{ recipeSafety.result?.batch_id || recipeSafety.latestBatchId || '-' }}</div>
+	                        <div class="d-flex gap-2">
+	                            <button class="btn btn-sm btn-outline-secondary" @click="loadRecipeSafetySummary(Math.max(0, (recipeSafety.result?.offset || 0) - (recipeSafety.result?.limit || 200)))" :disabled="recipeSafety.loading || !(recipeSafety.result?.offset)">上一页</button>
+	                            <button class="btn btn-sm btn-outline-secondary" @click="loadRecipeSafetySummary((recipeSafety.result?.offset || 0) + (recipeSafety.result?.limit || 200))" :disabled="recipeSafety.loading || !recipeSafety.result || ((recipeSafety.result.offset || 0) + (recipeSafety.result.limit || 200) >= recipeSafety.result.total)">下一页</button>
+	                        </div>
+	                    </div>
+	                </div>
+
+	                <div v-if="recipeSafety.detail" class="modal-mask" @click.self="recipeSafety.detail = null">
+	                    <div class="modal-panel modal-wide">
+	                        <div class="d-flex justify-content-between align-items-start mb-3">
+	                            <div>
+	                                <h5 class="mb-1">{{ recipeSafety.detail.base.recipe_name }}</h5>
+	                                <div class="history-meta">ID {{ recipeSafety.detail.base.recipe_id }} · {{ recipeSafety.detail.base.category || '-' }} · 批次 {{ recipeSafety.detail.batch_id }}</div>
+	                            </div>
+	                            <button class="btn btn-sm btn-outline-secondary" @click="recipeSafety.detail = null">关闭</button>
+	                        </div>
+	                        <div class="row g-3 mb-3">
+	                            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ recipeSafety.detail.summary.risk_score || 0 }}</div><div class="admin-metric-label">风险分</div></div></div>
+	                            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ recipeSafety.detail.summary.max_power_w || '-' }}</div><div class="admin-metric-label">最大功率 W</div></div></div>
+	                            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ recipeSafety.detail.steps.length }}</div><div class="admin-metric-label">步骤数</div></div></div>
+	                            <div class="col-md-3"><div class="admin-metric"><div class="admin-metric-value">{{ recipeSafety.detail.ingredients.length }}</div><div class="admin-metric-label">配料数</div></div></div>
+	                        </div>
+	                        <div class="row g-3">
+	                            <div class="col-lg-5">
+	                                <div class="fw-bold mb-2">规则命中证据</div>
+	                                <div class="detail-scroll" style="max-height:360px;">
+	                                    <table class="table table-sm table-striped">
+	                                        <thead><tr><th>规则</th><th>时间</th><th>功率</th><th>说明</th></tr></thead>
+	                                        <tbody><tr v-for="hit in recipeSafety.detail.hits" :key="`${hit.rule_code}-${hit.evidence_time}-${hit.id}`"><td>{{ hit.rule_code }} {{ hit.rule_name }}</td><td>{{ hit.evidence_time ?? '-' }}s</td><td>{{ hit.evidence_power_w || '-' }}</td><td>{{ hit.explanation }}</td></tr></tbody>
+	                                    </table>
+	                                </div>
+	                            </div>
+	                            <div class="col-lg-7">
+	                                <div class="fw-bold mb-2">菜谱步骤</div>
+	                                <div class="detail-scroll" style="max-height:360px;">
+	                                    <table class="table table-sm table-striped">
+	                                        <thead><tr><th>序号</th><th>时间</th><th>持续</th><th>功率</th><th>动作/投料</th></tr></thead>
+	                                        <tbody><tr v-for="step in recipeSafety.detail.steps" :key="`${step.recipe_id}-${step.step_index}`"><td>{{ step.step_index }}</td><td>{{ step.step_time }}s</td><td>{{ step.inferred_duration_seconds }}s</td><td>{{ step.power_w || '-' }}</td><td class="text-break">{{ step.commands || '-' }}</td></tr></tbody>
+	                                    </table>
+	                                </div>
+	                            </div>
+	                        </div>
+	                    </div>
+	                </div>
 	            </div>
 
 	            <div class="content-wrap" v-if="activeTab === 'home'">
@@ -3860,6 +4036,28 @@
                     trends: null,
                     trendsLoading: false,
                 },
+                recipeSafety: {
+                    loading: false,
+                    exporting: false,
+                    error: '',
+                    batches: [],
+                    latestBatchId: '',
+                    overview: {},
+                    rules: [],
+                    result: null,
+                    detail: null,
+                    filters: {
+                        batchId: '',
+                        riskLevel: '',
+                        ruleCode: '',
+                        keyword: '',
+                        category: '',
+                        minProductionCount: '',
+                        minPowerW: '',
+                        onlyReview: false,
+                        limit: 200,
+                    },
+                },
                 powerEnergyUnit: 'kj',
                 powerChartHover: null,
                 cookTemperatureLoading: false,
@@ -4000,6 +4198,7 @@
 		                    { title: '治理工具', tabs: [
 		                        { id: 'versionStats', label: '版本治理', icon: 'V', desc: '上位机版本' },
 		                        { id: 'thermalKnowledge', label: '热物性库', icon: 'K', desc: '食材、比热、燃点' },
+                                { id: 'recipeSafety', label: '菜谱安全清洗', icon: 'S', desc: '规则、证据、复核' },
                                 { id: 'temperatureCalibration', label: '温度校正', icon: 'C', desc: '校准动作、时间、证据' },
 		                        { id: 'admin', label: '系统审计', icon: 'A', desc: '账号、缓存、导出', adminOnly: true },
 		                    ]},
@@ -4122,6 +4321,7 @@
 		                    recipeSearch: '菜谱检索',
 		                    versionStats: '版本治理',
 		                    thermalKnowledge: '热物性库',
+                            recipeSafety: '菜谱安全清洗',
 		                    logAnalysis: '日志结论',
 		                    cookTemperature: '温度诊断',
                             temperatureCalibration: '温度校正',
@@ -4141,6 +4341,7 @@
 		                if (this.activeTab === 'recipeSearch') return '按客户、设备和时间查询菜谱、配料与资源覆盖';
 		                if (this.activeTab === 'versionStats') return '查看全量设备的软件版本、升级时间和版本归类';
 		                if (this.activeTab === 'thermalKnowledge') return '维护食材分类、比热容、升温能量和燃烧参考温度，供热过程模型调用';
+                        if (this.activeTab === 'recipeSafety') return '把菜谱原始数据清洗入库，按高功率、投油、温度占比等规则筛选待复核菜谱';
 		                if (this.activeTab === 'logAnalysis') return '按日志包解析故障码、油路、温控和原始证据';
 		                if (this.activeTab === 'cookTemperature') return '对齐单次烹饪的菜谱步骤、真实动作和锅体温度';
                         if (this.activeTab === 'temperatureCalibration') return '按设备和日期范围检索自动温度校正动作及原始日志证据';
@@ -4276,6 +4477,7 @@
 		                if (this.activeTab === 'recipeSearch') return '检索会优先复用本地和服务器缓存。';
 		                if (this.activeTab === 'versionStats') return '版本治理只读设备档案和客户信息。';
 		                if (this.activeTab === 'thermalKnowledge') return '热物性库是工程底座，数值需要用实验和实测持续校准。';
+                        if (this.activeTab === 'recipeSafety') return '菜谱安全清洗是离线规则筛查，结果用于复核和排查，不替代事故结论。';
 		                if (this.activeTab === 'logAnalysis') return '先选日志包，再生成诊断证据。';
 		                if (this.activeTab === 'cookTemperature') return '温度诊断依赖日志包，缺口会提示。';
                         if (this.activeTab === 'temperatureCalibration') return '先读本地事件库，未扫描日志由后台自动补齐。';
@@ -4413,6 +4615,20 @@
                                 actions: [
                                     { id: 'thermalModel', label: '热过程分析', primary: true },
                                     { id: 'recipeSearch', label: '菜谱检索' },
+                                ],
+                            },
+                            recipeSafety: {
+                                title: '把菜谱原始数据清洗成可复核风险候选库',
+                                text: '用于从全量菜谱里筛出润锅后未投油高功率、投油后未投食材高功率、全程高功率和高温占比等候选问题。',
+                                meta: [
+                                    this.recipeSafety.result ? `${this.recipeSafety.result.total || 0} 条筛选结果` : '等待导入批次',
+                                    this.recipeSafety.latestBatchId ? `批次 ${this.recipeSafety.latestBatchId}` : '本地库优先',
+                                    '可导出复核',
+                                ],
+                                actions: [
+                                    { id: 'loadRecipeSafety', label: '刷新清洗结果', primary: true },
+                                    { id: 'thermalKnowledge', label: '热物性库' },
+                                    { id: 'safetyOverview', label: '安全总览' },
                                 ],
                             },
                             versionStats: {
@@ -4682,6 +4898,9 @@
 		                    risky: rows.filter(item => /可燃|油脂|挥发/.test(item.hazard_class || '')).length,
 		                };
 		            },
+                    recipeSafetyOverview() {
+                        return this.recipeSafety.result?.overview || this.recipeSafety.overview || {};
+                    },
             versionStatsVersionOptions() {
 	                return (this.versionStats.result?.versions || []).map(v => v.version).filter(Boolean);
 	            },
@@ -6028,7 +6247,7 @@
             runPageGuideAction(action) {
                 if (!action || !action.id) return;
                 const id = action.id;
-                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'logEvidence', 'powerDiagnosis', 'thermalModel', 'thermalKnowledge', 'versionStats', 'admin', 'emergency', 'safetyOverview', 'safetyAlerts'].includes(id)) {
+                if (['overview', 'intervals', 'recipes', 'logs', 'recipeSearch', 'logAnalysis', 'cookTemperature', 'temperatureCalibration', 'logEvidence', 'powerDiagnosis', 'thermalModel', 'thermalKnowledge', 'recipeSafety', 'versionStats', 'admin', 'emergency', 'safetyOverview', 'safetyAlerts'].includes(id)) {
                     this.setActiveTab(id);
                     return;
                 }
@@ -6053,6 +6272,12 @@
                     this.loadVersionStats(true);
                     return;
                 }
+                if (id === 'loadRecipeSafety') {
+                    this.loadRecipeSafetyBatches();
+                    this.loadRecipeSafetyRules();
+                    this.loadRecipeSafetySummary(0);
+                    return;
+                }
                 if (id === 'loadAdminStatus') {
                     this.loadAdminStatus();
                     return;
@@ -6071,6 +6296,11 @@
                 if (tabId === 'oilThermal') this.loadOilThermal();
                 if (tabId === 'versionStats' && !this.versionStats.result) this.loadVersionStats(false);
                 if (tabId === 'thermalKnowledge' && !this.thermalKnowledge.result) this.loadThermalKnowledge(0);
+                if (tabId === 'recipeSafety' && !this.recipeSafety.result) {
+                    this.loadRecipeSafetyBatches();
+                    this.loadRecipeSafetyRules();
+                    this.loadRecipeSafetySummary(0);
+                }
                 if (tabId === 'safetyOverview') this.loadSafetyOverview();
                 if (tabId === 'safetyAlerts') this.loadSafetyAlerts();
                 if (tabId === 'logAnalysis') this.prepareLogAnalysis();
@@ -6209,6 +6439,129 @@
                     this.thermalSafety.error = e.message || '热安全工作区读取失败';
                 } finally {
                     this.thermalSafety.loading = false;
+                }
+            },
+            recipeSafetyParams(offset = 0) {
+                const params = new URLSearchParams();
+                const f = this.recipeSafety.filters;
+                if (f.batchId) params.set('batch_id', String(f.batchId));
+                if (f.riskLevel) params.set('risk_level', f.riskLevel);
+                if (f.ruleCode) params.set('rule_code', f.ruleCode);
+                if (f.keyword) params.set('keyword', f.keyword);
+                if (f.category) params.set('category', f.category);
+                if (f.minProductionCount) params.set('min_production_count', String(f.minProductionCount));
+                if (f.minPowerW) params.set('min_power_w', String(f.minPowerW));
+                if (f.onlyReview) params.set('only_review', '1');
+                params.set('limit', String(f.limit || 200));
+                params.set('offset', String(Math.max(0, Number(offset || 0))));
+                return params;
+            },
+            async loadRecipeSafetyBatches() {
+                this.recipeSafety.error = '';
+                try {
+                    const res = await fetch('/api/recipe-safety/batches', { headers: this.authHeaders() });
+                    if (res.status === 401) { this.logout(); return; }
+                    const payload = await res.json().catch(() => ({}));
+                    if (!res.ok) throw new Error(payload.detail || '菜谱安全批次读取失败');
+                    this.recipeSafety.batches = payload.items || [];
+                    this.recipeSafety.latestBatchId = payload.latest_batch_id || '';
+                    this.recipeSafety.overview = payload.overview || {};
+                } catch (e) {
+                    this.recipeSafety.error = e.message || '菜谱安全批次读取失败';
+                }
+            },
+            async loadRecipeSafetyRules() {
+                try {
+                    const res = await fetch('/api/recipe-safety/rules', { headers: this.authHeaders() });
+                    if (res.status === 401) { this.logout(); return; }
+                    const payload = await res.json().catch(() => ({}));
+                    if (!res.ok) throw new Error(payload.detail || '菜谱安全规则读取失败');
+                    this.recipeSafety.rules = payload.items || [];
+                } catch (e) {
+                    this.recipeSafety.error = e.message || '菜谱安全规则读取失败';
+                }
+            },
+            async loadRecipeSafetySummary(offset = 0) {
+                this.recipeSafety.loading = true;
+                this.recipeSafety.error = '';
+                try {
+                    const res = await fetch(`/api/recipe-safety/summary?${this.recipeSafetyParams(offset).toString()}`, { headers: this.authHeaders() });
+                    if (res.status === 401) { this.logout(); return; }
+                    const payload = await res.json().catch(() => ({}));
+                    if (!res.ok) throw new Error(payload.detail || '菜谱安全清洗结果读取失败');
+                    this.recipeSafety.result = payload;
+                    if (payload.batch_id && !this.recipeSafety.filters.batchId) this.recipeSafety.latestBatchId = payload.batch_id;
+                } catch (e) {
+                    this.recipeSafety.error = e.message || '菜谱安全清洗结果读取失败';
+                } finally {
+                    this.recipeSafety.loading = false;
+                }
+            },
+            async loadRecipeSafetyDetail(recipeId) {
+                if (!recipeId) return;
+                this.recipeSafety.error = '';
+                try {
+                    const params = new URLSearchParams();
+                    const batchId = this.recipeSafety.filters.batchId || this.recipeSafety.result?.batch_id || this.recipeSafety.latestBatchId;
+                    if (batchId) params.set('batch_id', String(batchId));
+                    const res = await fetch(`/api/recipe-safety/recipes/${encodeURIComponent(recipeId)}?${params.toString()}`, { headers: this.authHeaders() });
+                    if (res.status === 401) { this.logout(); return; }
+                    const payload = await res.json().catch(() => ({}));
+                    if (!res.ok) throw new Error(payload.detail || '菜谱安全详情读取失败');
+                    this.recipeSafety.detail = payload;
+                } catch (e) {
+                    this.recipeSafety.error = e.message || '菜谱安全详情读取失败';
+                }
+            },
+            resetRecipeSafetyFilters() {
+                this.recipeSafety.filters = {
+                    batchId: '',
+                    riskLevel: '',
+                    ruleCode: '',
+                    keyword: '',
+                    category: '',
+                    minProductionCount: '',
+                    minPowerW: '',
+                    onlyReview: false,
+                    limit: 200,
+                };
+                this.loadRecipeSafetySummary(0);
+            },
+            recipeSafetyFilterByLevel(level) {
+                this.recipeSafety.filters.riskLevel = this.recipeSafety.filters.riskLevel === level ? '' : level;
+                this.loadRecipeSafetySummary(0);
+            },
+            recipeSafetyFilterByRule(ruleCode) {
+                this.recipeSafety.filters.ruleCode = this.recipeSafety.filters.ruleCode === ruleCode ? '' : ruleCode;
+                this.loadRecipeSafetySummary(0);
+            },
+            recipeSafetyRiskClass(level) {
+                if (level === '高风险') return 'danger-chip';
+                if (level === '中风险') return 'warning-chip';
+                if (level === '低风险') return 'safe-chip';
+                return '';
+            },
+            async exportRecipeSafety() {
+                this.recipeSafety.exporting = true;
+                this.recipeSafety.error = '';
+                try {
+                    const res = await fetch(`/api/recipe-safety/export?${this.recipeSafetyParams(0).toString()}`, { headers: this.authHeaders() });
+                    if (res.status === 401) { this.logout(); return; }
+                    const payload = res.ok ? null : await res.json().catch(() => ({}));
+                    if (!res.ok) throw new Error(payload.detail || '导出失败');
+                    const blob = await res.blob();
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `recipe_safety_export_${Date.now()}.xlsx`;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    URL.revokeObjectURL(url);
+                } catch (e) {
+                    this.recipeSafety.error = e.message || '导出失败';
+                } finally {
+                    this.recipeSafety.exporting = false;
                 }
             },
             async loadThermalKnowledge(offset = 0) {

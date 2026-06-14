@@ -21,10 +21,18 @@ from io import BytesIO
 from pathlib import Path
 from fastapi import FastAPI, HTTPException, Header, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+from recipe_safety import (
+    DEFAULT_RULE_CONFIG,
+    RECIPE_SAFETY_RULE_VERSION,
+    RULE_DEFS,
+    json_dumps as recipe_json_dumps,
+    parse_workbook as parse_recipe_safety_workbook,
+    write_cleaned_workbook,
+)
 
 app = FastAPI(title="Zhiku Device Dashboard API")
 
@@ -37,6 +45,7 @@ app.add_middleware(
 
 DB_CONFIG = {
     'host': os.getenv('DB_HOST', 'localhost'),
+    'port': int(os.getenv('DB_PORT', '3306')),
     'user': os.getenv('DB_USER', 'root'),
     'password': os.getenv('DB_PASS', ''),
     'database': os.getenv('DB_NAME', 'zhiku_db'),
@@ -249,6 +258,13 @@ class LogBackfillRequest(BaseModel):
 
 class LogPackageRetryRequest(BaseModel):
     stage: str = 'auto'
+    force: bool = False
+
+class RecipeSafetyImportRequest(BaseModel):
+    file_path: str
+    batch_name: str = ''
+    output_path: str = ''
+    dry_run: bool = False
     force: bool = False
 
 def parse_users():
@@ -1043,6 +1059,169 @@ def init_analytics_db():
                         UNIQUE KEY uniq_stat_date_sn(stat_date, sn),
                         INDEX idx_stat_date(stat_date),
                         INDEX idx_stat_sn(sn)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS recipe_import_batches (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        batch_code VARCHAR(128) NOT NULL,
+                        source_file_name VARCHAR(255) NOT NULL,
+                        source_file_hash CHAR(64) NOT NULL,
+                        source_sheet_name VARCHAR(128) NOT NULL,
+                        row_count INT NOT NULL DEFAULT 0,
+                        success_count INT NOT NULL DEFAULT 0,
+                        failed_count INT NOT NULL DEFAULT 0,
+                        rule_version VARCHAR(64) NOT NULL,
+                        imported_by VARCHAR(64) NULL,
+                        imported_at DATETIME NOT NULL,
+                        status VARCHAR(32) NOT NULL DEFAULT 'IMPORTED',
+                        error_message TEXT NULL,
+                        config_json TEXT NULL,
+                        output_path VARCHAR(500) NULL,
+                        created_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_recipe_batch_code(batch_code),
+                        INDEX idx_recipe_batch_hash(source_file_hash),
+                        INDEX idx_recipe_batch_time(imported_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS recipe_safety_base (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        batch_id BIGINT NOT NULL,
+                        recipe_id VARCHAR(64) NOT NULL,
+                        recipe_name VARCHAR(255) NULL,
+                        category VARCHAR(255) NULL,
+                        recipe_type VARCHAR(64) NULL,
+                        production_count INT NOT NULL DEFAULT 0,
+                        device_count INT NOT NULL DEFAULT 0,
+                        customer_count INT NOT NULL DEFAULT 0,
+                        cook_time INT NULL,
+                        cook_step_count INT NOT NULL DEFAULT 0,
+                        wash_step_count INT NOT NULL DEFAULT 0,
+                        moisten_step_count INT NOT NULL DEFAULT 0,
+                        ingredient_count INT NOT NULL DEFAULT 0,
+                        description TEXT NULL,
+                        steps_description TEXT NULL,
+                        ingredient_total_weight DECIMAL(12,3) NULL,
+                        initial_temperature DECIMAL(8,2) NULL,
+                        initial_temperature_array_json LONGTEXT NULL,
+                        cook_steps_json LONGTEXT NULL,
+                        wash_steps_json LONGTEXT NULL,
+                        moisten_steps_json LONGTEXT NULL,
+                        ingredients_json LONGTEXT NULL,
+                        detail_missing TINYINT NOT NULL DEFAULT 0,
+                        source_row_number INT NULL,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_recipe_safety_base(batch_id, recipe_id),
+                        INDEX idx_recipe_safety_base_recipe(recipe_id),
+                        INDEX idx_recipe_safety_base_category(batch_id, category)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS recipe_safety_steps (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        batch_id BIGINT NOT NULL,
+                        recipe_id VARCHAR(64) NOT NULL,
+                        recipe_name VARCHAR(255) NULL,
+                        step_index INT NOT NULL,
+                        step_time INT NULL,
+                        inferred_duration_seconds INT NULL,
+                        step_type VARCHAR(32) NULL,
+                        power_w DECIMAL(12,2) NULL,
+                        power_kw DECIMAL(10,3) NULL,
+                        speed VARCHAR(32) NULL,
+                        position VARCHAR(32) NULL,
+                        automatic VARCHAR(32) NULL,
+                        commands TEXT NULL,
+                        raw_json LONGTEXT NULL,
+                        created_at DATETIME NOT NULL,
+                        INDEX idx_recipe_safety_steps_recipe(batch_id, recipe_id),
+                        INDEX idx_recipe_safety_steps_power(batch_id, power_w)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS recipe_safety_ingredients (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        batch_id BIGINT NOT NULL,
+                        recipe_id VARCHAR(64) NOT NULL,
+                        recipe_name VARCHAR(255) NULL,
+                        ingredient_index INT NOT NULL,
+                        ingredient_name VARCHAR(255) NULL,
+                        ingredient_id VARCHAR(128) NULL,
+                        dosage DECIMAL(14,3) NULL,
+                        unit VARCHAR(32) NULL,
+                        automatic VARCHAR(32) NULL,
+                        feeding_mode VARCHAR(32) NULL,
+                        position VARCHAR(32) NULL,
+                        raw_json LONGTEXT NULL,
+                        matched_keywords VARCHAR(255) NULL,
+                        created_at DATETIME NOT NULL,
+                        INDEX idx_recipe_safety_ing_recipe(batch_id, recipe_id),
+                        INDEX idx_recipe_safety_ing_name(batch_id, ingredient_name)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS recipe_safety_rules (
+                        rule_code VARCHAR(32) PRIMARY KEY,
+                        rule_name VARCHAR(120) NOT NULL,
+                        rule_description TEXT NULL,
+                        enabled TINYINT NOT NULL DEFAULT 1,
+                        severity VARCHAR(16) NOT NULL DEFAULT '中',
+                        config_json TEXT NULL,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS recipe_safety_hits (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        batch_id BIGINT NOT NULL,
+                        recipe_id VARCHAR(64) NOT NULL,
+                        recipe_name VARCHAR(255) NULL,
+                        rule_code VARCHAR(32) NOT NULL,
+                        rule_name VARCHAR(120) NOT NULL,
+                        severity VARCHAR(16) NOT NULL,
+                        evidence_type VARCHAR(64) NULL,
+                        evidence_step_index INT NULL,
+                        evidence_time INT NULL,
+                        evidence_power_w DECIMAL(12,2) NULL,
+                        evidence_duration_seconds INT NULL,
+                        evidence_commands TEXT NULL,
+                        evidence_json LONGTEXT NULL,
+                        explanation TEXT NULL,
+                        created_at DATETIME NOT NULL,
+                        INDEX idx_recipe_safety_hits_recipe(batch_id, recipe_id),
+                        INDEX idx_recipe_safety_hits_rule(batch_id, rule_code)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS recipe_safety_summary (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        batch_id BIGINT NOT NULL,
+                        recipe_id VARCHAR(64) NOT NULL,
+                        recipe_name VARCHAR(255) NULL,
+                        category VARCHAR(255) NULL,
+                        production_count INT NOT NULL DEFAULT 0,
+                        device_count INT NOT NULL DEFAULT 0,
+                        customer_count INT NOT NULL DEFAULT 0,
+                        max_power_w DECIMAL(12,2) NULL,
+                        max_power_kw DECIMAL(10,3) NULL,
+                        first_feed_time INT NULL,
+                        first_high_power_time INT NULL,
+                        initial_temperature DECIMAL(8,2) NULL,
+                        risk_score INT NOT NULL DEFAULT 0,
+                        risk_level VARCHAR(32) NOT NULL DEFAULT '无明显候选',
+                        risk_tags_json TEXT NULL,
+                        hit_rule_codes_json TEXT NULL,
+                        review_status VARCHAR(32) NOT NULL DEFAULT '未复核',
+                        review_note TEXT NULL,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_recipe_safety_summary(batch_id, recipe_id),
+                        INDEX idx_recipe_safety_summary_level(batch_id, risk_level),
+                        INDEX idx_recipe_safety_summary_score(batch_id, risk_score),
+                        INDEX idx_recipe_safety_summary_recipe(recipe_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
             conn.commit()
@@ -9648,6 +9827,469 @@ def sync_thermal_knowledge(request: Request, recipe_limit: int = Query(20000), a
             ('FAILED', str(exc), finished, run_id),
         )
         raise HTTPException(status_code=500, detail=f"热物性库同步失败：{exc}")
+
+# ── Recipe Safety Cleaning APIs ───────────────────────────────────
+
+def latest_recipe_safety_batch_id():
+    row = fetch_one(
+        "SELECT id FROM recipe_import_batches WHERE status IN ('IMPORTED','DRY_RUN') ORDER BY imported_at DESC, id DESC LIMIT 1"
+    )
+    return int(row['id']) if row else None
+
+
+def chunked(rows, size=500):
+    for index in range(0, len(rows), size):
+        yield rows[index:index + size]
+
+
+def seed_recipe_safety_rules(cur, config=None):
+    now = datetime.now().replace(microsecond=0)
+    config = config or DEFAULT_RULE_CONFIG
+    rows = []
+    for code, (name, severity, desc) in RULE_DEFS.items():
+        rows.append((code, name, desc, 1, severity, recipe_json_dumps(config), now, now))
+    cur.executemany(
+        """
+        INSERT INTO recipe_safety_rules(rule_code, rule_name, rule_description, enabled, severity, config_json, created_at, updated_at)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+        ON DUPLICATE KEY UPDATE
+            rule_name=VALUES(rule_name),
+            rule_description=VALUES(rule_description),
+            severity=VALUES(severity),
+            config_json=VALUES(config_json),
+            updated_at=VALUES(updated_at)
+        """,
+        rows,
+    )
+
+
+def persist_recipe_safety_analysis(analysis, force=False, dry_run=False, output_path=''):
+    ensure_analytics_db()
+    batch = analysis['batch']
+    existing = fetch_one(
+        "SELECT id, batch_code, imported_at FROM recipe_import_batches WHERE source_file_hash=%s AND status='IMPORTED' ORDER BY imported_at DESC LIMIT 1",
+        (batch['source_file_hash'],),
+    )
+    if existing and not force:
+        raise ValueError(f"同一文件已导入：batch_id={existing['id']} batch_code={existing['batch_code']}，如需重导请使用 force。")
+    if dry_run:
+        return {'batch_id': None, 'dry_run': True, 'existing': existing}
+
+    now = datetime.now().replace(microsecond=0)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            seed_recipe_safety_rules(cur, batch.get('thresholds') or DEFAULT_RULE_CONFIG)
+            cur.execute(
+                """
+                INSERT INTO recipe_import_batches(
+                    batch_code, source_file_name, source_file_hash, source_sheet_name,
+                    row_count, success_count, failed_count, rule_version, imported_by,
+                    imported_at, status, error_message, config_json, output_path, created_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'IMPORTED',%s,%s,%s,%s)
+                """,
+                (
+                    batch['batch_code'], batch['source_file_name'], batch['source_file_hash'], batch['source_sheet_name'],
+                    batch['row_count'], batch['success_count'], batch['failed_count'], batch['rule_version'],
+                    batch.get('imported_by'), batch['imported_at'], batch.get('error_message', ''),
+                    recipe_json_dumps(batch.get('thresholds') or {}), output_path, now,
+                ),
+            )
+            batch_id = cur.lastrowid
+            for summary in analysis['summaries']:
+                summary['import_batch_id'] = batch_id
+
+            base_rows = []
+            for recipe in analysis['recipes']:
+                base_rows.append((
+                    batch_id, recipe['recipe_id'], recipe['recipe_name'], recipe.get('category'), recipe.get('recipe_type'),
+                    recipe.get('production_count') or 0, recipe.get('device_count') or 0, recipe.get('customer_count') or 0,
+                    recipe.get('cook_time'), recipe.get('cook_step_count') or 0, recipe.get('wash_step_count') or 0,
+                    recipe.get('moisten_step_count') or 0, recipe.get('ingredient_count') or 0, recipe.get('description'),
+                    recipe.get('steps_description'), recipe.get('ingredient_total_weight'), recipe.get('initial_temperature'),
+                    recipe_json_dumps(recipe.get('initial_temperature_array')),
+                    recipe_json_dumps(recipe.get('cook_steps_json')),
+                    recipe_json_dumps(recipe.get('wash_steps_json')),
+                    recipe_json_dumps(recipe.get('moisten_steps_json')),
+                    recipe_json_dumps(recipe.get('ingredients_json')),
+                    1 if recipe.get('detail_missing') else 0, recipe.get('source_row_number'), now, now,
+                ))
+            for rows in chunked(base_rows, 300):
+                cur.executemany(
+                    """
+                    INSERT INTO recipe_safety_base(
+                        batch_id, recipe_id, recipe_name, category, recipe_type, production_count, device_count,
+                        customer_count, cook_time, cook_step_count, wash_step_count, moisten_step_count,
+                        ingredient_count, description, steps_description, ingredient_total_weight, initial_temperature,
+                        initial_temperature_array_json, cook_steps_json, wash_steps_json, moisten_steps_json,
+                        ingredients_json, detail_missing, source_row_number, created_at, updated_at
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    rows,
+                )
+
+            step_rows = [(
+                batch_id, row['recipe_id'], row['recipe_name'], row.get('step_index'), row.get('step_time'),
+                row.get('inferred_duration_seconds'), row.get('step_type'), row.get('power_w'), row.get('power_kw'),
+                row.get('speed'), row.get('position'), row.get('automatic'), row.get('commands'),
+                recipe_json_dumps(row.get('raw')), now,
+            ) for row in analysis['steps']]
+            for rows in chunked(step_rows, 1000):
+                cur.executemany(
+                    """
+                    INSERT INTO recipe_safety_steps(
+                        batch_id, recipe_id, recipe_name, step_index, step_time, inferred_duration_seconds,
+                        step_type, power_w, power_kw, speed, position, automatic, commands, raw_json, created_at
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    rows,
+                )
+
+            ingredient_rows = [(
+                batch_id, row['recipe_id'], row['recipe_name'], row.get('ingredient_index'), row.get('ingredient_name'),
+                row.get('ingredient_id'), row.get('dosage'), row.get('unit'), row.get('automatic'), row.get('feeding_mode'),
+                row.get('position'), recipe_json_dumps(row.get('raw')), ','.join(row.get('matched_keywords') or []), now,
+            ) for row in analysis['ingredients']]
+            for rows in chunked(ingredient_rows, 1000):
+                cur.executemany(
+                    """
+                    INSERT INTO recipe_safety_ingredients(
+                        batch_id, recipe_id, recipe_name, ingredient_index, ingredient_name, ingredient_id,
+                        dosage, unit, automatic, feeding_mode, position, raw_json, matched_keywords, created_at
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    rows,
+                )
+
+            hit_rows = [(
+                batch_id, row['recipe_id'], row['recipe_name'], row.get('rule_code'), row.get('rule_name'),
+                row.get('severity'), row.get('evidence_type'), row.get('evidence_step_index'), row.get('evidence_time'),
+                row.get('evidence_power_w'), row.get('evidence_duration_seconds'), row.get('evidence_commands'),
+                recipe_json_dumps(row.get('evidence_json')), row.get('explanation'), now,
+            ) for row in analysis['hits']]
+            for rows in chunked(hit_rows, 1000):
+                cur.executemany(
+                    """
+                    INSERT INTO recipe_safety_hits(
+                        batch_id, recipe_id, recipe_name, rule_code, rule_name, severity, evidence_type,
+                        evidence_step_index, evidence_time, evidence_power_w, evidence_duration_seconds,
+                        evidence_commands, evidence_json, explanation, created_at
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    rows,
+                )
+
+            summary_rows = [(
+                batch_id, row['recipe_id'], row['recipe_name'], row.get('category'), row.get('production_count') or 0,
+                row.get('device_count') or 0, row.get('customer_count') or 0, row.get('max_power_w'), row.get('max_power_kw'),
+                row.get('first_feed_time'), row.get('first_high_power_time'), row.get('initial_temperature'),
+                row.get('risk_score') or 0, row.get('risk_level'), recipe_json_dumps(row.get('risk_tags')),
+                recipe_json_dumps(row.get('hit_rule_codes')), row.get('review_status'), row.get('review_note'), now, now,
+            ) for row in analysis['summaries']]
+            for rows in chunked(summary_rows, 1000):
+                cur.executemany(
+                    """
+                    INSERT INTO recipe_safety_summary(
+                        batch_id, recipe_id, recipe_name, category, production_count, device_count, customer_count,
+                        max_power_w, max_power_kw, first_feed_time, first_high_power_time, initial_temperature,
+                        risk_score, risk_level, risk_tags_json, hit_rule_codes_json, review_status, review_note,
+                        created_at, updated_at
+                    ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    rows,
+                )
+        conn.commit()
+        return {
+            'batch_id': batch_id,
+            'base_rows': len(base_rows),
+            'step_rows': len(step_rows),
+            'ingredient_rows': len(ingredient_rows),
+            'hit_rows': len(hit_rows),
+            'summary_rows': len(summary_rows),
+        }
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def recipe_safety_batch_overview(batch_id):
+    if not batch_id:
+        return {}
+    total = fetch_one("SELECT COUNT(*) AS total FROM recipe_safety_summary WHERE batch_id=%s", (batch_id,)) or {}
+    by_level = fetch_all(
+        "SELECT risk_level, COUNT(*) AS cnt FROM recipe_safety_summary WHERE batch_id=%s GROUP BY risk_level",
+        (batch_id,),
+    )
+    rule_rows = fetch_all(
+        "SELECT rule_code, COUNT(DISTINCT recipe_id) AS cnt FROM recipe_safety_hits WHERE batch_id=%s GROUP BY rule_code",
+        (batch_id,),
+    )
+    level_map = {row['risk_level']: int(row['cnt'] or 0) for row in by_level}
+    rule_map = {row['rule_code']: int(row['cnt'] or 0) for row in rule_rows}
+    return {
+        'total_recipes': int(total.get('total') or 0),
+        'risk_recipes': sum(v for k, v in level_map.items() if k != '无明显候选'),
+        'high_risk': level_map.get('高风险', 0),
+        'medium_risk': level_map.get('中风险', 0),
+        'low_risk': level_map.get('低风险', 0),
+        'missing_detail': rule_map.get('R010', 0),
+        'frequent_usage': rule_map.get('R008', 0),
+        'power_15kw': rule_map.get('R006', 0),
+        'after_oil_window_high_power': rule_map.get('R003', 0),
+        'after_oil_no_food_high_power': rule_map.get('R012', 0),
+        'after_oil_high_power': rule_map.get('R003', 0) + rule_map.get('R012', 0),
+        'before_feed_high_power': rule_map.get('R002', 0),
+        'after_moisten_no_oil_high_power': rule_map.get('R011', 0),
+        'all_10kw': rule_map.get('R013', 0),
+        'hot_300_ratio': rule_map.get('R014', 0),
+    }
+
+
+@app.get("/api/recipe-safety/batches")
+def recipe_safety_batches(request: Request, authorization: str = Header(None)):
+    username = require_auth(authorization=authorization)
+    ensure_analytics_db()
+    rows = fetch_all(
+        """
+        SELECT id, batch_code, source_file_name, source_file_hash, source_sheet_name, row_count,
+               success_count, failed_count, rule_version, imported_by, imported_at, status,
+               output_path, created_at
+        FROM recipe_import_batches
+        ORDER BY imported_at DESC, id DESC
+        LIMIT 50
+        """
+    )
+    latest_id = int(rows[0]['id']) if rows else None
+    log_event(username, 'recipe_safety_batches', request, detail={'count': len(rows)})
+    return {'items': rows, 'latest_batch_id': latest_id, 'overview': recipe_safety_batch_overview(latest_id)}
+
+
+def recipe_safety_summary_query(batch_id=None, risk_level='', rule_code='', keyword='', category='', min_production_count=0, min_power_w=0, only_review=False, limit=200, offset=0):
+    ensure_analytics_db()
+    batch_id = int(batch_id or latest_recipe_safety_batch_id() or 0)
+    if not batch_id:
+        return {'batch_id': None, 'total': 0, 'items': [], 'overview': {}}
+    clauses = ["s.batch_id=%s"]
+    args = [batch_id]
+    if risk_level:
+        clauses.append("s.risk_level=%s")
+        args.append(risk_level)
+    if keyword:
+        like = f"%{keyword}%"
+        clauses.append("(s.recipe_id LIKE %s OR s.recipe_name LIKE %s OR s.category LIKE %s)")
+        args.extend([like, like, like])
+    if category:
+        clauses.append("s.category=%s")
+        args.append(category)
+    if min_production_count:
+        clauses.append("s.production_count >= %s")
+        args.append(int(min_production_count))
+    if min_power_w:
+        clauses.append("COALESCE(s.max_power_w,0) >= %s")
+        args.append(float(min_power_w))
+    if only_review:
+        clauses.append("s.review_status='待复核'")
+    join = ""
+    if rule_code:
+        join = "JOIN recipe_safety_hits h ON h.batch_id=s.batch_id AND h.recipe_id=s.recipe_id AND h.rule_code=%s"
+        args = [rule_code] + args
+    where_sql = " AND ".join(clauses)
+    total_row = fetch_one(f"SELECT COUNT(DISTINCT s.recipe_id) AS total FROM recipe_safety_summary s {join} WHERE {where_sql}", tuple(args)) or {}
+    limit = max(20, min(int(limit or 200), 1000))
+    offset = max(0, int(offset or 0))
+    rows = fetch_all(
+        f"""
+        SELECT DISTINCT s.*, b.batch_code
+        FROM recipe_safety_summary s
+        JOIN recipe_import_batches b ON b.id=s.batch_id
+        {join}
+        WHERE {where_sql}
+        ORDER BY s.risk_score DESC, s.production_count DESC, s.recipe_id
+        LIMIT %s OFFSET %s
+        """,
+        tuple(args + [limit, offset]),
+    )
+    for row in rows:
+        for key in ('risk_tags_json', 'hit_rule_codes_json'):
+            try:
+                row[key.replace('_json', '')] = json.loads(row.get(key) or '[]')
+            except Exception:
+                row[key.replace('_json', '')] = []
+    return {
+        'batch_id': batch_id,
+        'total': int(total_row.get('total') or 0),
+        'limit': limit,
+        'offset': offset,
+        'items': rows,
+        'overview': recipe_safety_batch_overview(batch_id),
+    }
+
+
+@app.get("/api/recipe-safety/summary")
+def recipe_safety_summary_api(
+    request: Request,
+    batch_id: int = Query(None),
+    risk_level: str = Query(''),
+    rule_code: str = Query(''),
+    keyword: str = Query(''),
+    category: str = Query(''),
+    min_production_count: int = Query(0),
+    min_power_w: int = Query(0),
+    only_review: int = Query(0),
+    limit: int = Query(200),
+    offset: int = Query(0),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    result = recipe_safety_summary_query(batch_id, risk_level, rule_code, keyword, category, min_production_count, min_power_w, bool(only_review), limit, offset)
+    log_event(username, 'recipe_safety_summary', request, detail={'batch_id': result.get('batch_id'), 'total': result.get('total')})
+    return result
+
+
+@app.get("/api/recipe-safety/recipes/{recipe_id}")
+def recipe_safety_recipe_detail(recipe_id: str, request: Request, batch_id: int = Query(None), authorization: str = Header(None)):
+    username = require_auth(authorization=authorization)
+    ensure_analytics_db()
+    batch_id = int(batch_id or latest_recipe_safety_batch_id() or 0)
+    base = fetch_one("SELECT * FROM recipe_safety_base WHERE batch_id=%s AND recipe_id=%s", (batch_id, recipe_id))
+    if not base:
+        raise HTTPException(status_code=404, detail="菜谱安全记录不存在")
+    summary = fetch_one("SELECT * FROM recipe_safety_summary WHERE batch_id=%s AND recipe_id=%s", (batch_id, recipe_id)) or {}
+    hits = fetch_all("SELECT * FROM recipe_safety_hits WHERE batch_id=%s AND recipe_id=%s ORDER BY severity DESC, rule_code, evidence_time", (batch_id, recipe_id))
+    steps = fetch_all("SELECT * FROM recipe_safety_steps WHERE batch_id=%s AND recipe_id=%s ORDER BY step_index", (batch_id, recipe_id))
+    ingredients = fetch_all("SELECT * FROM recipe_safety_ingredients WHERE batch_id=%s AND recipe_id=%s ORDER BY ingredient_index", (batch_id, recipe_id))
+    for row in (base, summary):
+        for key in list(row.keys()):
+            if key.endswith('_json') and row.get(key):
+                try:
+                    row[key[:-5]] = json.loads(row[key])
+                except Exception:
+                    pass
+    for row in hits:
+        try:
+            row['evidence'] = json.loads(row.get('evidence_json') or '{}')
+        except Exception:
+            row['evidence'] = {}
+    log_event(username, 'recipe_safety_detail', request, detail={'batch_id': batch_id, 'recipe_id': recipe_id})
+    return {'batch_id': batch_id, 'base': base, 'summary': summary, 'hits': hits, 'steps': steps[:500], 'ingredients': ingredients[:500]}
+
+
+@app.get("/api/recipe-safety/rules")
+def recipe_safety_rules_api(request: Request, authorization: str = Header(None)):
+    username = require_auth(authorization=authorization)
+    ensure_analytics_db()
+    if not fetch_one("SELECT rule_code FROM recipe_safety_rules LIMIT 1"):
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                seed_recipe_safety_rules(cur, DEFAULT_RULE_CONFIG)
+            conn.commit()
+        finally:
+            conn.close()
+    rows = fetch_all("SELECT * FROM recipe_safety_rules ORDER BY rule_code")
+    log_event(username, 'recipe_safety_rules', request, detail={'count': len(rows)})
+    return {'items': rows, 'rule_version': RECIPE_SAFETY_RULE_VERSION}
+
+
+@app.post("/api/recipe-safety/rules/{rule_code}/toggle")
+def recipe_safety_rule_toggle(rule_code: str, request: Request, authorization: str = Header(None)):
+    username = require_admin(authorization=authorization)
+    ensure_analytics_db()
+    row = fetch_one("SELECT enabled FROM recipe_safety_rules WHERE rule_code=%s", (rule_code,))
+    if not row:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    enabled = 0 if int(row.get('enabled') or 0) else 1
+    execute_local("UPDATE recipe_safety_rules SET enabled=%s, updated_at=%s WHERE rule_code=%s", (enabled, datetime.now().replace(microsecond=0), rule_code))
+    log_event(username, 'recipe_safety_rule_toggle', request, detail={'rule_code': rule_code, 'enabled': enabled})
+    return {'rule_code': rule_code, 'enabled': enabled}
+
+
+@app.post("/api/recipe-safety/import")
+def recipe_safety_import_api(payload: RecipeSafetyImportRequest, request: Request, authorization: str = Header(None)):
+    username = require_admin(authorization=authorization)
+    path = Path(payload.file_path)
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="导入文件不存在")
+    if path.suffix.lower() != '.xlsx':
+        raise HTTPException(status_code=400, detail="仅支持 .xlsx 文件")
+    try:
+        output_path = payload.output_path or str(CACHE_DIR / f"recipe_safety_cleaned_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
+        analysis = parse_recipe_safety_workbook(path, batch_code=payload.batch_name, imported_by=username)
+        persisted = persist_recipe_safety_analysis(analysis, force=payload.force, dry_run=payload.dry_run, output_path=output_path)
+        if not payload.dry_run:
+            write_cleaned_workbook(path, analysis, output_path)
+            execute_local("UPDATE recipe_import_batches SET output_path=%s WHERE id=%s", (output_path, persisted['batch_id']))
+        log_event(username, 'recipe_safety_import', request, detail={'batch_id': persisted.get('batch_id'), 'file': path.name, 'dry_run': payload.dry_run})
+        return {'batch_id': persisted.get('batch_id'), 'dry_run': payload.dry_run, 'output_path': output_path, 'overview': analysis['overview'], 'counts': persisted}
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"菜谱安全清洗导入失败：{exc}")
+
+
+@app.get("/api/recipe-safety/export")
+def recipe_safety_export_api(
+    request: Request,
+    batch_id: int = Query(None),
+    risk_level: str = Query(''),
+    rule_code: str = Query(''),
+    keyword: str = Query(''),
+    category: str = Query(''),
+    min_production_count: int = Query(0),
+    min_power_w: int = Query(0),
+    only_review: int = Query(0),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    requested_batch_id = int(batch_id or latest_recipe_safety_batch_id() or 0)
+    has_filters = any([
+        risk_level, rule_code, keyword, category,
+        bool(min_production_count), bool(min_power_w), bool(only_review),
+    ])
+    if requested_batch_id and not has_filters:
+        batch = fetch_one("SELECT output_path FROM recipe_import_batches WHERE id=%s", (requested_batch_id,))
+        output_path = Path(batch.get('output_path') or '') if batch else None
+        if output_path and output_path.exists():
+            log_event(username, 'recipe_safety_export_full', request, detail={'batch_id': requested_batch_id, 'path': str(output_path)})
+            return FileResponse(
+                output_path,
+                media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                filename=f"recipe_safety_cleaned_{requested_batch_id}.xlsx",
+            )
+    result = recipe_safety_summary_query(batch_id, risk_level, rule_code, keyword, category, min_production_count, min_power_w, bool(only_review), 1000, 0)
+    batch_id = result.get('batch_id')
+    rows = result.get('items') or []
+    hits = fetch_all(
+        "SELECT recipe_id, recipe_name, rule_code, rule_name, severity, evidence_type, evidence_time, evidence_power_w, evidence_duration_seconds, evidence_commands, explanation FROM recipe_safety_hits WHERE batch_id=%s ORDER BY recipe_id, rule_code",
+        (batch_id,),
+    ) if batch_id else []
+    wb = Workbook()
+    wb.remove(wb.active)
+    write_sheet(wb, '筛选结果', rows, [
+        ('recipe_id', '菜谱ID'), ('recipe_name', '菜谱名称'), ('category', '分类'),
+        ('production_count', '生产次数'), ('device_count', '设备数'), ('customer_count', '客户数'),
+        ('max_power_w', '最大功率W'), ('initial_temperature', '初始温度'), ('risk_score', '分数'),
+        ('risk_level', '候选风险等级'), ('risk_tags', '候选风险标签'), ('hit_rule_codes', '命中规则'),
+        ('review_status', '复核状态'), ('review_note', '备注'),
+    ])
+    write_sheet(wb, '规则命中明细', hits, [
+        ('recipe_id', '菜谱ID'), ('recipe_name', '菜谱名称'), ('rule_code', '规则编码'),
+        ('rule_name', '规则名称'), ('severity', '等级'), ('evidence_type', '证据类型'),
+        ('evidence_time', '时间'), ('evidence_power_w', '功率W'), ('evidence_duration_seconds', '持续秒'),
+        ('evidence_commands', '动作'), ('explanation', '说明'),
+    ])
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    log_event(username, 'recipe_safety_export', request, detail={'batch_id': batch_id, 'rows': len(rows)})
+    filename = f"recipe_safety_export_{batch_id or 'none'}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
 
 # ── Safety Scan APIs ──────────────────────────────────────────────
 
