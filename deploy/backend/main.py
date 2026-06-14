@@ -10,6 +10,7 @@ import threading
 import re
 import zipfile
 import urllib.request
+import urllib.error
 import statistics
 import gc
 import uuid
@@ -74,7 +75,15 @@ REPORT_CACHE = {}
 DEVICE_LOOKUP_CACHE = {}
 VERSION_STATS_CACHE = {}
 LOG_ANALYSIS_VERSION = 2
+LOG_PACKAGE_DIAGNOSTICS_VERSION = 4
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
+LOG_EVIDENCE_FILE_CACHE_DIR = CACHE_DIR / 'log_evidence_files'
+LOG_EVIDENCE_FILE_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+LOG_PACKAGE_CACHE_DIR = CACHE_DIR / 'log_packages'
+LOG_PACKAGE_DOWNLOAD_DIR = LOG_PACKAGE_CACHE_DIR / 'downloads'
+LOG_PACKAGE_UNZIP_DIR = LOG_PACKAGE_CACHE_DIR / 'unzipped'
+LOG_PACKAGE_DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+LOG_PACKAGE_UNZIP_DIR.mkdir(parents=True, exist_ok=True)
 AUDIT_DB_PATH = CACHE_DIR / 'zhiku_audit.sqlite3'
 AUDIT_LOCK = threading.Lock()
 ANALYTICS_DB_READY = False
@@ -86,9 +95,18 @@ AUTO_PARSE_INTERVAL_SECONDS = int(os.getenv('AUTO_PARSE_INTERVAL_SECONDS', '90')
 AUTO_PARSE_MAX_PACKAGES_PER_CYCLE = int(os.getenv('AUTO_PARSE_MAX_PACKAGES_PER_CYCLE', '2'))
 STRUCTURED_DAY_DETAIL_LIMIT = int(os.getenv('STRUCTURED_DAY_DETAIL_LIMIT', '20'))
 AUTO_PARSE_STALE_MINUTES = int(os.getenv('AUTO_PARSE_STALE_MINUTES', '12'))
-LOG_EVENT_SCAN_VERSION = 2
+LOG_EVENT_SCAN_VERSION = 3
 LOG_EVENT_SCAN_WORKERS = {}
 LOG_EVENT_SCAN_WORKERS_LOCK = threading.Lock()
+LOG_PARSE_TASK_WORKERS = {}
+LOG_PARSE_TASK_WORKERS_LOCK = threading.Lock()
+LOG_PACKAGE_STAGE_LOCKS = {}
+LOG_PACKAGE_STAGE_LOCKS_LOCK = threading.Lock()
+LOG_LIFECYCLE_MAX_PACKAGES = int(os.getenv('LOG_LIFECYCLE_MAX_PACKAGES', '50'))
+LOG_LIFECYCLE_MAX_DAYS = int(os.getenv('LOG_LIFECYCLE_MAX_DAYS', '180'))
+LOG_PACKAGE_RETRY_LIMIT = int(os.getenv('LOG_PACKAGE_RETRY_LIMIT', '3'))
+LOG_PACKAGE_ZIP_RETENTION_DAYS = int(os.getenv('LOG_PACKAGE_ZIP_RETENTION_DAYS', '7'))
+LOG_PACKAGE_UNZIP_RETENTION_DAYS = int(os.getenv('LOG_PACKAGE_UNZIP_RETENTION_DAYS', '3'))
 
 LOG_KIND_DEFS = {
     'oildrum_board': {
@@ -222,6 +240,16 @@ class RecipeTopJobRequest(BaseModel):
     resource_type: str = ''
     stat_object: str = 'all'
     refresh: bool = False
+
+class LogBackfillRequest(BaseModel):
+    start_date: str = ''
+    end_date: str = ''
+    mode: str = 'missing_only'
+    max_packages: int = 50
+
+class LogPackageRetryRequest(BaseModel):
+    stage: str = 'auto'
+    force: bool = False
 
 def parse_users():
     raw = os.getenv('ZHIKU_USERS', f"admin:{ADMIN_TOKEN}")
@@ -669,6 +697,87 @@ def init_analytics_db():
                         INDEX idx_log_coverage(sn, log_start_time, log_end_time)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
+                for stmt in [
+                    "ALTER TABLE device_log_packages ADD COLUMN file_size_bytes BIGINT NULL AFTER file_size_mb",
+                    "ALTER TABLE device_log_packages ADD COLUMN remote_status VARCHAR(32) NOT NULL DEFAULT 'unknown' AFTER cos_deleted",
+                    "ALTER TABLE device_log_packages ADD COLUMN unzip_status VARCHAR(32) NOT NULL DEFAULT 'not_started' AFTER download_status",
+                    "ALTER TABLE device_log_packages ADD COLUMN lifecycle_status VARCHAR(64) NOT NULL DEFAULT 'remote_available' AFTER ui_status",
+                    "ALTER TABLE device_log_packages ADD COLUMN downloaded_path VARCHAR(500) NULL AFTER parse_version",
+                    "ALTER TABLE device_log_packages ADD COLUMN unzipped_path VARCHAR(500) NULL AFTER downloaded_path",
+                    "ALTER TABLE device_log_packages ADD COLUMN parsed_cache_path VARCHAR(500) NULL AFTER unzipped_path",
+                    "ALTER TABLE device_log_packages ADD COLUMN detected_log_kinds VARCHAR(500) NULL AFTER parsed_cache_path",
+                    "ALTER TABLE device_log_packages ADD COLUMN detected_file_count INT NOT NULL DEFAULT 0 AFTER detected_log_kinds",
+                    "ALTER TABLE device_log_packages ADD COLUMN job_count INT NOT NULL DEFAULT 0 AFTER detected_file_count",
+                    "ALTER TABLE device_log_packages ADD COLUMN event_count INT NOT NULL DEFAULT 0 AFTER job_count",
+                    "ALTER TABLE device_log_packages ADD COLUMN max_pot_temp DECIMAL(8,2) NULL AFTER event_count",
+                    "ALTER TABLE device_log_packages ADD COLUMN max_power_w DECIMAL(12,2) NULL AFTER max_pot_temp",
+                    "ALTER TABLE device_log_packages ADD COLUMN error_stage VARCHAR(32) NULL AFTER error_message",
+                    "ALTER TABLE device_log_packages ADD COLUMN error_code VARCHAR(64) NULL AFTER error_stage",
+                    "ALTER TABLE device_log_packages ADD COLUMN suggested_action VARCHAR(500) NULL AFTER error_code",
+                    "ALTER TABLE device_log_packages ADD COLUMN retry_count INT NOT NULL DEFAULT 0 AFTER parse_attempts",
+                    "ALTER TABLE device_log_packages ADD COLUMN next_retry_at DATETIME NULL AFTER retry_count",
+                    "ALTER TABLE device_log_packages ADD COLUMN last_download_at DATETIME NULL AFTER last_attempt_at",
+                    "ALTER TABLE device_log_packages ADD COLUMN last_unzip_at DATETIME NULL AFTER last_download_at",
+                    "ALTER TABLE device_log_packages ADD COLUMN last_parse_at DATETIME NULL AFTER last_unzip_at",
+                    "ALTER TABLE device_log_packages ADD COLUMN source_content_hash CHAR(64) NULL AFTER remote_url_hash",
+                    "ALTER TABLE device_log_packages ADD INDEX idx_log_lifecycle(sn, lifecycle_status, remote_create_time)",
+                    "ALTER TABLE device_log_packages ADD INDEX idx_log_retry(next_retry_at, retry_count)",
+                ]:
+                    try:
+                        cur.execute(stmt)
+                    except Exception:
+                        pass
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS log_parse_tasks (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        task_id CHAR(36) NOT NULL,
+                        sn VARCHAR(64) NOT NULL,
+                        start_date DATE NOT NULL,
+                        end_date DATE NOT NULL,
+                        mode VARCHAR(32) NOT NULL DEFAULT 'missing_only',
+                        status VARCHAR(32) NOT NULL DEFAULT 'queued',
+                        total_count INT NOT NULL DEFAULT 0,
+                        queued_count INT NOT NULL DEFAULT 0,
+                        running_count INT NOT NULL DEFAULT 0,
+                        completed_count INT NOT NULL DEFAULT 0,
+                        partial_count INT NOT NULL DEFAULT 0,
+                        failed_count INT NOT NULL DEFAULT 0,
+                        skipped_count INT NOT NULL DEFAULT 0,
+                        current_stage VARCHAR(64) NULL,
+                        current_file_id BIGINT NULL,
+                        created_by VARCHAR(64) NULL,
+                        error_message TEXT NULL,
+                        created_at DATETIME NOT NULL,
+                        started_at DATETIME NULL,
+                        finished_at DATETIME NULL,
+                        updated_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_log_parse_task(task_id),
+                        INDEX idx_log_parse_task_sn(sn, status, created_at)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS log_parse_task_items (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        task_id CHAR(36) NOT NULL,
+                        sn VARCHAR(64) NOT NULL,
+                        source_file_id BIGINT NOT NULL,
+                        item_order INT NOT NULL DEFAULT 0,
+                        status VARCHAR(32) NOT NULL DEFAULT 'queued',
+                        current_stage VARCHAR(64) NULL,
+                        reused_from VARCHAR(64) NULL,
+                        error_stage VARCHAR(32) NULL,
+                        error_code VARCHAR(64) NULL,
+                        error_message TEXT NULL,
+                        suggested_action VARCHAR(500) NULL,
+                        attempts INT NOT NULL DEFAULT 0,
+                        started_at DATETIME NULL,
+                        finished_at DATETIME NULL,
+                        updated_at DATETIME NOT NULL,
+                        UNIQUE KEY uniq_log_parse_task_item(task_id, source_file_id),
+                        INDEX idx_log_parse_item_queue(task_id, status, item_order),
+                        INDEX idx_log_parse_item_file(sn, source_file_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """)
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS cook_jobs (
                         id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -789,7 +898,10 @@ def init_analytics_db():
                         event_time DATETIME NULL,
                         matched_keyword VARCHAR(120) NULL,
                         source_log_name VARCHAR(255) NULL,
+                        line_no INT NULL,
+                        line_hash CHAR(64) NULL,
                         raw_log_excerpt TEXT NULL,
+                        evidence_level VARCHAR(16) NOT NULL DEFAULT '中',
                         event_hash CHAR(64) NOT NULL,
                         scan_version INT NOT NULL,
                         created_at DATETIME NOT NULL,
@@ -799,6 +911,16 @@ def init_analytics_db():
                         INDEX idx_device_event_package(sn, source_file_id)
                     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """)
+                for stmt in [
+                    "ALTER TABLE device_log_events ADD COLUMN line_no INT NULL AFTER source_log_name",
+                    "ALTER TABLE device_log_events ADD COLUMN line_hash CHAR(64) NULL AFTER line_no",
+                    "ALTER TABLE device_log_events ADD COLUMN evidence_level VARCHAR(16) NOT NULL DEFAULT '中' AFTER raw_log_excerpt",
+                    "ALTER TABLE device_log_events ADD INDEX idx_device_event_line_hash(line_hash)",
+                ]:
+                    try:
+                        cur.execute(stmt)
+                    except Exception:
+                        pass
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS ingredient_thermal_properties (
                         id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -1491,24 +1613,210 @@ def to_mysql_dt(value):
             pass
     return None
 
-def analytics_ui_status(download_status, parse_status, storage_status):
+def source_file_size_bytes(value):
+    text = str(value or '').strip()
+    try:
+        size = float(text or 0)
+    except Exception:
+        return None
+    if size <= 0:
+        return None
+    if size < 1024:
+        return int(size * 1024 * 1024)
+    return int(size)
+
+def lifecycle_status_value(remote_status, download_status, unzip_status, parse_status, storage_status):
     if storage_status == 'stored':
-        return '已入库'
+        return 'stored'
+    if storage_status == 'storing':
+        return 'storing'
+    if storage_status in ('partial_stored', 'store_failed'):
+        return storage_status
     if parse_status == 'parsed':
-        return '已解析'
-    if parse_status == 'parsing':
-        return '解析中'
-    if parse_status == 'queued':
-        return '排队中'
-    if parse_status == 'no_production_match':
-        return '无生产记录'
-    if parse_status in ('parse_failed', 'no_temperature_data'):
-        return '解析失败'
+        return 'parsed'
+    if parse_status == 'partial_success':
+        return 'partial_success'
+    if parse_status in ('parsing', 'queued'):
+        return parse_status
+    if parse_status in (
+        'parse_failed', 'key_log_missing', 'no_time_range', 'no_internal_session',
+        'no_production_match', 'no_temperature_data',
+    ):
+        return parse_status
+    if unzip_status == 'unzipped':
+        return 'unzipped'
+    if unzip_status in ('queued', 'unzipping'):
+        return f'unzip_{unzip_status}'
+    if unzip_status in ('not_zip', 'zip_corrupted', 'unzip_failed'):
+        return unzip_status
     if download_status == 'downloaded':
-        return '已下载'
-    if download_status in ('download_failed', 'remote_deleted'):
-        return '不可下载'
-    return '可下载'
+        return 'downloaded'
+    if download_status in ('queued', 'downloading'):
+        return f'download_{download_status}'
+    if download_status in ('download_failed', 'download_timeout', 'file_too_large'):
+        return download_status
+    if remote_status in ('missing', 'deleted', 'url_missing'):
+        return f'remote_{remote_status}'
+    return 'remote_available'
+
+def analytics_ui_status(download_status, parse_status, storage_status, unzip_status='not_started', remote_status='available'):
+    lifecycle = lifecycle_status_value(remote_status, download_status, unzip_status, parse_status, storage_status)
+    labels = {
+        'stored': '已入库',
+        'storing': '正在入库',
+        'partial_stored': '部分入库',
+        'store_failed': '入库失败',
+        'parsed': '已解析，待入库',
+        'partial_success': '部分解析成功',
+        'parsing': '解析中',
+        'queued': '等待解析',
+        'unzipped': '已解压，待解析',
+        'unzip_queued': '等待解压',
+        'unzip_unzipping': '解压中',
+        'downloaded': '已下载，待解压',
+        'download_queued': '等待下载',
+        'download_downloading': '下载中',
+        'remote_available': '远端可用',
+        'remote_missing': '远端缺失',
+        'remote_deleted': '远端已删除',
+        'remote_url_missing': '下载地址缺失',
+        'file_too_large': '文件超过保护上限',
+        'download_failed': '下载失败',
+        'download_timeout': '下载超时',
+        'not_zip': '文件不是 ZIP',
+        'zip_corrupted': 'ZIP 损坏',
+        'unzip_failed': '解压失败',
+        'parse_failed': '解析失败',
+        'key_log_missing': '关键日志缺失',
+        'no_time_range': '时间范围无法识别',
+        'no_internal_session': '未识别作业片段',
+        'no_production_match': 'DB 未匹配，待检查日志证据',
+        'no_temperature_data': '缺少可用温度信号',
+    }
+    return labels.get(lifecycle, lifecycle)
+
+def package_stage_lock(file_id):
+    key = int(file_id)
+    with LOG_PACKAGE_STAGE_LOCKS_LOCK:
+        return LOG_PACKAGE_STAGE_LOCKS.setdefault(key, threading.Lock())
+
+def lifecycle_retry_delay_minutes(retry_count):
+    return min(24 * 60, 5 * (2 ** max(0, int(retry_count or 0))))
+
+def record_log_package_failure(sn, file_id, stage, code, message, suggested_action=None):
+    package = fetch_one(
+        "SELECT retry_count FROM device_log_packages WHERE sn=%s AND source_file_id=%s",
+        (sn, int(file_id)),
+    ) or {}
+    retry_count = int(package.get('retry_count') or 0) + 1
+    next_retry_at = (
+        datetime.now() + timedelta(minutes=lifecycle_retry_delay_minutes(retry_count))
+        if retry_count < LOG_PACKAGE_RETRY_LIMIT else None
+    )
+    if retry_count >= LOG_PACKAGE_RETRY_LIMIT:
+        suggested_action = suggested_action or '自动重试已达上限，请由管理员查看原包后强制重试。'
+    set_log_package_lifecycle(
+        sn,
+        file_id,
+        error_stage=stage,
+        error_code=code,
+        error_message=str(message or '')[:500],
+        suggested_action=suggested_action,
+        extra={'retry_count': retry_count, 'next_retry_at': next_retry_at},
+    )
+    return retry_count
+
+def package_cache_paths(sn, file_id):
+    safe_sn = re.sub(r'[^0-9A-Za-z_-]+', '_', str(sn or 'unknown'))
+    package_dir = LOG_PACKAGE_DOWNLOAD_DIR / safe_sn
+    unzip_dir = LOG_PACKAGE_UNZIP_DIR / safe_sn / str(int(file_id))
+    package_dir.mkdir(parents=True, exist_ok=True)
+    return package_dir / f'{int(file_id)}.zip', unzip_dir
+
+def lifecycle_error_defaults(stage, code, message=''):
+    actions = {
+        'download_failed': '稍后重试下载；连续失败时检查 COS 文件状态。',
+        'download_timeout': '稍后重试，或拆分为更小时间范围。',
+        'file_too_large': '单独下载原包处理，或调整日志上传粒度。',
+        'not_zip': '核对日志上传内容和文件地址。',
+        'zip_corrupted': '重新上传日志包，或改用相邻时间日志。',
+        'unzip_failed': '清理解压缓存后重试。',
+        'key_log_missing': '查看包内文件列表，并补充对应版本解析规则。',
+        'no_time_range': '检查日志时间戳格式和设备时钟。',
+        'no_internal_session': '当前包可能只有运行日志，建议查看相邻日志包。',
+        'no_production_match': '日志证据仍可使用；核对 DB 漏记、时区或设备时钟。',
+        'parse_failed': '保留原包并重试；连续失败时提交解析器排查。',
+        'store_failed': '解析结果已保留，可仅重试入库。',
+    }
+    return actions.get(code, '查看失败阶段和错误信息后重试。')
+
+def set_log_package_lifecycle(
+    sn,
+    file_id,
+    *,
+    remote_status=None,
+    download_status=None,
+    unzip_status=None,
+    parse_status=None,
+    storage_status=None,
+    error_stage=None,
+    error_code=None,
+    error_message=None,
+    suggested_action=None,
+    extra=None,
+):
+    if not ensure_analytics_db():
+        return
+    existing = fetch_one(
+        """
+        SELECT remote_status, download_status, unzip_status, parse_status, storage_status
+        FROM device_log_packages WHERE sn=%s AND source_file_id=%s
+        """,
+        (sn, int(file_id)),
+    ) or {}
+    values = {
+        'remote_status': remote_status or existing.get('remote_status') or 'available',
+        'download_status': download_status or existing.get('download_status') or 'not_started',
+        'unzip_status': unzip_status or existing.get('unzip_status') or 'not_started',
+        'parse_status': parse_status or existing.get('parse_status') or 'not_started',
+        'storage_status': storage_status or existing.get('storage_status') or 'not_stored',
+    }
+    lifecycle = lifecycle_status_value(**values)
+    ui_status = analytics_ui_status(
+        values['download_status'],
+        values['parse_status'],
+        values['storage_status'],
+        values['unzip_status'],
+        values['remote_status'],
+    )
+    updates = [
+        "remote_status=%s", "download_status=%s", "unzip_status=%s", "parse_status=%s",
+        "storage_status=%s", "lifecycle_status=%s", "ui_status=%s", "error_stage=%s",
+        "error_code=%s", "error_message=%s", "suggested_action=%s", "updated_at=%s",
+    ]
+    args = [
+        values['remote_status'], values['download_status'], values['unzip_status'],
+        values['parse_status'], values['storage_status'], lifecycle, ui_status,
+        error_stage, error_code, error_message,
+        suggested_action or (lifecycle_error_defaults(error_stage, error_code, error_message) if error_code else None),
+        datetime.now().replace(microsecond=0),
+    ]
+    for key, value in (extra or {}).items():
+        if key not in {
+            'downloaded_path', 'unzipped_path', 'parsed_cache_path', 'detected_log_kinds',
+            'detected_file_count', 'job_count', 'event_count', 'max_pot_temp', 'max_power_w',
+            'next_retry_at', 'last_download_at', 'last_unzip_at', 'last_parse_at',
+            'retry_count', 'source_content_hash', 'parse_version', 'log_start_time',
+            'log_end_time', 'cook_count', 'sample_count', 'parsed_at', 'stored_at',
+        }:
+            continue
+        updates.append(f"{key}=%s")
+        args.append(value)
+    args.extend([sn, int(file_id)])
+    execute_local(
+        f"UPDATE device_log_packages SET {', '.join(updates)} WHERE sn=%s AND source_file_id=%s",
+        tuple(args),
+    )
 
 def upsert_log_package_index(sn, rows):
     if not rows or not ensure_analytics_db():
@@ -1521,43 +1829,52 @@ def upsert_log_package_index(sn, rows):
             continue
         cos_deleted = 1 if row.get('cos_deleted') else 0
         url_hash = hashlib.sha256(str(row.get('url') or '').encode('utf-8')).hexdigest() if row.get('url') else None
-        download_status = 'remote_deleted' if cos_deleted else ('remote_available' if row.get('url') else 'download_failed')
+        remote_status = 'deleted' if cos_deleted else ('available' if row.get('url') else 'url_missing')
+        download_status = 'not_started'
         payload.append((
-            sn, int(file_id), row.get('file_name'), parse_mb_value(row.get('file_length')), row.get('file_size_label'),
+            sn, int(file_id), row.get('file_name'), parse_mb_value(row.get('file_length')),
+            source_file_size_bytes(row.get('file_length')), row.get('file_size_label'),
             url_hash, to_mysql_dt(row.get('log_time_hint')), to_mysql_dt(row.get('create_time')),
-            to_mysql_dt(row.get('update_time')), cos_deleted, download_status,
-            analytics_ui_status(download_status, 'not_started', 'not_stored'), now, now,
+            to_mysql_dt(row.get('update_time')), cos_deleted, remote_status, download_status,
+            analytics_ui_status(download_status, 'not_started', 'not_stored', 'not_started', remote_status),
+            lifecycle_status_value(remote_status, download_status, 'not_started', 'not_started', 'not_stored'),
+            now, now,
         ))
     executemany_local(
         """
         INSERT INTO device_log_packages(
-            sn, source_file_id, file_name, file_size_mb, file_size_label, remote_url_hash,
+            sn, source_file_id, file_name, file_size_mb, file_size_bytes, file_size_label, remote_url_hash,
             log_time_hint, remote_create_time, remote_update_time, cos_deleted,
-            download_status, ui_status, created_at, updated_at
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            remote_status, download_status, ui_status, lifecycle_status, created_at, updated_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         ON DUPLICATE KEY UPDATE
             file_name = VALUES(file_name),
             file_size_mb = VALUES(file_size_mb),
+            file_size_bytes = VALUES(file_size_bytes),
             file_size_label = VALUES(file_size_label),
             remote_url_hash = VALUES(remote_url_hash),
             log_time_hint = VALUES(log_time_hint),
             remote_create_time = VALUES(remote_create_time),
             remote_update_time = VALUES(remote_update_time),
             cos_deleted = VALUES(cos_deleted),
-            download_status = CASE
-                WHEN storage_status = 'stored' THEN download_status
-                WHEN parse_status IN ('parsed', 'parsing', 'queued') THEN download_status
-                ELSE VALUES(download_status)
-            END,
+            remote_status = VALUES(remote_status),
             ui_status = CASE
-                WHEN storage_status = 'stored' THEN '已入库'
-                WHEN parse_status = 'parsed' THEN '已解析'
-                WHEN parse_status = 'parsing' THEN '解析中'
-                WHEN parse_status = 'queued' THEN '排队中'
-                WHEN parse_status = 'no_production_match' THEN '无生产记录'
-                WHEN parse_status IN ('parse_failed', 'no_temperature_data') THEN '解析失败'
-                WHEN VALUES(download_status) = 'remote_deleted' THEN '不可下载'
+                WHEN download_status != 'not_started'
+                  OR unzip_status != 'not_started'
+                  OR parse_status != 'not_started'
+                  OR storage_status != 'not_stored'
+                THEN ui_status
+                WHEN VALUES(remote_status) = 'deleted' THEN '远端已删除'
+                WHEN VALUES(remote_status) = 'url_missing' THEN '下载地址缺失'
                 ELSE VALUES(ui_status)
+            END,
+            lifecycle_status = CASE
+                WHEN download_status != 'not_started'
+                  OR unzip_status != 'not_started'
+                  OR parse_status != 'not_started'
+                  OR storage_status != 'not_stored'
+                THEN lifecycle_status
+                ELSE VALUES(lifecycle_status)
             END,
             updated_at = VALUES(updated_at)
         """,
@@ -1575,9 +1892,13 @@ def attach_log_package_statuses(sn, rows):
     placeholders = ','.join(['%s'] * len(ids))
     status_rows = fetch_all(
         f"""
-        SELECT source_file_id, download_status, parse_status, storage_status, ui_status,
+        SELECT source_file_id, remote_status, download_status, unzip_status, parse_status, storage_status,
+               lifecycle_status, ui_status,
                parse_version, log_start_time, log_end_time, cook_count, sample_count,
-               error_message, parse_attempts, last_attempt_at, parsed_at, stored_at
+               job_count, event_count, max_pot_temp, max_power_w, detected_log_kinds,
+               error_stage, error_code, error_message, suggested_action, retry_count, next_retry_at,
+               parse_attempts, last_attempt_at, last_download_at, last_unzip_at, last_parse_at,
+               parsed_at, stored_at
         FROM device_log_packages
         WHERE sn = %s AND source_file_id IN ({placeholders})
         """,
@@ -1586,10 +1907,21 @@ def attach_log_package_statuses(sn, rows):
     status_map = {int(row['source_file_id']): row for row in status_rows}
     for row in rows:
         status = status_map.get(int(row.get('id') or 0), {})
-        row['analytics_status'] = status.get('ui_status') or ('可下载' if row.get('downloadable') else '不可下载')
-        row['download_status'] = status.get('download_status') or ('remote_available' if row.get('downloadable') else 'remote_deleted')
+        row['remote_status'] = status.get('remote_status') or ('available' if row.get('downloadable') else 'deleted')
+        row['download_status'] = status.get('download_status') or 'not_started'
+        row['unzip_status'] = status.get('unzip_status') or 'not_started'
         row['parse_status'] = status.get('parse_status') or 'not_started'
         row['storage_status'] = status.get('storage_status') or 'not_stored'
+        row['lifecycle_status'] = lifecycle_status_value(
+            row['remote_status'], row['download_status'], row['unzip_status'], row['parse_status'], row['storage_status'],
+        )
+        row['analytics_status'] = analytics_ui_status(
+            row['download_status'],
+            row['parse_status'],
+            row['storage_status'],
+            row['unzip_status'],
+            row['remote_status'],
+        )
         row['structured_cook_count'] = int(status.get('cook_count') or 0)
         row['structured_sample_count'] = int(status.get('sample_count') or 0)
         row['structured_error'] = status.get('error_message')
@@ -1597,6 +1929,27 @@ def attach_log_package_statuses(sn, rows):
         row['structured_coverage_end'] = status.get('log_end_time')
         row['structured_parsed_at'] = status.get('parsed_at')
         row['structured_stored_at'] = status.get('stored_at')
+        row['lifecycle_error_stage'] = status.get('error_stage')
+        row['lifecycle_error_code'] = status.get('error_code')
+        row['lifecycle_suggested_action'] = status.get('suggested_action')
+        row['lifecycle_retry_count'] = int(status.get('retry_count') or 0)
+        row['lifecycle_next_retry_at'] = status.get('next_retry_at')
+        row['lifecycle_job_count'] = int(status.get('job_count') or status.get('cook_count') or 0)
+        row['lifecycle_event_count'] = int(status.get('event_count') or 0)
+        row['lifecycle_max_temp'] = status.get('max_pot_temp')
+        row['lifecycle_max_power_w'] = status.get('max_power_w')
+        row['detected_log_kinds'] = [
+            part for part in str(status.get('detected_log_kinds') or '').split(',') if part
+        ]
+        diagnostics = read_cached_log_package_diagnostics(row.get('id')) if row.get('id') else None
+        if diagnostics:
+            row['diagnostics_status'] = diagnostics.get('diagnosis_message')
+            row['diagnostics_code'] = diagnostics.get('diagnosis_code')
+            row['internal_session_count'] = len(diagnostics.get('internal_sessions') or [])
+            row['diagnostics_log_time_start'] = diagnostics.get('log_time_start')
+            row['diagnostics_log_time_end'] = diagnostics.get('log_time_end')
+            if status.get('parse_status') == 'no_production_match':
+                row['analytics_status'] = diagnostics.get('diagnosis_message') or row['analytics_status']
 
 def format_bytes(value):
     raw_text = str(value or '').strip()
@@ -1724,34 +2077,47 @@ def mark_log_package_status(sn, file_id, download_status=None, parse_status=None
         download_status = download_status or 'downloaded'
         parse_status = parse_status or 'parsed'
         storage_status = storage_status or 'stored'
-        args = (
-            download_status,
-            parse_status,
-            storage_status,
-            analytics_ui_status(download_status, parse_status, storage_status),
-            COOK_TEMPERATURE_CACHE_VERSION,
-            to_mysql_dt(coverage.get('start')),
-            to_mysql_dt(coverage.get('end')),
-            int(result.get('cook_count') or 0),
-            int(coverage.get('sample_count') or 0),
-            error_message,
-            now if parse_status in ('parsed', 'parse_failed', 'no_production_match', 'no_temperature_data') else None,
-            now if storage_status == 'stored' else None,
-            now,
+        cooks = result.get('cooks') or []
+        max_temps = [
+            (row.get('summary') or {}).get('max_temp') for row in cooks
+            if (row.get('summary') or {}).get('max_temp') is not None
+        ]
+        max_powers = [
+            max(
+                float((row.get('summary') or {}).get('max_actual_power_kw') or 0),
+                float((row.get('summary') or {}).get('max_command_power_kw') or 0),
+            ) * 1000
+            for row in cooks
+        ]
+        set_log_package_lifecycle(
             sn,
-            int(file_id),
+            file_id,
+            download_status=download_status,
+            unzip_status='unzipped',
+            parse_status=parse_status,
+            storage_status=storage_status,
+            error_stage='storage' if storage_status == 'store_failed' else None,
+            error_code='store_failed' if storage_status == 'store_failed' else None,
+            error_message=error_message,
+            extra={
+                'parse_version': COOK_TEMPERATURE_CACHE_VERSION,
+                'log_start_time': to_mysql_dt(coverage.get('start')),
+                'log_end_time': to_mysql_dt(coverage.get('end')),
+                'cook_count': int(result.get('cook_count') or 0),
+                'job_count': int(result.get('cook_count') or 0),
+                'sample_count': int(coverage.get('sample_count') or 0),
+                'max_pot_temp': max(max_temps) if max_temps else None,
+                'max_power_w': max(max_powers) if max_powers else None,
+                'parsed_at': now if parse_status in ('parsed', 'partial_success') else None,
+                'stored_at': now if storage_status == 'stored' else None,
+                'last_parse_at': now,
+                'retry_count': 0 if storage_status == 'stored' else 1,
+                'next_retry_at': None,
+            },
         )
         execute_local(
-            """
-            UPDATE device_log_packages
-            SET download_status=%s, parse_status=%s, storage_status=%s, ui_status=%s,
-                parse_version=%s, log_start_time=%s, log_end_time=%s, cook_count=%s,
-                sample_count=%s, error_message=%s,
-                parsed_at=COALESCE(%s, parsed_at), stored_at=COALESCE(%s, stored_at),
-                last_attempt_at=%s, parse_attempts=parse_attempts+1, updated_at=%s
-            WHERE sn=%s AND source_file_id=%s
-            """,
-            args[:-2] + (now,) + args[-2:],
+            "UPDATE device_log_packages SET parse_attempts=parse_attempts+1, last_attempt_at=%s WHERE sn=%s AND source_file_id=%s",
+            (now, sn, int(file_id)),
         )
         return
     existing = fetch_one(
@@ -1761,19 +2127,23 @@ def mark_log_package_status(sn, file_id, download_status=None, parse_status=None
     next_download = download_status or (existing or {}).get('download_status') or 'remote_available'
     next_parse = parse_status or (existing or {}).get('parse_status') or 'not_started'
     next_storage = storage_status or (existing or {}).get('storage_status') or 'not_stored'
+    error_code = next_parse if next_parse in (
+        'parse_failed', 'no_temperature_data', 'no_production_match', 'key_log_missing',
+        'no_time_range', 'no_internal_session',
+    ) else None
+    set_log_package_lifecycle(
+        sn,
+        file_id,
+        download_status=next_download,
+        parse_status=next_parse,
+        storage_status=next_storage,
+        error_stage='parse' if error_code else None,
+        error_code=error_code,
+        error_message=error_message,
+    )
     execute_local(
-        """
-        UPDATE device_log_packages
-        SET download_status=%s, parse_status=%s, storage_status=%s, ui_status=%s,
-            error_message=%s, last_attempt_at=%s, parse_attempts=parse_attempts+1,
-            updated_at=%s
-        WHERE sn=%s AND source_file_id=%s
-        """,
-        (
-            next_download, next_parse, next_storage,
-            analytics_ui_status(next_download, next_parse, next_storage),
-            error_message, now, now, sn, int(file_id),
-        ),
+        "UPDATE device_log_packages SET last_attempt_at=%s, parse_attempts=parse_attempts+1 WHERE sn=%s AND source_file_id=%s",
+        (now, sn, int(file_id)),
     )
 
 def read_cook_temperature_from_db(sn, file_id):
@@ -1973,8 +2343,11 @@ def device_structured_summary(sn):
         SELECT
             COUNT(*) AS total_packages,
             SUM(storage_status='stored') AS stored_packages,
-            SUM(parse_status IN ('queued','parsing')) AS running_packages,
-            SUM(parse_status IN ('parse_failed','no_temperature_data','no_production_match')) AS failed_packages,
+            SUM(lifecycle_status IN ('queued','parsing','download_downloading','unzip_unzipping')) AS running_packages,
+            SUM(error_code IS NOT NULL) AS failed_packages,
+            SUM(download_status='downloaded') AS downloaded_packages,
+            SUM(unzip_status='unzipped') AS unzipped_packages,
+            SUM(parse_status IN ('parsed','partial_success')) AS parsed_packages,
             MIN(log_start_time) AS coverage_start,
             MAX(log_end_time) AS coverage_end,
             MAX(parsed_at) AS last_parsed_at,
@@ -2006,6 +2379,9 @@ def device_structured_summary(sn):
         'stored_packages': stored,
         'running_packages': int(package.get('running_packages') or 0),
         'failed_packages': int(package.get('failed_packages') or 0),
+        'downloaded_packages': int(package.get('downloaded_packages') or 0),
+        'unzipped_packages': int(package.get('unzipped_packages') or 0),
+        'parsed_packages': int(package.get('parsed_packages') or 0),
         'coverage_start': package.get('coverage_start'),
         'coverage_end': package.get('coverage_end'),
         'last_parsed_at': package.get('last_parsed_at'),
@@ -2140,6 +2516,193 @@ def structured_cook_temperature_by_day(sn, day, limit=300):
         },
     }
 
+def workflow_failure(stage, failure_reason, message, suggested_action, can_retry=True, retry_action='', data_available=False):
+    return {
+        'stage': stage,
+        'failure_reason': failure_reason,
+        'message': message,
+        'suggested_action': suggested_action,
+        'can_retry': bool(can_retry),
+        'retry_action': retry_action,
+        'data_available': bool(data_available),
+    }
+
+def parse_optional_date(value, end_of_day=False):
+    if not value:
+        return None
+    try:
+        parsed = datetime.strptime(str(value)[:10], "%Y-%m-%d")
+    except Exception:
+        raise HTTPException(status_code=400, detail="日期格式应为 YYYY-MM-DD")
+    return parsed + timedelta(days=1) if end_of_day else parsed
+
+def structured_device_jobs(sn, start_date=None, end_date=None, keyword=None, limit=300):
+    if not ensure_analytics_db():
+        return {
+            'sn': sn,
+            'source': 'structured_db',
+            'source_label': '云端结构化库',
+            'items': [],
+            'summary': {},
+            'failure': workflow_failure(
+                'read_structured_db',
+                'structured_db_unavailable',
+                '云端结构化作业库尚未就绪。',
+                '先补齐最近日志并等待后台入库，再刷新作业列表。',
+                retry_action='补齐最近日志',
+            ),
+        }
+    start = parse_optional_date(start_date) or (datetime.now() - timedelta(days=30)).replace(hour=0, minute=0, second=0, microsecond=0)
+    end = parse_optional_date(end_date, end_of_day=True) or (datetime.now() + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    if end <= start:
+        raise HTTPException(status_code=400, detail="结束日期必须晚于开始日期")
+    safe_limit = max(1, min(int(limit or 300), 1000))
+    clauses = ["cj.sn=%s", "cj.cook_start_time >= %s", "cj.cook_start_time < %s"]
+    params = [sn, start, end]
+    keyword_text = str(keyword or '').strip()
+    if keyword_text:
+        clauses.append("(cj.recipe_name LIKE %s OR CAST(cj.recipe_id AS CHAR) LIKE %s)")
+        like = f"%{keyword_text}%"
+        params.extend([like, like])
+    params.append(safe_limit)
+    rows = fetch_all(
+        f"""
+        SELECT cj.id, cj.source_file_id, cj.machine_log_id, cj.recipe_id, cj.recipe_name,
+               cj.cook_start_time, cj.cook_end_time, cj.duration_seconds, cj.max_pot_temp,
+               cj.avg_pot_temp, cj.sample_count, cj.step_count, cj.android_action_count,
+               cj.payload_json, cj.updated_at,
+               lp.file_name, lp.remote_status, lp.download_status, lp.unzip_status,
+               lp.parse_status, lp.storage_status, lp.lifecycle_status, lp.ui_status,
+               lp.error_message AS package_error, lp.log_start_time, lp.log_end_time
+        FROM cook_jobs cj
+        LEFT JOIN device_log_packages lp
+          ON lp.sn=cj.sn AND lp.source_file_id=cj.source_file_id
+        WHERE {' AND '.join(clauses)}
+        ORDER BY cj.cook_start_time DESC
+        LIMIT %s
+        """,
+        tuple(params),
+    )
+    job_ids = [int(row['id']) for row in rows if row.get('id')]
+    power_map = {}
+    alert_map = {}
+    if job_ids:
+        placeholders = ','.join(['%s'] * len(job_ids))
+        power_rows = fetch_all(
+            f"""
+            SELECT cook_job_id, MAX(command_power_kw) AS max_command_power_kw,
+                   MAX(actual_power_kw) AS max_actual_power_kw,
+                   COUNT(*) AS power_sample_count
+            FROM cook_power_events
+            WHERE cook_job_id IN ({placeholders})
+            GROUP BY cook_job_id
+            """,
+            tuple(job_ids),
+        )
+        power_map = {int(row['cook_job_id']): row for row in power_rows}
+        alert_rows = fetch_all(
+            f"""
+            SELECT cook_job_id, COUNT(*) AS alert_count,
+                   SUM(risk_level='high' AND dismissed=0) AS high_alert_count
+            FROM safety_scan_alerts
+            WHERE cook_job_id IN ({placeholders})
+            GROUP BY cook_job_id
+            """,
+            tuple(job_ids),
+        )
+        alert_map = {int(row['cook_job_id']): row for row in alert_rows}
+    items = []
+    for row in rows:
+        job_id = int(row.get('id') or 0)
+        payload = {}
+        try:
+            payload = json.loads(row.get('payload_json') or '{}')
+        except Exception:
+            payload = {}
+        payload_summary = payload.get('summary') or {}
+        power = power_map.get(job_id) or {}
+        alerts = alert_map.get(job_id) or {}
+        max_temp = float(row['max_pot_temp']) if row.get('max_pot_temp') is not None else None
+        avg_temp = float(row['avg_pot_temp']) if row.get('avg_pot_temp') is not None else None
+        max_command = power.get('max_command_power_kw')
+        max_actual = power.get('max_actual_power_kw')
+        max_command = float(max_command) if max_command is not None else payload_summary.get('max_command_power_kw')
+        max_actual = float(max_actual) if max_actual is not None else payload_summary.get('max_actual_power_kw')
+        actual_energy = float(payload_summary.get('actual_energy_kwh') or 0)
+        command_energy = float(payload_summary.get('command_energy_kwh') or 0)
+        risk_tags = []
+        if max_temp is None:
+            risk_tags.append('缺温度')
+        elif max_temp >= 350:
+            risk_tags.append('超350℃')
+        elif max_temp >= 300:
+            risk_tags.append('超300℃')
+        elif max_temp >= 250:
+            risk_tags.append('超250℃')
+        if max_actual is not None and float(max_actual) >= 15:
+            risk_tags.append('高功率')
+        if int(alerts.get('high_alert_count') or 0):
+            risk_tags.append('高危告警')
+        elif int(alerts.get('alert_count') or 0):
+            risk_tags.append('有告警')
+        if row.get('machine_log_id') is None:
+            risk_tags.append('DB未匹配')
+        items.append({
+            'id': job_id,
+            'source_file_id': row.get('source_file_id'),
+            'machine_log_id': row.get('machine_log_id'),
+            'recipe_id': row.get('recipe_id'),
+            'recipe_name': row.get('recipe_name'),
+            'start_time': row.get('cook_start_time'),
+            'end_time': row.get('cook_end_time'),
+            'duration_seconds': row.get('duration_seconds'),
+            'max_pot_temp': max_temp,
+            'avg_pot_temp': avg_temp,
+            'sample_count': int(row.get('sample_count') or 0),
+            'step_count': int(row.get('step_count') or 0),
+            'max_command_power_kw': max_command,
+            'max_actual_power_kw': max_actual,
+            'command_energy_kwh': round(command_energy, 5),
+            'actual_energy_kwh': round(actual_energy, 5),
+            'file_name': row.get('file_name'),
+            'log_status': row.get('ui_status') or analytics_ui_status(
+                row.get('download_status'),
+                row.get('parse_status'),
+                row.get('storage_status'),
+            ),
+            'parse_status': row.get('parse_status'),
+            'download_status': row.get('download_status'),
+            'unzip_status': row.get('unzip_status'),
+            'storage_status': row.get('storage_status'),
+            'lifecycle_status': row.get('lifecycle_status'),
+            'db_match_status': 'matched' if row.get('machine_log_id') is not None else 'unmatched',
+            'alert_count': int(alerts.get('alert_count') or 0),
+            'risk_tags': risk_tags,
+            'data_source': 'structured_db',
+            'updated_at': row.get('updated_at'),
+            'package_error': row.get('package_error'),
+        })
+    max_values = [row['max_pot_temp'] for row in items if row.get('max_pot_temp') is not None]
+    return {
+        'sn': sn,
+        'source': 'structured_db',
+        'source_label': '云端结构化库',
+        'start_date': start.strftime('%Y-%m-%d'),
+        'end_date': (end - timedelta(days=1)).strftime('%Y-%m-%d'),
+        'generated_at': datetime.now().isoformat(sep=' ', timespec='seconds'),
+        'summary': {
+            'total': len(items),
+            'high_250': sum(1 for row in items if (row.get('max_pot_temp') or 0) >= 250),
+            'high_300': sum(1 for row in items if (row.get('max_pot_temp') or 0) >= 300),
+            'high_350': sum(1 for row in items if (row.get('max_pot_temp') or 0) >= 350),
+            'alert_jobs': sum(1 for row in items if row.get('alert_count')),
+            'db_unmatched': sum(1 for row in items if row.get('db_match_status') == 'unmatched'),
+            'max_temp': max(max_values) if max_values else None,
+        },
+        'items': items,
+        'failure': None,
+    }
+
 def queue_recent_log_packages_for_device(sn, limit=3):
     if not ensure_analytics_db():
         return 0
@@ -2149,7 +2712,7 @@ def queue_recent_log_packages_for_device(sn, limit=3):
         SELECT source_file_id
         FROM device_log_packages
         WHERE sn=%s
-          AND download_status='remote_available'
+          AND remote_status='available'
           AND storage_status != 'stored'
           AND parse_status IN ('not_started','parse_failed','no_temperature_data')
           AND file_size_mb > 0
@@ -2164,12 +2727,443 @@ def queue_recent_log_packages_for_device(sn, limit=3):
         execute_local(
             """
             UPDATE device_log_packages
-            SET parse_status='queued', ui_status='排队中', updated_at=%s
+            SET download_status=CASE WHEN download_status='downloaded' THEN download_status ELSE 'queued' END,
+                unzip_status=CASE WHEN unzip_status='unzipped' THEN unzip_status ELSE 'queued' END,
+                parse_status='queued', lifecycle_status='queued', ui_status='等待解析', updated_at=%s
             WHERE sn=%s AND source_file_id=%s AND storage_status!='stored'
             """,
             (now, sn, int(row['source_file_id'])),
         )
     return len(rows)
+
+def lifecycle_package_rows(sn, start, end, status='', limit=500):
+    clauses = [
+        "sn=%s",
+        "COALESCE(log_time_hint, remote_create_time) >= %s",
+        "COALESCE(log_time_hint, remote_create_time) < %s",
+    ]
+    args = [sn, start, end]
+    requested_limit = max(1, min(int(limit or 500), 1000))
+    args.append(1000 if status else requested_limit)
+    rows = fetch_all(
+        f"""
+        SELECT source_file_id, file_name, file_size_mb, file_size_bytes, file_size_label,
+               log_time_hint, remote_create_time, remote_update_time, remote_status,
+               download_status, unzip_status, parse_status, storage_status, lifecycle_status,
+               ui_status, parse_version, log_start_time, log_end_time, cook_count, sample_count,
+               job_count, event_count, max_pot_temp, max_power_w, detected_log_kinds,
+               error_stage, error_code, error_message, suggested_action, retry_count,
+               next_retry_at, last_attempt_at, last_download_at, last_unzip_at, last_parse_at,
+               parsed_at, stored_at, updated_at
+        FROM device_log_packages
+        WHERE {' AND '.join(clauses)}
+        ORDER BY COALESCE(log_time_hint, remote_create_time) DESC
+        LIMIT %s
+        """,
+        tuple(args),
+    )
+    normalized = []
+    for row in rows:
+        row['lifecycle_status'] = lifecycle_status_value(
+            row.get('remote_status') or 'available',
+            row.get('download_status') or 'not_started',
+            row.get('unzip_status') or 'not_started',
+            row.get('parse_status') or 'not_started',
+            row.get('storage_status') or 'not_stored',
+        )
+        row['ui_status'] = analytics_ui_status(
+            row.get('download_status') or 'not_started',
+            row.get('parse_status') or 'not_started',
+            row.get('storage_status') or 'not_stored',
+            row.get('unzip_status') or 'not_started',
+            row.get('remote_status') or 'available',
+        )
+        if status and row['lifecycle_status'] != status:
+            continue
+        normalized.append(row)
+        if len(normalized) >= requested_limit:
+            break
+    return normalized
+
+def lifecycle_task_payload(task_id):
+    task = fetch_one("SELECT * FROM log_parse_tasks WHERE task_id=%s", (task_id,))
+    if not task:
+        raise HTTPException(status_code=404, detail='日志补齐任务不存在。')
+    items = fetch_all(
+        """
+        SELECT i.*, p.file_name, p.file_size_label, p.lifecycle_status, p.ui_status,
+               p.download_status, p.unzip_status, p.parse_status, p.storage_status,
+               p.log_start_time, p.log_end_time, p.job_count, p.event_count
+        FROM log_parse_task_items i
+        LEFT JOIN device_log_packages p
+          ON p.sn=i.sn AND p.source_file_id=i.source_file_id
+        WHERE i.task_id=%s
+        ORDER BY i.item_order ASC
+        """,
+        (task_id,),
+    )
+    total = int(task.get('total_count') or 0)
+    finished = sum(1 for row in items if row.get('status') in ('completed', 'partial', 'failed', 'skipped'))
+    task['progress_percent'] = round(finished * 100 / total, 1) if total else 100
+    task['items'] = items
+    return task
+
+def update_lifecycle_task_counts(task_id, status=None, current_stage=None, current_file_id=None, error_message=None):
+    counts = fetch_one(
+        """
+        SELECT COUNT(*) AS total_count,
+               SUM(status='queued') AS queued_count,
+               SUM(status='running') AS running_count,
+               SUM(status='completed') AS completed_count,
+               SUM(status='partial') AS partial_count,
+               SUM(status='failed') AS failed_count,
+               SUM(status='skipped') AS skipped_count
+        FROM log_parse_task_items WHERE task_id=%s
+        """,
+        (task_id,),
+    ) or {}
+    updates = [
+        "total_count=%s", "queued_count=%s", "running_count=%s", "completed_count=%s",
+        "partial_count=%s", "failed_count=%s", "skipped_count=%s", "updated_at=%s",
+    ]
+    args = [
+        int(counts.get('total_count') or 0), int(counts.get('queued_count') or 0),
+        int(counts.get('running_count') or 0), int(counts.get('completed_count') or 0),
+        int(counts.get('partial_count') or 0), int(counts.get('failed_count') or 0),
+        int(counts.get('skipped_count') or 0), datetime.now().replace(microsecond=0),
+    ]
+    if status:
+        updates.append("status=%s")
+        args.append(status)
+    if current_stage is not None:
+        updates.append("current_stage=%s")
+        args.append(current_stage)
+    if current_file_id is not None:
+        updates.append("current_file_id=%s")
+        args.append(current_file_id)
+    if error_message is not None:
+        updates.append("error_message=%s")
+        args.append(error_message)
+    if status == 'running':
+        updates.append("started_at=COALESCE(started_at,%s)")
+        args.append(datetime.now().replace(microsecond=0))
+    if status in ('completed', 'partial', 'failed'):
+        updates.append("finished_at=%s")
+        args.append(datetime.now().replace(microsecond=0))
+    args.append(task_id)
+    execute_local(f"UPDATE log_parse_tasks SET {', '.join(updates)} WHERE task_id=%s", tuple(args))
+
+def finish_task_item(task_id, file_id, status, reused_from=None, error_stage=None, error_code=None, error_message=None, suggested_action=None):
+    stage_label = {
+        'completed': '完成',
+        'partial': '部分完成',
+        'failed': '失败',
+        'skipped': '已跳过',
+    }.get(status, status)
+    execute_local(
+        """
+        UPDATE log_parse_task_items
+        SET status=%s, current_stage=%s, reused_from=%s, error_stage=%s, error_code=%s, error_message=%s,
+            suggested_action=%s, finished_at=%s, updated_at=%s
+        WHERE task_id=%s AND source_file_id=%s
+        """,
+        (
+            status, stage_label, reused_from, error_stage, error_code, error_message, suggested_action,
+            datetime.now().replace(microsecond=0), datetime.now().replace(microsecond=0),
+            task_id, int(file_id),
+        ),
+    )
+
+def process_log_lifecycle_task(task_id):
+    update_lifecycle_task_counts(task_id, status='running', current_stage='准备任务')
+    task = fetch_one("SELECT * FROM log_parse_tasks WHERE task_id=%s", (task_id,)) or {}
+    items = fetch_all(
+        "SELECT * FROM log_parse_task_items WHERE task_id=%s AND status='queued' ORDER BY item_order ASC",
+        (task_id,),
+    )
+    for item in items:
+        sn = item.get('sn')
+        file_id = int(item.get('source_file_id'))
+        with package_stage_lock(file_id):
+            execute_local(
+                """
+                UPDATE log_parse_task_items
+                SET status='running', current_stage='检查可复用阶段', attempts=attempts+1,
+                    started_at=COALESCE(started_at,%s), updated_at=%s
+                WHERE task_id=%s AND source_file_id=%s
+                """,
+                (datetime.now().replace(microsecond=0), datetime.now().replace(microsecond=0), task_id, file_id),
+            )
+            update_lifecycle_task_counts(task_id, current_stage='检查可复用阶段', current_file_id=file_id)
+            package = fetch_one(
+                "SELECT * FROM device_log_packages WHERE sn=%s AND source_file_id=%s",
+                (sn, file_id),
+            ) or {}
+            mode = task.get('mode') or 'missing_only'
+            if package.get('storage_status') == 'stored' and mode == 'missing_only':
+                finish_task_item(task_id, file_id, 'completed', reused_from='structured_db')
+                update_lifecycle_task_counts(task_id)
+                continue
+            if (
+                package.get('next_retry_at')
+                and to_mysql_dt(package.get('next_retry_at')) > datetime.now()
+                and mode == 'missing_only'
+            ):
+                finish_task_item(
+                    task_id, file_id, 'skipped', reused_from='retry_ttl',
+                    error_stage=package.get('error_stage'), error_code=package.get('error_code'),
+                    error_message='仍在失败退避期内。', suggested_action='等待下次重试时间，或由管理员强制重试。',
+                )
+                update_lifecycle_task_counts(task_id)
+                continue
+            force_refresh = mode in ('force_reparse', 'force_redownload')
+            force_redownload = mode == 'force_redownload'
+            if mode == 'force_redownload':
+                zip_path, unzip_dir = package_cache_paths(sn, file_id)
+                zip_path.unlink(missing_ok=True)
+                if unzip_dir.exists():
+                    import shutil
+                    shutil.rmtree(unzip_dir, ignore_errors=True)
+            try:
+                update_lifecycle_task_counts(task_id, current_stage='下载/解压/解析/入库', current_file_id=file_id)
+                result = build_cook_temperature_analysis(
+                    sn,
+                    file_id=file_id,
+                    force_refresh=force_refresh,
+                    force_redownload=force_redownload,
+                )
+                reuse = ((result.get('coverage') or {}).get('stage_reuse') or {}).get('download')
+                finish_task_item(task_id, file_id, 'completed', reused_from=reuse or ('structured_db' if (result.get('cache') or {}).get('database') else 'parsed_cache'))
+            except HTTPException as exc:
+                message = str(exc.detail)
+                if exc.status_code == 404 and ('DB 未匹配' in message or '生产记录' in message):
+                    file_row = fetch_log_package_source_row(sn, file_id)
+                    diagnostics = build_log_package_diagnostics(file_row) if file_row else {}
+                    if diagnostics:
+                        save_cached_log_package_diagnostics(file_id, diagnostics)
+                    sessions = diagnostics.get('internal_sessions') or []
+                    if sessions:
+                        set_log_package_lifecycle(
+                            sn, file_id, parse_status='partial_success', storage_status='partial_stored',
+                            error_stage='db_match', error_code='no_production_match',
+                            error_message='DB 未匹配，但日志内已识别作业片段。',
+                            extra={
+                                'event_count': sum(int(row.get('event_count') or 0) for row in sessions),
+                                'job_count': len(sessions),
+                                'max_pot_temp': diagnostics.get('max_temperature'),
+                                'max_power_w': diagnostics.get('max_power_w'),
+                                'log_start_time': to_mysql_dt(diagnostics.get('log_time_start')),
+                                'log_end_time': to_mysql_dt(diagnostics.get('log_time_end')),
+                                'last_parse_at': datetime.now().replace(microsecond=0),
+                            },
+                        )
+                        finish_task_item(
+                            task_id, file_id, 'partial', reused_from='internal_sessions',
+                            error_stage='db_match', error_code='no_production_match',
+                            error_message='DB 未匹配，但日志内有可复核作业片段。',
+                            suggested_action='进入日志内部作业详情复核；无需重复下载。',
+                        )
+                    else:
+                        record_log_package_failure(
+                            sn,
+                            file_id,
+                            'parse',
+                            diagnostics.get('diagnosis_code') or 'no_internal_session',
+                            diagnostics.get('diagnosis_message') or message,
+                            diagnostics.get('suggested_action'),
+                        )
+                        finish_task_item(
+                            task_id, file_id, 'failed', error_stage='parse',
+                            error_code=diagnostics.get('diagnosis_code') or 'no_internal_session',
+                            error_message=diagnostics.get('diagnosis_message') or message,
+                            suggested_action=diagnostics.get('suggested_action'),
+                        )
+                else:
+                    package = fetch_one(
+                        "SELECT error_stage, error_code, error_message, suggested_action FROM device_log_packages WHERE sn=%s AND source_file_id=%s",
+                        (sn, file_id),
+                    ) or {}
+                    if package.get('error_stage') != 'download':
+                        record_log_package_failure(
+                            sn,
+                            file_id,
+                            package.get('error_stage') or 'parse',
+                            package.get('error_code') or 'parse_failed',
+                            package.get('error_message') or message,
+                            package.get('suggested_action') or '查看失败阶段后重试。',
+                        )
+                    finish_task_item(
+                        task_id, file_id, 'failed',
+                        error_stage=package.get('error_stage') or 'parse',
+                        error_code=package.get('error_code') or 'parse_failed',
+                        error_message=message[:500],
+                        suggested_action=package.get('suggested_action') or '查看失败阶段后重试。',
+                    )
+            except Exception as exc:
+                set_log_package_lifecycle(sn, file_id, parse_status='parse_failed')
+                record_log_package_failure(
+                    sn, file_id, 'parse', 'parse_failed', str(exc),
+                    '保留原包并提交解析器排查。',
+                )
+                finish_task_item(
+                    task_id, file_id, 'failed', error_stage='parse', error_code='parse_failed',
+                    error_message=str(exc)[:500], suggested_action='保留原包并提交解析器排查。',
+                )
+            update_lifecycle_task_counts(task_id)
+            gc.collect()
+    final = fetch_one(
+        """
+        SELECT SUM(status='failed') AS failed_count, SUM(status='partial') AS partial_count,
+               SUM(status='completed') AS completed_count
+        FROM log_parse_task_items WHERE task_id=%s
+        """,
+        (task_id,),
+    ) or {}
+    if int(final.get('failed_count') or 0):
+        final_status = 'partial' if int(final.get('completed_count') or 0) or int(final.get('partial_count') or 0) else 'failed'
+    elif int(final.get('partial_count') or 0):
+        final_status = 'partial'
+    else:
+        final_status = 'completed'
+    update_lifecycle_task_counts(task_id, status=final_status, current_stage='完成', current_file_id=0)
+    with LOG_PARSE_TASK_WORKERS_LOCK:
+        LOG_PARSE_TASK_WORKERS.pop(task_id, None)
+
+def kick_log_lifecycle_task(task_id):
+    with LOG_PARSE_TASK_WORKERS_LOCK:
+        existing = LOG_PARSE_TASK_WORKERS.get(task_id)
+        if existing and existing.is_alive():
+            return False
+        thread = threading.Thread(
+            target=process_log_lifecycle_task,
+            args=(task_id,),
+            name=f'zhiku-log-task-{task_id[:8]}',
+            daemon=True,
+        )
+        LOG_PARSE_TASK_WORKERS[task_id] = thread
+        thread.start()
+        return True
+
+def create_log_lifecycle_task(sn, start, end, mode, max_packages, username):
+    active = fetch_one(
+        """
+        SELECT task_id FROM log_parse_tasks
+        WHERE sn=%s AND start_date=%s AND end_date=%s AND mode=%s
+          AND status IN ('queued','running')
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (sn, start.date(), (end - timedelta(days=1)).date(), mode),
+    )
+    if active:
+        return lifecycle_task_payload(active['task_id']), False
+    packages = lifecycle_package_rows(sn, start, end, limit=1000)
+    selected = []
+    now = datetime.now()
+    for row in packages:
+        if len(selected) >= max_packages:
+            break
+        if row.get('remote_status') != 'available':
+            continue
+        if row.get('file_size_bytes') and int(row['file_size_bytes']) > MAX_LOG_ANALYSIS_DOWNLOAD_MB * 1024 * 1024:
+            continue
+        if mode == 'missing_only':
+            if row.get('storage_status') == 'stored':
+                continue
+            if row.get('parse_status') in ('queued', 'parsing'):
+                continue
+            if int(row.get('retry_count') or 0) >= LOG_PACKAGE_RETRY_LIMIT:
+                continue
+            if row.get('next_retry_at') and to_mysql_dt(row.get('next_retry_at')) > now:
+                continue
+        selected.append(row)
+    task_id = str(uuid.uuid4())
+    created_at = datetime.now().replace(microsecond=0)
+    execute_local(
+        """
+        INSERT INTO log_parse_tasks(
+            task_id, sn, start_date, end_date, mode, status, total_count, queued_count,
+            created_by, created_at, updated_at
+        ) VALUES (%s,%s,%s,%s,%s,'queued',%s,%s,%s,%s,%s)
+        """,
+        (
+            task_id, sn, start.date(), (end - timedelta(days=1)).date(), mode,
+            len(selected), len(selected), username, created_at, created_at,
+        ),
+    )
+    item_rows = []
+    for index, row in enumerate(selected, start=1):
+        file_id = int(row['source_file_id'])
+        item_rows.append((task_id, sn, file_id, index, 'queued', '等待处理', created_at))
+        set_log_package_lifecycle(
+            sn, file_id, download_status='queued' if row.get('download_status') not in ('downloaded',) else None,
+            unzip_status='queued' if row.get('unzip_status') not in ('unzipped',) else None,
+            parse_status='queued', storage_status=row.get('storage_status') or 'not_stored',
+        )
+    executemany_local(
+        """
+        INSERT INTO log_parse_task_items(
+            task_id, sn, source_file_id, item_order, status, current_stage, updated_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s)
+        """,
+        item_rows,
+    )
+    if selected:
+        kick_log_lifecycle_task(task_id)
+    else:
+        update_lifecycle_task_counts(task_id, status='completed', current_stage='无需补齐')
+    return lifecycle_task_payload(task_id), True
+
+def lifecycle_summary_payload(sn, start, end, status='', limit=500):
+    rows = lifecycle_package_rows(sn, start, end, status=status, limit=limit)
+    counts = Counter(row.get('lifecycle_status') or 'unknown' for row in rows)
+    total = len(rows)
+    stored = int(counts.get('stored', 0))
+    failures = Counter(row.get('error_code') or row.get('lifecycle_status') for row in rows if row.get('error_code'))
+    tasks = fetch_all(
+        """
+        SELECT task_id, status, mode, total_count, queued_count, running_count, completed_count,
+               partial_count, failed_count, skipped_count, current_stage, current_file_id,
+               created_by, created_at, started_at, finished_at, updated_at
+        FROM log_parse_tasks WHERE sn=%s
+        ORDER BY created_at DESC LIMIT 10
+        """,
+        (sn,),
+    )
+    for row in rows:
+        row['detected_log_kinds'] = [part for part in str(row.get('detected_log_kinds') or '').split(',') if part]
+        row['source_file_id'] = int(row.get('source_file_id'))
+        row['id'] = row['source_file_id']
+        row['downloadable'] = row.get('remote_status') == 'available'
+        row['analytics_status'] = row.get('ui_status')
+    return {
+        'sn': sn,
+        'range': {
+            'start_date': start.strftime('%Y-%m-%d'),
+            'end_date': (end - timedelta(days=1)).strftime('%Y-%m-%d'),
+        },
+        'summary': {
+            'total_packages': total,
+            'remote_available': sum(1 for row in rows if row.get('remote_status') == 'available'),
+            'downloaded': sum(1 for row in rows if row.get('download_status') == 'downloaded'),
+            'unzipped': sum(1 for row in rows if row.get('unzip_status') == 'unzipped'),
+            'parsed': sum(1 for row in rows if row.get('parse_status') in ('parsed', 'partial_success')),
+            'stored': stored,
+            'failed': sum(1 for row in rows if row.get('error_code')),
+            'running': sum(1 for row in rows if row.get('lifecycle_status') in ('queued', 'parsing', 'download_downloading', 'unzip_unzipping')),
+            'completion_rate': round(stored * 100 / total, 1) if total else 0,
+        },
+        'status_counts': dict(counts),
+        'failure_groups': [{'code': key, 'count': value} for key, value in failures.most_common()],
+        'packages': rows,
+        'tasks': tasks,
+        'retention': {
+            'zip_days': LOG_PACKAGE_ZIP_RETENTION_DAYS,
+            'unzip_days': LOG_PACKAGE_UNZIP_RETENTION_DAYS,
+            'parsed_json_days': 30,
+            'structured_db': '长期保留',
+        },
+        'generated_at': datetime.now().isoformat(sep=' ', timespec='seconds'),
+    }
 
 def parse_date_range(start_date, end_date, max_days=370):
     try:
@@ -2317,6 +3311,7 @@ def kick_temperature_calibration_scan(sn):
         return True
 
 def temperature_calibration_payload(sn, start, end, rows):
+    device_meta = get_log_evidence_device_meta(sn)
     package_ids = [int(row['id']) for row in rows if row.get('id')]
     scans = []
     if package_ids:
@@ -2337,7 +3332,7 @@ def temperature_calibration_payload(sn, start, end, rows):
     event_rows = fetch_all(
         """
         SELECT id, source_file_id, event_type, event_label, event_time, matched_keyword,
-               source_log_name, raw_log_excerpt
+               source_log_name, line_no, line_hash, raw_log_excerpt, evidence_level, event_hash
         FROM device_log_events
         WHERE sn=%s AND event_category='temperature_calibration'
           AND event_time >= %s AND event_time < %s
@@ -2346,6 +3341,22 @@ def temperature_calibration_payload(sn, start, end, rows):
         """,
         (sn, start, end),
     )
+    job_rows = []
+    if package_ids:
+        placeholders = ','.join(['%s'] * len(package_ids))
+        job_rows = fetch_all(
+            f"""
+            SELECT id, source_file_id, cook_start_time, cook_end_time
+            FROM cook_jobs
+            WHERE sn=%s AND source_file_id IN ({placeholders})
+              AND cook_start_time < %s AND cook_end_time >= %s
+            ORDER BY cook_start_time
+            """,
+            tuple([sn] + package_ids + [end, start]),
+        )
+    jobs_by_package = defaultdict(list)
+    for job in job_rows:
+        jobs_by_package[int(job.get('source_file_id') or 0)].append(job)
     deduped = []
     seen = set()
     for event in event_rows:
@@ -2357,6 +3368,27 @@ def temperature_calibration_payload(sn, start, end, rows):
             continue
         seen.add(key)
         package = package_map.get(int(event.get('source_file_id') or 0), {})
+        event['source_zip'] = package.get('file_name')
+        event['source_file'] = event.get('source_log_name')
+        event['timestamp'] = event.get('event_time')
+        event['date'] = str(event.get('event_time') or '')[:10] or None
+        event['raw_line'] = event.get('raw_log_excerpt')
+        event['line_hash'] = event.get('line_hash') or event.get('event_hash')
+        event['event_type'] = event.get('event_type') or 'temperature_calibration_event'
+        event['evidence_level'] = event.get('evidence_level') or ('高' if event.get('line_no') else '中')
+        event_time = to_mysql_dt(event.get('event_time'))
+        matched_job_id = None
+        if event_time:
+            for job in jobs_by_package.get(int(event.get('source_file_id') or 0), []):
+                job_start = to_mysql_dt(job.get('cook_start_time'))
+                job_end = to_mysql_dt(job.get('cook_end_time'))
+                if job_start and job_end and job_start - timedelta(minutes=2) <= event_time <= job_end + timedelta(minutes=2):
+                    matched_job_id = job.get('id')
+                    break
+        event['matched_job_id'] = matched_job_id
+        event['sn'] = sn
+        event['customer'] = device_meta['customer']
+        event['region'] = device_meta['region']
         event['package_name'] = package.get('file_name')
         deduped.append(event)
     status_counts = Counter((row.get('scan_status') or 'pending') for row in scans)
@@ -2454,6 +3486,219 @@ def download_log_zip(url):
                 raise HTTPException(status_code=413, detail=f"Log file exceeds {MAX_LOG_ANALYSIS_DOWNLOAD_MB}MB analysis limit")
     return bytes(data)
 
+def safe_extract_zip(zip_path, destination):
+    destination = Path(destination)
+    temp_destination = destination.with_name(f"{destination.name}.part")
+    if temp_destination.exists():
+        import shutil
+        shutil.rmtree(temp_destination, ignore_errors=True)
+    temp_destination.mkdir(parents=True, exist_ok=True)
+    detected_kinds = set()
+    file_count = 0
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            bad_member = zf.testzip()
+            if bad_member:
+                raise zipfile.BadZipFile(f'CRC error: {bad_member}')
+            root = temp_destination.resolve()
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                member_name = info.filename.replace('\\', '/').lstrip('/')
+                member_parts = [part for part in member_name.split('/') if part not in ('', '.')]
+                if not member_parts or '..' in member_parts or ':' in member_parts[0]:
+                    raise zipfile.BadZipFile('Unsafe ZIP member path')
+                relative_path = Path(*member_parts)
+                target = (temp_destination / relative_path).resolve()
+                if root not in target.parents:
+                    raise zipfile.BadZipFile('Unsafe ZIP member path')
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(info) as source, target.open('wb') as output:
+                    while True:
+                        chunk = source.read(1024 * 512)
+                        if not chunk:
+                            break
+                        output.write(chunk)
+                file_count += 1
+                kind = classify_log_file(Path(info.filename).name)
+                if kind != 'other':
+                    detected_kinds.add(kind)
+        if destination.exists():
+            import shutil
+            shutil.rmtree(destination, ignore_errors=True)
+        temp_destination.rename(destination)
+        return {
+            'path': str(destination),
+            'file_count': file_count,
+            'detected_log_kinds': sorted(detected_kinds),
+        }
+    except Exception:
+        import shutil
+        shutil.rmtree(temp_destination, ignore_errors=True)
+        raise
+
+def fetch_log_package_source_row(sn, file_id):
+    return fetch_one(
+        "SELECT id, sn, file_name, file_length, pic AS url, type, create_time, update_time, cos_deleted "
+        "FROM machine_ftp WHERE id=%s AND sn=%s LIMIT 1",
+        (int(file_id), sn),
+        source=True,
+        database='btyc',
+    )
+
+def ensure_log_package_downloaded(file_row, force=False):
+    sn = file_row.get('sn')
+    file_id = int(file_row.get('id'))
+    zip_path, _ = package_cache_paths(sn, file_id)
+    expected_size = source_file_size_bytes(file_row.get('file_length'))
+    if not force and zip_path.exists() and zip_path.stat().st_size > 0:
+        set_log_package_lifecycle(
+            sn, file_id, remote_status='available', download_status='downloaded',
+            extra={'downloaded_path': str(zip_path), 'last_download_at': datetime.fromtimestamp(zip_path.stat().st_mtime)},
+        )
+        return zip_path, 'download_cache'
+    if file_row.get('cos_deleted'):
+        set_log_package_lifecycle(
+            sn, file_id, remote_status='deleted', download_status='skipped',
+            unzip_status='skipped', parse_status='skipped',
+            error_stage='download', error_code='cos_deleted', error_message='COS 文件已删除。',
+        )
+        raise HTTPException(status_code=410, detail='Log file has been deleted from COS')
+    if not file_row.get('url'):
+        set_log_package_lifecycle(
+            sn, file_id, remote_status='url_missing', download_status='download_failed',
+            unzip_status='skipped', parse_status='skipped',
+            error_stage='download', error_code='cos_url_missing', error_message='日志包没有可用下载地址。',
+        )
+        raise HTTPException(status_code=404, detail='Log file URL missing')
+    if expected_size and expected_size > MAX_LOG_ANALYSIS_DOWNLOAD_MB * 1024 * 1024:
+        set_log_package_lifecycle(
+            sn, file_id, download_status='file_too_large',
+            unzip_status='skipped', parse_status='skipped',
+            error_stage='download', error_code='file_too_large',
+            error_message=f'日志包超过 {MAX_LOG_ANALYSIS_DOWNLOAD_MB}MB 保护上限。',
+        )
+        raise HTTPException(status_code=413, detail=f'Log file exceeds {MAX_LOG_ANALYSIS_DOWNLOAD_MB}MB analysis limit')
+    set_log_package_lifecycle(sn, file_id, remote_status='available', download_status='downloading')
+    part_path = zip_path.with_suffix('.zip.part')
+    try:
+        payload = download_log_zip(file_row['url'])
+        part_path.write_bytes(payload)
+        part_path.replace(zip_path)
+        digest = hashlib.sha256(payload).hexdigest()
+        set_log_package_lifecycle(
+            sn, file_id, download_status='downloaded',
+            extra={
+                'downloaded_path': str(zip_path),
+                'last_download_at': datetime.now().replace(microsecond=0),
+                'source_content_hash': digest,
+                'retry_count': 0,
+                'next_retry_at': None,
+            },
+        )
+        return zip_path, 'remote_download'
+    except Exception as exc:
+        part_path.unlink(missing_ok=True)
+        package = fetch_one(
+            "SELECT retry_count FROM device_log_packages WHERE sn=%s AND source_file_id=%s",
+            (sn, file_id),
+        ) or {}
+        retry_count = int(package.get('retry_count') or 0) + 1
+        code = 'file_too_large' if isinstance(exc, HTTPException) and exc.status_code == 413 else 'download_failed'
+        next_retry = datetime.now() + timedelta(minutes=lifecycle_retry_delay_minutes(retry_count))
+        set_log_package_lifecycle(
+            sn, file_id, download_status=code,
+            unzip_status='skipped', parse_status='skipped',
+            error_stage='download', error_code=code, error_message=str(getattr(exc, 'detail', exc))[:500],
+            extra={'retry_count': retry_count, 'next_retry_at': next_retry},
+        )
+        raise
+
+def ensure_log_package_unzipped(file_row, zip_path, force=False):
+    sn = file_row.get('sn')
+    file_id = int(file_row.get('id'))
+    _, unzip_dir = package_cache_paths(sn, file_id)
+    manifest_path = unzip_dir / '.manifest.json'
+    if not force and unzip_dir.exists() and manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+            set_log_package_lifecycle(
+                sn, file_id, unzip_status='unzipped',
+                extra={
+                    'unzipped_path': str(unzip_dir),
+                    'detected_file_count': int(manifest.get('file_count') or 0),
+                    'detected_log_kinds': ','.join(manifest.get('detected_log_kinds') or []),
+                    'last_unzip_at': datetime.fromtimestamp(manifest_path.stat().st_mtime),
+                },
+            )
+            return unzip_dir, manifest, 'unzip_cache'
+        except Exception:
+            pass
+    set_log_package_lifecycle(sn, file_id, unzip_status='unzipping')
+    try:
+        manifest = safe_extract_zip(zip_path, unzip_dir)
+        manifest_path = unzip_dir / '.manifest.json'
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False), encoding='utf-8')
+        set_log_package_lifecycle(
+            sn, file_id, unzip_status='unzipped',
+            extra={
+                'unzipped_path': str(unzip_dir),
+                'detected_file_count': int(manifest.get('file_count') or 0),
+                'detected_log_kinds': ','.join(manifest.get('detected_log_kinds') or []),
+                'last_unzip_at': datetime.now().replace(microsecond=0),
+                'retry_count': 0,
+                'next_retry_at': None,
+            },
+        )
+        return unzip_dir, manifest, 'fresh_unzip'
+    except zipfile.BadZipFile as exc:
+        set_log_package_lifecycle(
+            sn, file_id, unzip_status='zip_corrupted', parse_status='skipped',
+            error_stage='unzip', error_code='zip_corrupted', error_message=str(exc)[:500],
+        )
+        raise HTTPException(status_code=400, detail='Downloaded log file is not a valid zip')
+    except Exception as exc:
+        set_log_package_lifecycle(
+            sn, file_id, unzip_status='unzip_failed', parse_status='skipped',
+            error_stage='unzip', error_code='unzip_failed', error_message=str(exc)[:500],
+        )
+        raise
+
+def cleanup_log_package_stage_cache():
+    now = time.time()
+    removed = {'zip': 0, 'unzip': 0, 'parsed_json': 0}
+    zip_cutoff = now - LOG_PACKAGE_ZIP_RETENTION_DAYS * 86400
+    unzip_cutoff = now - LOG_PACKAGE_UNZIP_RETENTION_DAYS * 86400
+    parsed_cutoff = now - 30 * 86400
+    for path in LOG_PACKAGE_DOWNLOAD_DIR.glob('*/*.zip'):
+        try:
+            if path.stat().st_mtime < zip_cutoff:
+                path.unlink()
+                removed['zip'] += 1
+        except OSError:
+            pass
+    for sn_dir in LOG_PACKAGE_UNZIP_DIR.glob('*'):
+        if not sn_dir.is_dir():
+            continue
+        for path in sn_dir.glob('*'):
+            try:
+                if path.is_dir() and path.stat().st_mtime < unzip_cutoff:
+                    import shutil
+                    shutil.rmtree(path, ignore_errors=True)
+                    removed['unzip'] += 1
+            except OSError:
+                pass
+    parsed_dir = CACHE_DIR / 'cook_temperature'
+    if parsed_dir.exists():
+        for path in parsed_dir.glob('*.json'):
+            try:
+                if path.stat().st_mtime < parsed_cutoff:
+                    path.unlink()
+                    removed['parsed_json'] += 1
+            except OSError:
+                pass
+    return removed
+
 def text_from_zip_member(zf, info, max_bytes=8 * 1024 * 1024):
     if info.file_size > max_bytes:
         data = zf.open(info).read(max_bytes)
@@ -2461,9 +3706,137 @@ def text_from_zip_member(zf, info, max_bytes=8 * 1024 * 1024):
         data = zf.read(info)
     return data.decode('utf-8', errors='ignore')
 
+def get_log_evidence_device_meta(sn, robot=None):
+    device = robot or {}
+    if not device:
+        device = fetch_one(
+            "SELECT company_id FROM sop_robot WHERE machinecode=%s LIMIT 1",
+            (sn,),
+            source=True,
+            database='btyc',
+        ) or {}
+    company = get_company_info(device.get('company_id'))
+    return {
+        'customer': company.get('common_name') or company.get('company_name') or '未知',
+        'region': company.get('geo_cityname') or company.get('geo_pname') or company.get('area_code') or '未知',
+    }
+
+def resolve_log_package_source(sn, source_file_id=None, source_zip=''):
+    if source_file_id:
+        row = fetch_one(
+            "SELECT id, sn, file_name, file_length, pic AS url, create_time, cos_deleted "
+            "FROM machine_ftp WHERE id=%s AND sn=%s LIMIT 1",
+            (int(source_file_id), sn),
+            source=True,
+            database='btyc',
+        )
+    elif source_zip:
+        row = fetch_one(
+            "SELECT id, sn, file_name, file_length, pic AS url, create_time, cos_deleted "
+            "FROM machine_ftp WHERE sn=%s AND file_name=%s ORDER BY id DESC LIMIT 1",
+            (sn, source_zip),
+            source=True,
+            database='btyc',
+        )
+    else:
+        raise HTTPException(status_code=400, detail="缺少 source_file_id 或 source_zip，无法定位日志包")
+    if not row:
+        raise HTTPException(status_code=404, detail="未找到来源日志包，请先补齐或重新同步该设备日志")
+    if row.get('cos_deleted') or not row.get('url'):
+        raise HTTPException(status_code=409, detail="来源日志包不可下载或已被删除，请先补齐日志包")
+    return row
+
+def load_log_evidence_file(sn, source_file_id=None, source_zip='', source_file=''):
+    package = resolve_log_package_source(sn, source_file_id=source_file_id, source_zip=source_zip)
+    cache_key = hashlib.sha256(
+        f"{sn}|{int(package['id'])}|{source_file}".encode('utf-8')
+    ).hexdigest()
+    cache_path = LOG_EVIDENCE_FILE_CACHE_DIR / f"{cache_key}.log"
+    cache_name_path = LOG_EVIDENCE_FILE_CACHE_DIR / f"{cache_key}.name"
+    if cache_path.exists() and cache_name_path.exists():
+        actual_source_file = cache_name_path.read_text(encoding='utf-8').strip() or source_file
+        text = cache_path.read_text(encoding='utf-8', errors='ignore')
+        return package, actual_source_file, text.splitlines()
+    try:
+        zip_bytes = download_log_zip(package['url'])
+        zf = zipfile.ZipFile(BytesIO(zip_bytes))
+    except HTTPException:
+        raise
+    except zipfile.BadZipFile as exc:
+        raise HTTPException(status_code=422, detail="来源日志包不是有效 ZIP，无法读取原始证据") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"来源日志包下载失败：{str(exc)[:180]}") from exc
+    with zf:
+        candidates = [
+            info for info in zf.infolist()
+            if not info.is_dir() and (
+                info.filename == source_file
+                or Path(info.filename).name == Path(source_file or '').name
+            )
+        ]
+        if not candidates:
+            raise HTTPException(status_code=404, detail="日志包中未找到来源日志文件，请重新扫描该日志包")
+        info = candidates[0]
+        text = text_from_zip_member(zf, info, max_bytes=32 * 1024 * 1024)
+        actual_source_file = info.filename
+    try:
+        cache_path.write_text(text, encoding='utf-8')
+        cache_name_path.write_text(actual_source_file, encoding='utf-8')
+    except OSError:
+        pass
+    del zip_bytes
+    gc.collect()
+    return package, actual_source_file, text.splitlines()
+
+def find_matched_job_id(sn, source_file_id, timestamp):
+    event_time = to_mysql_dt(timestamp)
+    if not event_time:
+        return None
+    row = fetch_one(
+        """
+        SELECT id
+        FROM cook_jobs
+        WHERE sn=%s AND source_file_id=%s
+          AND cook_start_time IS NOT NULL AND cook_end_time IS NOT NULL
+          AND %s BETWEEN DATE_SUB(cook_start_time, INTERVAL 2 MINUTE)
+                     AND DATE_ADD(cook_end_time, INTERVAL 2 MINUTE)
+        ORDER BY ABS(TIMESTAMPDIFF(SECOND, cook_start_time, %s))
+        LIMIT 1
+        """,
+        (sn, int(source_file_id), event_time, event_time),
+    )
+    return row.get('id') if row else None
+
+def locate_log_target_line(sn, source_file_id, source_file, lines, line_hash='', line_no=None, timestamp='', raw_line=''):
+    if line_hash:
+        for idx, line in enumerate(lines):
+            candidate = build_log_line_hash(sn, source_file_id, source_file, idx + 1, line)
+            if hmac.compare_digest(candidate, line_hash):
+                return idx
+    if line_no and 1 <= int(line_no) <= len(lines):
+        return int(line_no) - 1
+    if raw_line:
+        normalized = re.sub(r'\s+', ' ', str(raw_line).strip())
+        for idx, line in enumerate(lines):
+            if re.sub(r'\s+', ' ', line.strip()) == normalized:
+                return idx
+    target_time = to_mysql_dt(timestamp)
+    if target_time:
+        nearest = None
+        for idx, line in enumerate(lines):
+            parsed = parse_log_ts(line)
+            if not parsed:
+                continue
+            delta = abs((parsed - target_time).total_seconds())
+            if nearest is None or delta < nearest[0]:
+                nearest = (delta, idx)
+        if nearest and nearest[0] <= 300:
+            return nearest[1]
+    return None
+
 def classify_log_file(name):
-    base = Path(name).name
-    if base.startswith('android_'):
+    base = Path(name).name.lower()
+    if base.startswith('android') and base.endswith('.log'):
         return 'android_app'
     if base.startswith('debug'):
         return 'mcu_debug'
@@ -2471,7 +3844,7 @@ def classify_log_file(name):
         return 'main_board'
     if base == 'oildrum_board.log':
         return 'oildrum_board'
-    if base == 'temperature.log':
+    if base.startswith('temperature') and base.endswith('.log'):
         return 'temperature'
     return 'other'
 
@@ -2884,6 +4257,10 @@ def is_temperature_log_name(name):
     base = (name or '').lower()
     return base.startswith('temperature') and base.endswith('.log')
 
+def build_log_line_hash(sn, source_file_id, source_file, line_no, raw_line):
+    payload = f"{sn}|{int(source_file_id)}|{source_file}|{int(line_no)}|{raw_line}"
+    return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
 TEMPERATURE_CALIBRATION_PATTERNS = [
     re.compile(r'温度.{0,16}(?:校准|校正|矫正|标定|修正)', re.I),
     re.compile(r'(?:校准|校正|矫正|标定|修正).{0,16}温度', re.I),
@@ -2929,14 +4306,15 @@ def classify_temperature_calibration_line(line):
         'matched_keyword': matched[:120],
     }
 
-def scan_temperature_calibration_text(text, source_log_name, fallback_time=None):
+def scan_temperature_calibration_text(text, source_log_name, sn, source_file_id, fallback_time=None):
     events = []
     seen = set()
-    for line in str(text or '').splitlines():
+    for line_no, line in enumerate(str(text or '').splitlines(), start=1):
         classification = classify_temperature_calibration_line(line)
         if not classification:
             continue
-        ts = parse_log_ts(line) or fallback_time
+        parsed_ts = parse_log_ts(line)
+        ts = parsed_ts or fallback_time
         raw = line.strip()[:1200]
         dedupe_key = (ts.isoformat() if ts else '', re.sub(r'\s+', ' ', raw))
         if dedupe_key in seen:
@@ -2946,7 +4324,10 @@ def scan_temperature_calibration_text(text, source_log_name, fallback_time=None)
             **classification,
             'event_time': ts,
             'source_log_name': source_log_name,
+            'line_no': line_no,
+            'line_hash': build_log_line_hash(sn, source_file_id, source_log_name, line_no, line),
             'raw_log_excerpt': raw,
+            'evidence_level': '高' if parsed_ts else '中',
         })
     return events
 
@@ -2968,14 +4349,16 @@ def persist_device_log_events(sn, source_file_id, scan_type, events):
         payload.append((
             sn, int(source_file_id), scan_type, event.get('event_type') or 'event',
             event.get('event_label') or '日志事件', event_time, event.get('matched_keyword'),
-            event.get('source_log_name'), raw, event_hash, LOG_EVENT_SCAN_VERSION, now,
+            event.get('source_log_name'), event.get('line_no'), event.get('line_hash'), raw,
+            event.get('evidence_level') or '中', event_hash, LOG_EVENT_SCAN_VERSION, now,
         ))
     executemany_local(
         """
         INSERT IGNORE INTO device_log_events(
             sn, source_file_id, event_category, event_type, event_label, event_time,
-            matched_keyword, source_log_name, raw_log_excerpt, event_hash, scan_version, created_at
-        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            matched_keyword, source_log_name, line_no, line_hash, raw_log_excerpt,
+            evidence_level, event_hash, scan_version, created_at
+        ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         payload,
     )
@@ -3006,7 +4389,13 @@ def scan_temperature_calibration_package(sn, source_file_id):
             if not is_android_log_name(base):
                 continue
             text = text_from_zip_member(zf, info, max_bytes=16 * 1024 * 1024)
-            events.extend(scan_temperature_calibration_text(text, base, fallback_time=fallback_time))
+            events.extend(scan_temperature_calibration_text(
+                text,
+                info.filename,
+                sn,
+                source_file_id,
+                fallback_time=fallback_time,
+            ))
     deduped = {}
     for event in events:
         key = (
@@ -3670,8 +5059,20 @@ def build_single_cook_temperature(
         'series': [],
     }
 
-def build_cook_temperature_analysis(sn, file_id=None, force_refresh=False):
+def build_cook_temperature_analysis(sn, file_id=None, force_refresh=False, force_redownload=False):
     real_sn, _ = resolve_sn(sn)
+    selected_file_id = int(file_id) if file_id else None
+    if selected_file_id and not force_refresh:
+        db_cached = read_cook_temperature_from_db(real_sn, selected_file_id)
+        if db_cached:
+            return db_cached
+        cached = read_cached_cook_temperature(real_sn, selected_file_id)
+        if cached:
+            try:
+                persist_cook_temperature_result(cached)
+            except Exception as exc:
+                print(f"persist cached cook temperature failed: {exc}")
+            return cached
     if file_id:
         file_row = fetch_one(
             "SELECT id, sn, file_name, file_length, pic AS url, type, create_time, update_time, cos_deleted "
@@ -3688,10 +5089,8 @@ def build_cook_temperature_analysis(sn, file_id=None, force_refresh=False):
             source=True,
             database='btyc',
         )
-    if not file_row or not file_row.get('url'):
+    if not file_row:
         raise HTTPException(status_code=404, detail="Log file not found")
-    if file_row.get('cos_deleted'):
-        raise HTTPException(status_code=410, detail="Log file has been deleted from COS")
 
     selected_file_id = int(file_row.get('id'))
     if not force_refresh:
@@ -3706,8 +5105,23 @@ def build_cook_temperature_analysis(sn, file_id=None, force_refresh=False):
                 print(f"persist cached cook temperature failed: {exc}")
             return cached
 
-    mark_log_package_status(real_sn, selected_file_id, download_status='downloaded', parse_status='parsing', storage_status='not_stored')
-    zip_bytes = download_log_zip(file_row['url'])
+    zip_path, download_reuse = ensure_log_package_downloaded(file_row, force=force_redownload)
+    unzip_dir, unzip_manifest, unzip_reuse = ensure_log_package_unzipped(file_row, zip_path, force=force_redownload)
+    set_log_package_lifecycle(
+        real_sn,
+        selected_file_id,
+        download_status='downloaded',
+        unzip_status='unzipped',
+        parse_status='parsing',
+        storage_status='not_stored',
+        extra={
+            'downloaded_path': str(zip_path),
+            'unzipped_path': str(unzip_dir),
+            'detected_log_kinds': ','.join(unzip_manifest.get('detected_log_kinds') or []),
+            'detected_file_count': int(unzip_manifest.get('file_count') or 0),
+        },
+    )
+    zip_bytes = zip_path.read_bytes()
     try:
         zf = zipfile.ZipFile(BytesIO(zip_bytes))
     except zipfile.BadZipFile:
@@ -3780,8 +5194,9 @@ def build_cook_temperature_analysis(sn, file_id=None, force_refresh=False):
     )
     if not cook_logs:
         no_match_detail = (
-            "日志覆盖时间内没有匹配到生产记录："
-            f"{coverage_start.isoformat(sep=' ')} ~ {coverage_end.isoformat(sep=' ')}"
+            "DB 未匹配到生产记录；这不代表日志内没有作业。"
+            "请返回“日志包”点击“诊断”，查看日志内部烹饪、养锅、功率、温度和投料证据。"
+            f" 日志覆盖：{coverage_start.isoformat(sep=' ')} ~ {coverage_end.isoformat(sep=' ')}"
         )
         mark_log_package_status(real_sn, selected_file_id, download_status='downloaded', parse_status='no_production_match', storage_status='not_stored', error_message=no_match_detail)
         raise HTTPException(
@@ -3831,6 +5246,11 @@ def build_cook_temperature_analysis(sn, file_id=None, force_refresh=False):
             'newer_production_not_covered': newer_uncovered,
             'latest_production_time': latest_overall.get('create_time') if latest_overall else None,
             'source_summary': sample_source_summary(temperature_series),
+            'stage_reuse': {
+                'download': download_reuse,
+                'unzip': unzip_reuse,
+                'parse': 'fresh_parse',
+            },
         },
         'cook_count': len(cooks),
         'cooks': cooks,
@@ -3842,6 +5262,17 @@ def build_cook_temperature_analysis(sn, file_id=None, force_refresh=False):
         'series': selected['series'],
     }
     cache_key = save_cached_cook_temperature(real_sn, selected_file_id, result)
+    set_log_package_lifecycle(
+        real_sn,
+        selected_file_id,
+        parse_status='parsed',
+        storage_status='storing',
+        extra={
+            'parsed_cache_path': str(cook_temperature_cache_path(real_sn, selected_file_id)),
+            'last_parse_at': datetime.now().replace(microsecond=0),
+            'parse_version': COOK_TEMPERATURE_CACHE_VERSION,
+        },
+    )
     try:
         persist_cook_temperature_result(result)
     except Exception as exc:
@@ -3991,6 +5422,916 @@ def build_log_analysis(file_row, zip_bytes):
             'oildrum_motor_rpm': 'oildrum_board.log dev status 第 4 个数为投料电机速度 RPM',
             'oildrum_heater_pwm': 'oildrum_board.log dev status 第 5 个数为油桶加热 PWM 占空比',
         },
+    }
+
+def log_package_diagnostics_cache_path(file_id):
+    path = CACHE_DIR / 'log_package_diagnostics'
+    path.mkdir(parents=True, exist_ok=True)
+    return path / f'{int(file_id)}.json'
+
+def read_cached_log_package_diagnostics(file_id):
+    path = log_package_diagnostics_cache_path(file_id)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding='utf-8'))
+        if payload.get('diagnostics_version') != LOG_PACKAGE_DIAGNOSTICS_VERSION:
+            return None
+        failure_codes = {
+            'download_failed', 'download_timeout', 'zip_corrupted', 'not_zip',
+            'parser_error', 'log_time_not_found', 'key_log_missing',
+        }
+        ttl = 900 if payload.get('diagnosis_code') in failure_codes else 86400
+        if time.time() - path.stat().st_mtime > ttl:
+            return None
+        payload['cache'] = {'hit': True}
+        return payload
+    except Exception:
+        path.unlink(missing_ok=True)
+        return None
+
+def save_cached_log_package_diagnostics(file_id, payload):
+    path = log_package_diagnostics_cache_path(file_id)
+    serializable = dict(payload)
+    serializable.pop('cache', None)
+    path.write_text(json.dumps(serializable, ensure_ascii=False, default=str), encoding='utf-8')
+
+def expected_log_package_bytes(file_length):
+    size_mb = parse_mb_value(file_length)
+    if size_mb is None or size_mb <= 0:
+        return None
+    return int(size_mb * 1024 * 1024)
+
+def package_size_match_status(downloaded_size, expected_size):
+    if not expected_size:
+        return 'unknown'
+    ratio = abs(downloaded_size - expected_size) / expected_size
+    return 'matched' if ratio <= 0.15 else 'mismatch'
+
+def parse_internal_log_event(line, source_file, source_kind, line_no):
+    raw = str(line or '').strip()
+    ts = parse_log_ts(raw)
+    if not ts:
+        return None
+    lower = raw.lower()
+    event_type = None
+    event_label = None
+    session_hint = None
+    recipe_id = None
+    recipe_name = None
+    command_power_w = None
+    actual_power_w = None
+    temperatures = None
+
+    cook_match = re.search(r'烹饪开始[：:]?\s*(.+)$', raw)
+    if cook_match:
+        event_type, event_label, session_hint = 'cook_start', '烹饪开始', 'cooking'
+        recipe_name = str(cook_match.group(1) or '').strip(' _:-')
+        trailing = re.search(r'^(.+?)_(\d{4,})(?:\D*)$', recipe_name)
+        if trailing:
+            recipe_name = trailing.group(1).strip(' _:-')
+            recipe_id = int(trailing.group(2))
+    elif re.search(r'快速养锅|养锅开始|protect.?pot', raw, re.I):
+        event_type, event_label, session_hint = 'protect_pot_start', '快速养锅', 'protect_pot'
+    elif re.search(r'录制菜谱', raw, re.I):
+        event_type, event_label, session_hint = 'recipe_recording_start', '录制菜谱', 'recipe_recording'
+    elif re.search(r'RecipeMessageActivity\s+onCreate', raw, re.I):
+        event_type, event_label = 'recipe_activity', '菜谱消息页面'
+    elif re.search(r'NewCookingActivity\s+onCreate|updateRobotScene\s*:\s*scene\s*=\s*COOKING', raw, re.I):
+        event_type, event_label, session_hint = 'cooking_scene', '进入烹饪场景', 'cooking'
+    elif re.search(r'ProtectPotActivity\s+onCreate', raw, re.I):
+        event_type, event_label, session_hint = 'protect_pot_start', '进入养锅场景', 'protect_pot'
+    elif re.search(r'烹饪.*结束|COOK_FINISH|COOKING_FINISH', raw, re.I):
+        event_type, event_label = 'cook_end', '烹饪结束'
+    elif re.search(r'开始检测温度', raw):
+        event_type, event_label = 'temperature_detection_start', '开始检测温度'
+    elif re.search(r'开始检测输出功率', raw):
+        event_type, event_label = 'power_detection_start', '开始检测输出功率'
+    elif re.search(r'开始投液料', raw):
+        event_type, event_label = 'liquid_material_start', '开始投液料'
+    elif re.search(r'投液料_|消耗液料|液料投料记录', raw):
+        event_type, event_label = 'liquid_material', '液料投放'
+    elif re.search(r'开始称重|称重_', raw):
+        event_type, event_label = 'weighing_start', '开始称重'
+    elif re.search(r'自动投料|auto\s*feed|投料机构', raw, re.I):
+        event_type, event_label = 'auto_material', '自动投料'
+    elif re.search(r'设置温度上限|温度上限', raw):
+        event_type, event_label = 'temperature_limit', '设置温度上限'
+    elif re.search(r'Set\s+pot\s+at|锅位设置', raw, re.I):
+        event_type, event_label = 'pot_position', '锅位设置'
+    elif re.search(r'倾锅操作|lean', raw, re.I):
+        event_type, event_label = 'tilt_pot', '倾锅操作'
+    elif re.search(r'转锅操作|开始转锅|roll mov|roll start|roll stop', raw, re.I):
+        event_type, event_label = 'rotate_pot', '转锅操作'
+    elif 'datacollectmanager' in lower:
+        event_type, event_label = 'data_collect', '数据采集'
+    elif re.search(r'CNEngine\s+speak', raw, re.I):
+        event_type, event_label = 'voice_prompt', '语音/人工操作提示'
+
+    power_sample = re.search(r'功率\s*:\s*(-?\d+(?:\.\d+)?)_(-?\d+(?:\.\d+)?)', raw)
+    power_set = re.search(r'功率设置(?:为|_)?\s*[：:]?\s*(-?\d+(?:\.\d+)?)\s*W?', raw, re.I)
+    if power_sample:
+        command_power_w = float(power_sample.group(1))
+        actual_power_w = float(power_sample.group(2))
+        event_type = event_type or 'power_sample'
+        event_label = event_label or '功率采样'
+    elif power_set:
+        command_power_w = float(power_set.group(1))
+        event_type = event_type or 'power_set'
+        event_label = event_label or '功率设置'
+
+    temp_match = re.search(r'温度\s*:_?\s*(-?\d+)_(-?\d+)_(-?\d+)', raw)
+    if not temp_match and source_kind == 'temperature':
+        temp_match = re.search(r'\]\s*(-?\d+)_(-?\d+)_(-?\d+)', raw)
+    if temp_match:
+        raw_values = [int(temp_match.group(i)) for i in (1, 2, 3)]
+        if source_kind == 'temperature':
+            temperatures = {
+                'filtered_temp': raw_values[0],
+                'infrared_temp': raw_values[1],
+                'pot_temp': raw_values[2],
+                'raw_triplet': '_'.join(map(str, raw_values)),
+            }
+        else:
+            temperatures = {
+                'core_temp': raw_values[0],
+                'coil_temp': raw_values[1],
+                'pot_temp': raw_values[2],
+                'raw_triplet': '_'.join(map(str, raw_values)),
+            }
+        event_type = event_type or 'temperature_sample'
+        event_label = event_label or '温度采样'
+
+    if not event_type:
+        return None
+    return {
+        'ts': ts,
+        'time': ts.isoformat(sep=' '),
+        'event_type': event_type,
+        'event_label': event_label,
+        'session_hint': session_hint,
+        'recipe_id': recipe_id,
+        'recipe_name': recipe_name,
+        'command_power_w': command_power_w,
+        'actual_power_w': actual_power_w,
+        'temperatures': temperatures,
+        'source_file': source_file,
+        'source_kind': source_kind,
+        'line_no': line_no,
+        'raw': raw[:1000],
+    }
+
+def internal_session_summary(events, index):
+    start = events[0]['ts']
+    end = events[-1]['ts']
+    session_type = next((row.get('session_hint') for row in events if row.get('session_hint')), None) or 'manual_action'
+    recipe_id = next((row.get('recipe_id') for row in events if row.get('recipe_id')), None)
+    recipe_name = next((row.get('recipe_name') for row in events if row.get('recipe_name')), None)
+    power_values = []
+    temperature_values = []
+    material_count = 0
+    tilt_count = 0
+    roll_count = 0
+    evidence = []
+    for row in events:
+        for value in (row.get('command_power_w'), row.get('actual_power_w')):
+            if value is not None:
+                power_values.append(float(value))
+        temp = row.get('temperatures') or {}
+        if temp.get('pot_temp') is not None:
+            temperature_values.append(float(temp['pot_temp']))
+        if row.get('event_type') in ('liquid_material_start', 'liquid_material', 'weighing_start'):
+            material_count += 1
+        if row.get('event_type') == 'tilt_pot':
+            tilt_count += 1
+        if row.get('event_type') == 'rotate_pot':
+            roll_count += 1
+        if len(evidence) < 80:
+            evidence.append({
+                'time': row.get('time'),
+                'event_type': row.get('event_type'),
+                'event_label': row.get('event_label'),
+                'source_file': row.get('source_file'),
+                'line_no': row.get('line_no'),
+                'raw': row.get('raw'),
+                'command_power_w': row.get('command_power_w'),
+                'actual_power_w': row.get('actual_power_w'),
+                'temperatures': row.get('temperatures'),
+            })
+    max_temp = round(max(temperature_values), 1) if temperature_values else None
+    max_power = round(max(power_values), 1) if power_values else None
+    risk_tags = []
+    if max_temp is not None:
+        if max_temp >= 350:
+            risk_tags.append('超 350℃')
+        elif max_temp >= 300:
+            risk_tags.append('超 300℃')
+        elif max_temp >= 250:
+            risk_tags.append('超 250℃')
+    if max_power is not None and max_power >= 15000:
+        risk_tags.append('15kW 持续')
+    elif max_power is not None and max_power >= 12000:
+        risk_tags.append('高功率')
+    if session_type == 'protect_pot' and max_temp is not None and max_temp >= 250:
+        risk_tags.append('养锅高温')
+    return {
+        'session_id': f'internal-{index}-{int(start.timestamp())}',
+        'session_type': session_type if session_type in ('cooking', 'protect_pot', 'recipe_recording', 'manual_action') else 'unknown',
+        'start_time': start.isoformat(sep=' '),
+        'end_time': end.isoformat(sep=' '),
+        'duration_seconds': max(0, int((end - start).total_seconds())),
+        'recipe_id': recipe_id,
+        'recipe_name': recipe_name,
+        'source': 'log_internal',
+        'matched_db_job_id': None,
+        'match_confidence': 0,
+        'max_power_w': max_power,
+        'max_pot_temp': max_temp,
+        'avg_pot_temp': round(statistics.mean(temperature_values), 1) if temperature_values else None,
+        'first_pot_temp': round(temperature_values[0], 1) if temperature_values else None,
+        'last_pot_temp': round(temperature_values[-1], 1) if temperature_values else None,
+        'event_count': len(events),
+        'temperature_sample_count': len(temperature_values),
+        'power_event_count': sum(1 for row in events if row.get('command_power_w') is not None or row.get('actual_power_w') is not None),
+        'material_event_count': material_count,
+        'tilt_event_count': tilt_count,
+        'roll_event_count': roll_count,
+        'risk_tags': risk_tags,
+        'evidence_lines': evidence,
+    }
+
+def build_internal_sessions(events):
+    deduped = {}
+    for row in events or []:
+        key = (
+            row.get('ts'),
+            row.get('event_type'),
+            re.sub(r'\s+', ' ', str(row.get('raw') or '')),
+        )
+        deduped[key] = row
+    rows = sorted(deduped.values(), key=lambda row: (row['ts'], row.get('source_file') or '', row.get('line_no') or 0))
+    if not rows:
+        return []
+    sessions = []
+    current = []
+    current_hint = None
+    strong_start_types = {'cook_start', 'protect_pot_start', 'recipe_recording_start', 'cooking_scene'}
+    for row in rows:
+        gap = (row['ts'] - current[-1]['ts']).total_seconds() if current else 0
+        hint = row.get('session_hint')
+        begins_new = row.get('event_type') in strong_start_types
+        if current and (
+            gap > 900
+            or (begins_new and hint and current_hint and hint != current_hint and current_hint != 'cooking')
+            or (row.get('event_type') == 'cook_start' and current_hint == 'cooking' and gap > 120)
+        ):
+            sessions.append(internal_session_summary(current, len(sessions) + 1))
+            current = []
+            current_hint = None
+        current.append(row)
+        current_hint = current_hint or hint
+        if row.get('event_type') == 'cook_end':
+            sessions.append(internal_session_summary(current, len(sessions) + 1))
+            current = []
+            current_hint = None
+    if current:
+        sessions.append(internal_session_summary(current, len(sessions) + 1))
+    return sessions[:120]
+
+def compact_internal_session(session):
+    return {key: value for key, value in session.items() if key != 'evidence_lines'}
+
+def build_target_job_match_diagnosis(target_job_time, coverage_start, coverage_end, db_rows, internal_sessions, detected_kinds):
+    target = to_mysql_dt(target_job_time)
+    if not target:
+        return None
+    before = []
+    after = []
+    for session in internal_sessions:
+        start = to_mysql_dt(session.get('start_time'))
+        end = to_mysql_dt(session.get('end_time')) or start
+        if not start:
+            continue
+        if start <= target <= end:
+            before.append((0, session))
+            after.append((0, session))
+        elif end and end < target:
+            before.append(((target - end).total_seconds(), session))
+        else:
+            after.append(((start - target).total_seconds(), session))
+    before.sort(key=lambda item: item[0])
+    after.sort(key=lambda item: item[0])
+    db_match = None
+    for row in db_rows:
+        start = to_mysql_dt(row.get('create_time'))
+        end = to_mysql_dt(row.get('end_time')) or start
+        if start and end and start - timedelta(minutes=2) <= target <= end + timedelta(minutes=2):
+            db_match = row
+            break
+    nearest = (before[:1] + after[:1])
+    nearest_delta = min([item[0] for item in nearest], default=None)
+    if coverage_start and coverage_end and not (coverage_start <= target <= coverage_end):
+        failure_reason = 'log_time_not_cover_job'
+        suggested = '更换覆盖目标作业时间的日志包，或先核对设备与日志时钟。'
+    elif db_match:
+        failure_reason = None
+        suggested = '已匹配数据库生产记录，可继续查看温度和功率证据。'
+    elif internal_sessions and nearest_delta is not None and nearest_delta <= 300:
+        failure_reason = 'internal_session_exists_but_no_db_record'
+        suggested = '优先查看日志内作业证据；同时核对数据库漏记、时区或设备时钟漂移。'
+    elif internal_sessions:
+        failure_reason = 'timezone_or_clock_drift_suspected'
+        suggested = '日志内存在作业但时间偏差较大，建议核对设备时区和日志/数据库时钟。'
+    elif 'temperature' not in detected_kinds and 'android_app' not in detected_kinds:
+        failure_reason = 'no_temperature_signal'
+        suggested = '当前包缺少温度信号，请换更完整日志包。'
+    else:
+        failure_reason = 'no_internal_session'
+        suggested = '当前日志覆盖内未重建出有效作业片段，请查看关键文件和原始日志。'
+    return {
+        'target_job_time': target.isoformat(sep=' '),
+        'searched_file_ids': [],
+        'db_match_status': 'matched' if db_match else 'not_matched',
+        'internal_session_match_status': 'matched' if internal_sessions and nearest_delta is not None and nearest_delta <= 300 else 'not_matched',
+        'nearest_internal_session_before': compact_internal_session(before[0][1]) if before else None,
+        'nearest_internal_session_after': compact_internal_session(after[0][1]) if after else None,
+        'log_time_start': coverage_start.isoformat(sep=' ') if coverage_start else None,
+        'log_time_end': coverage_end.isoformat(sep=' ') if coverage_end else None,
+        'failure_reason': failure_reason,
+        'suggested_next_action': suggested,
+    }
+
+def build_log_package_diagnostics(file_row, target_job_time=None):
+    result = {
+        'diagnostics_version': LOG_PACKAGE_DIAGNOSTICS_VERSION,
+        'generated_at': int(time.time()),
+        'file_id': int(file_row.get('id')),
+        'sn': file_row.get('sn'),
+        'file_name': file_row.get('file_name'),
+        'file_length': file_row.get('file_length'),
+        'create_time': file_row.get('create_time'),
+        'update_time': file_row.get('update_time'),
+        'cos_deleted': bool(file_row.get('cos_deleted')),
+        'has_cos_url': bool(file_row.get('url')),
+        'download_status': 'not_started',
+        'download_reused_from': None,
+        'http_status': None,
+        'downloaded_size': None,
+        'expected_size': expected_log_package_bytes(file_row.get('file_length')),
+        'size_match_status': 'unknown',
+        'is_zip': False,
+        'zip_open_status': 'not_started',
+        'zip_error': None,
+        'file_list_count': 0,
+        'detected_files': [],
+        'detected_log_kinds': [],
+        'has_android_log': False,
+        'has_temperature_log': False,
+        'has_main_board_log': False,
+        'has_oildrum_board_log': False,
+        'has_debug_log': False,
+        'log_time_start': None,
+        'log_time_end': None,
+        'db_production_match_count': 0,
+        'internal_sessions': [],
+        'diagnosis_level': 'error',
+        'diagnosis_code': None,
+        'diagnosis_message': '',
+        'suggested_action': '',
+        'match_diagnosis': None,
+    }
+    cached_zip, _ = package_cache_paths(file_row.get('sn'), int(file_row.get('id')))
+    if cached_zip.exists() and cached_zip.stat().st_size > 0:
+        zip_bytes = cached_zip.read_bytes()
+        result['download_status'] = 'downloaded'
+        result['download_reused_from'] = 'download_cache'
+        result['downloaded_size'] = len(zip_bytes)
+        result['size_match_status'] = package_size_match_status(len(zip_bytes), result['expected_size'])
+    else:
+        if not file_row.get('url'):
+            result.update(diagnosis_code='cos_url_missing', diagnosis_message='日志索引存在，但没有 COS 下载地址。', suggested_action='联系设备侧重新上传日志包。')
+            return result
+        if file_row.get('cos_deleted'):
+            result.update(download_status='remote_deleted', diagnosis_code='cos_deleted', diagnosis_message='COS 文件已删除。', suggested_action='联系设备侧重新上传，或查找相邻时间日志包。')
+            return result
+        try:
+            zip_bytes = download_log_zip(file_row['url'])
+            result['download_status'] = 'downloaded'
+            result['download_reused_from'] = 'remote_download'
+            result['http_status'] = 200
+            result['downloaded_size'] = len(zip_bytes)
+            result['size_match_status'] = package_size_match_status(len(zip_bytes), result['expected_size'])
+        except HTTPException as exc:
+            code = 'file_too_large' if exc.status_code == 413 else 'download_failed'
+            result.update(download_status='failed', http_status=exc.status_code, diagnosis_code=code, diagnosis_message=str(exc.detail), suggested_action='日志包超过保护上限时请先缩小范围；其他下载错误可稍后重试。')
+            return result
+        except TimeoutError as exc:
+            result.update(download_status='failed', diagnosis_code='download_timeout', diagnosis_message=str(exc), suggested_action='稍后重试或检查 COS 网络状态。')
+            return result
+        except urllib.error.HTTPError as exc:
+            result.update(download_status='failed', http_status=exc.code, diagnosis_code='download_failed', diagnosis_message=f'COS HTTP {exc.code}', suggested_action='检查 COS 地址是否过期或文件是否已删除。')
+            return result
+        except Exception as exc:
+            result.update(download_status='failed', diagnosis_code='download_failed', diagnosis_message=str(exc)[:300], suggested_action='稍后重试并检查 COS 地址。')
+            return result
+    result['is_zip'] = zipfile.is_zipfile(BytesIO(zip_bytes))
+    if not result['is_zip']:
+        result.update(zip_open_status='failed', diagnosis_code='not_zip', diagnosis_message='下载内容不是 ZIP 文件。', suggested_action='核对 machine_ftp 文件地址和上传内容。')
+        return result
+    try:
+        zf = zipfile.ZipFile(BytesIO(zip_bytes))
+        bad_member = zf.testzip()
+        if bad_member:
+            raise zipfile.BadZipFile(f'CRC error: {bad_member}')
+        result['zip_open_status'] = 'opened'
+    except zipfile.BadZipFile as exc:
+        result.update(zip_open_status='failed', zip_error=str(exc), diagnosis_code='zip_corrupted', diagnosis_message='ZIP 文件损坏或 CRC 校验失败。', suggested_action='重新上传日志包或查看相邻包。')
+        return result
+
+    internal_events = []
+    first_time = None
+    last_time = None
+    detected_kinds = set()
+    with zf:
+        infos = [info for info in zf.infolist() if not info.is_dir()]
+        result['file_list_count'] = len(infos)
+        for info in infos:
+            base = Path(info.filename).name
+            kind = classify_log_file(base)
+            if kind != 'other':
+                detected_kinds.add(kind)
+            detected = {
+                'file_name': info.filename,
+                'base_name': base,
+                'kind': kind,
+                'kind_label': log_kind_label(kind),
+                'size': info.file_size,
+                'first_time': None,
+                'last_time': None,
+                'event_count': 0,
+            }
+            if kind != 'other':
+                try:
+                    text = text_from_zip_member(zf, info, max_bytes=32 * 1024 * 1024)
+                    file_first = None
+                    file_last = None
+                    event_count = 0
+                    for line_no, line in enumerate(text.splitlines(), start=1):
+                        ts = parse_log_ts(line)
+                        if ts:
+                            file_first = file_first or ts
+                            file_last = ts
+                            first_time = ts if first_time is None or ts < first_time else first_time
+                            last_time = ts if last_time is None or ts > last_time else last_time
+                        event = parse_internal_log_event(line, info.filename, kind, line_no)
+                        if event:
+                            internal_events.append(event)
+                            event_count += 1
+                    detected.update(
+                        first_time=file_first.isoformat(sep=' ') if file_first else None,
+                        last_time=file_last.isoformat(sep=' ') if file_last else None,
+                        event_count=event_count,
+                    )
+                except Exception as exc:
+                    detected['parse_error'] = str(exc)[:200]
+            result['detected_files'].append(detected)
+
+    result['detected_log_kinds'] = sorted(detected_kinds)
+    result['has_android_log'] = 'android_app' in detected_kinds
+    result['has_temperature_log'] = 'temperature' in detected_kinds
+    result['has_main_board_log'] = 'main_board' in detected_kinds
+    result['has_oildrum_board_log'] = 'oildrum_board' in detected_kinds
+    result['has_debug_log'] = 'mcu_debug' in detected_kinds
+    result['log_time_start'] = first_time.isoformat(sep=' ') if first_time else None
+    result['log_time_end'] = last_time.isoformat(sep=' ') if last_time else None
+    sessions = build_internal_sessions(internal_events)
+    result['internal_sessions'] = sessions
+    result['internal_session_count'] = len(sessions)
+    result['temperature_sample_count'] = sum(int(row.get('temperature_sample_count') or 0) for row in sessions)
+    result['power_event_count'] = sum(int(row.get('power_event_count') or 0) for row in sessions)
+    result['material_event_count'] = sum(int(row.get('material_event_count') or 0) for row in sessions)
+    result['max_temperature'] = max(
+        [row.get('max_pot_temp') for row in sessions if row.get('max_pot_temp') is not None],
+        default=None,
+    )
+    result['max_power_w'] = max(
+        [row.get('max_power_w') for row in sessions if row.get('max_power_w') is not None],
+        default=None,
+    )
+
+    db_rows = []
+    if first_time and last_time:
+        db_rows = fetch_all(
+            "SELECT id, recipe_id, recipe_name, create_time, end_time, time AS duration_seconds "
+            "FROM sop_machinelog WHERE sn=%s AND create_time BETWEEN %s AND %s "
+            "ORDER BY create_time ASC LIMIT 140",
+            (file_row.get('sn'), first_time, last_time),
+            source=True,
+            database='btyc',
+        )
+    result['db_production_match_count'] = len(db_rows)
+    result['db_job_match_count'] = len(db_rows)
+    if target_job_time:
+        result['match_diagnosis'] = build_target_job_match_diagnosis(
+            target_job_time, first_time, last_time, db_rows, sessions, detected_kinds,
+        )
+        if result['match_diagnosis']:
+            result['match_diagnosis']['searched_file_ids'] = [int(file_row.get('id'))]
+
+    cooking_sessions = [row for row in sessions if row.get('session_type') in ('cooking', 'recipe_recording')]
+    manual_sessions = [row for row in sessions if row.get('session_type') in ('protect_pot', 'manual_action')]
+    if not detected_kinds:
+        result.update(diagnosis_code='key_log_missing', diagnosis_message='ZIP 可打开，但没有识别到关键日志文件。', suggested_action='检查设备日志版本和文件命名规则。')
+    elif not first_time:
+        result.update(diagnosis_code='log_time_not_found', diagnosis_message='关键日志存在，但无法识别日志时间范围。', suggested_action='查看原始时间戳格式并补充解析规则。')
+    elif db_rows:
+        result.update(diagnosis_level='ok', diagnosis_code='db_matched', diagnosis_message='已匹配生产记录。', suggested_action='可继续进入温度、功率或日志结论分析。')
+    elif cooking_sessions:
+        result.update(diagnosis_level='warning', diagnosis_code='internal_work_found', diagnosis_message='DB 未匹配，日志内有作业片段。', suggested_action='查看日志内作业证据，并核对数据库漏记、时区或设备时钟。')
+    elif manual_sessions:
+        result.update(diagnosis_level='warning', diagnosis_code='internal_manual_found', diagnosis_message='DB 未匹配，日志内仅有养锅/手动动作。', suggested_action='查看内部动作证据，确认是否属于非标准烹饪或人工操作。')
+    else:
+        result.update(diagnosis_level='warning', diagnosis_code='no_internal_session', diagnosis_message='DB 未匹配，日志内无有效作业。', suggested_action='检查关键日志是否完整，或选择相邻时间日志包。')
+    result['failure_reason'] = None if result.get('diagnosis_level') == 'ok' else result.get('diagnosis_code')
+    return result
+
+def integrate_internal_session_energy(evidence_lines, session_end=None):
+    rows = []
+    for row in evidence_lines or []:
+        ts = to_mysql_dt(row.get('time'))
+        if ts:
+            rows.append((ts, row))
+    rows.sort(key=lambda item: item[0])
+    command_w = 0.0
+    actual_w = 0.0
+    command_ws = 0.0
+    actual_ws = 0.0
+    points = []
+    for index, (ts, row) in enumerate(rows):
+        if row.get('command_power_w') is not None:
+            command_w = float(row.get('command_power_w') or 0)
+        if row.get('actual_power_w') is not None:
+            actual_w = float(row.get('actual_power_w') or 0)
+        next_ts = rows[index + 1][0] if index + 1 < len(rows) else to_mysql_dt(session_end)
+        duration = max(0.0, min(60.0, (next_ts - ts).total_seconds())) if next_ts else 0.0
+        command_ws += command_w * duration
+        actual_ws += actual_w * duration
+        temp = row.get('temperatures') or {}
+        points.append({
+            'time': row.get('time'),
+            'event_type': row.get('event_type'),
+            'event_label': row.get('event_label'),
+            'command_power_kw': round(command_w / 1000, 3),
+            'actual_power_kw': round(actual_w / 1000, 3),
+            'pot_temp': temp.get('pot_temp'),
+            'raw_triplet': temp.get('raw_triplet'),
+            'raw': row.get('raw'),
+            'source_file': row.get('source_file'),
+            'line_no': row.get('line_no'),
+        })
+    return {
+        'command_energy_kwh': round(command_ws / 3600000, 4),
+        'actual_energy_kwh': round(actual_ws / 3600000, 4),
+        'command_energy_kws': round(command_ws / 1000, 1),
+        'actual_energy_kws': round(actual_ws / 1000, 1),
+        'points': points,
+    }
+
+def thermal_workspace_from_internal(file_row, diagnostics, session):
+    energy = integrate_internal_session_energy(
+        session.get('evidence_lines') or [],
+        session_end=session.get('end_time'),
+    )
+    risk_tags = list(session.get('risk_tags') or [])
+    if session.get('material_event_count') == 0 and (session.get('max_power_w') or 0) >= 12000:
+        risk_tags.append('高功率且未识别投料')
+    return {
+        'source': 'log_internal',
+        'source_label': '日志内部作业片段',
+        'generated_at': datetime.now().isoformat(sep=' ', timespec='seconds'),
+        'file': {
+            'id': file_row.get('id'),
+            'sn': file_row.get('sn'),
+            'file_name': file_row.get('file_name'),
+            'file_length': file_row.get('file_length'),
+            'create_time': file_row.get('create_time'),
+        },
+        'selected_target': compact_internal_session(session),
+        'summary': {
+            'max_pot_temp': session.get('max_pot_temp'),
+            'avg_pot_temp': session.get('avg_pot_temp'),
+            'max_power_w': session.get('max_power_w'),
+            'temperature_sample_count': session.get('temperature_sample_count') or 0,
+            'power_event_count': session.get('power_event_count') or 0,
+            'material_event_count': session.get('material_event_count') or 0,
+            'tilt_event_count': session.get('tilt_event_count') or 0,
+            'roll_event_count': session.get('roll_event_count') or 0,
+            **{key: value for key, value in energy.items() if key != 'points'},
+        },
+        'risk_tags': list(dict.fromkeys(risk_tags)),
+        'risk_disclaimer': '候选风险标签仅用于筛查，不能替代事故结论和人工复核。',
+        'timeline': energy['points'],
+        'temperature_points': [row for row in energy['points'] if row.get('pot_temp') is not None],
+        'power_points': [row for row in energy['points'] if row.get('command_power_kw') or row.get('actual_power_kw')],
+        'events': energy['points'],
+        'raw_evidence_lines': session.get('evidence_lines') or [],
+        'diagnostics': {
+            'diagnosis_code': diagnostics.get('diagnosis_code'),
+            'diagnosis_message': diagnostics.get('diagnosis_message'),
+            'db_job_match_count': diagnostics.get('db_job_match_count') or 0,
+            'log_time_start': diagnostics.get('log_time_start'),
+            'log_time_end': diagnostics.get('log_time_end'),
+            'cache': diagnostics.get('cache') or {},
+        },
+        'failure_reason': 'internal_session_exists_but_no_db_record',
+        'suggested_next_action': '日志内已有作业证据，可继续复核温度、功率和动作；同时核对 DB 漏记或设备时钟偏差。',
+    }
+
+def thermal_workspace_from_db(file_row, analysis, selected):
+    summary = selected.get('summary') or {}
+    max_temp = summary.get('max_temp')
+    max_power = summary.get('max_actual_power_kw') or summary.get('max_command_power_kw')
+    risk_tags = []
+    if max_temp is not None:
+        if max_temp >= 350:
+            risk_tags.append('超 350℃')
+        elif max_temp >= 300:
+            risk_tags.append('超 300℃')
+        elif max_temp >= 250:
+            risk_tags.append('超 250℃')
+    if max_power is not None and float(max_power) >= 15:
+        risk_tags.append('15kW 持续')
+    return {
+        'source': 'db_matched',
+        'source_label': '数据库作业 + 日志证据',
+        'generated_at': datetime.now().isoformat(sep=' ', timespec='seconds'),
+        'file': analysis.get('file') or {
+            'id': file_row.get('id'),
+            'sn': file_row.get('sn'),
+            'file_name': file_row.get('file_name'),
+        },
+        'selected_target': selected.get('cook') or {},
+        'summary': {
+            'max_pot_temp': max_temp,
+            'avg_pot_temp': summary.get('avg_temp'),
+            'max_power_w': round(float(max_power) * 1000, 1) if max_power is not None else None,
+            'temperature_sample_count': summary.get('sample_count') or 0,
+            'power_event_count': summary.get('power_sample_count') or 0,
+            'material_event_count': sum(1 for row in selected.get('steps') or [] if row.get('commands')),
+            'command_energy_kwh': summary.get('command_energy_kwh') or 0,
+            'actual_energy_kwh': summary.get('actual_energy_kwh') or 0,
+            'command_energy_kws': round(float(summary.get('command_energy_kwh') or 0) * 3600, 1),
+            'actual_energy_kws': round(float(summary.get('actual_energy_kwh') or 0) * 3600, 1),
+        },
+        'risk_tags': risk_tags,
+        'risk_disclaimer': '候选风险标签仅用于筛查，不能替代事故结论和人工复核。',
+        'timeline': selected.get('series') or selected.get('power_samples') or [],
+        'temperature_points': selected.get('temperature_samples') or [],
+        'power_points': selected.get('power_samples') or [],
+        'events': selected.get('android_actions') or [],
+        'steps': selected.get('steps') or [],
+        'raw_evidence_lines': selected.get('android_actions') or [],
+        'diagnostics': {
+            'diagnosis_code': 'db_matched',
+            'diagnosis_message': '已匹配数据库生产记录。',
+            'db_job_match_count': analysis.get('cook_count') or len(analysis.get('cooks') or []),
+            'log_time_start': (analysis.get('coverage') or {}).get('start'),
+            'log_time_end': (analysis.get('coverage') or {}).get('end'),
+            'cache': analysis.get('cache') or {},
+        },
+        'failure_reason': None,
+        'suggested_next_action': '可继续对照菜谱设计步骤、真实功率、锅温和原始日志。',
+    }
+
+def build_thermal_safety_workspace(sn, file_id=None, job_id=None, internal_session_id=None, refresh=False):
+    real_sn, _ = resolve_sn(sn)
+    if not file_id:
+        recent = fetch_one(
+            "SELECT id, sn, file_name, file_length, pic AS url, type, create_time, update_time, cos_deleted "
+            "FROM machine_ftp WHERE sn=%s ORDER BY create_time DESC LIMIT 1",
+            (real_sn,),
+            source=True,
+            database='btyc',
+        )
+        if not recent:
+            raise HTTPException(status_code=404, detail='该设备没有可用日志包。')
+        file_row = recent
+    else:
+        file_row = fetch_one(
+            "SELECT id, sn, file_name, file_length, pic AS url, type, create_time, update_time, cos_deleted "
+            "FROM machine_ftp WHERE id=%s AND sn=%s LIMIT 1",
+            (file_id, real_sn),
+            source=True,
+            database='btyc',
+        )
+        if not file_row:
+            raise HTTPException(status_code=404, detail='日志包不存在或不属于当前设备。')
+    package_lifecycle = fetch_one(
+        """
+        SELECT remote_status, download_status, unzip_status, parse_status, storage_status,
+               lifecycle_status, ui_status, parsed_at, stored_at, error_stage, error_code
+        FROM device_log_packages WHERE sn=%s AND source_file_id=%s
+        """,
+        (real_sn, int(file_row.get('id'))),
+    ) or {}
+
+    diagnostics = None if refresh else read_cached_log_package_diagnostics(file_row['id'])
+    try:
+        analysis = build_cook_temperature_analysis(real_sn, file_id=file_row['id'], force_refresh=refresh)
+        cooks = analysis.get('cooks') or []
+        selected = None
+        if job_id is not None:
+            selected = next((row for row in cooks if str((row.get('cook') or {}).get('id')) == str(job_id)), None)
+        selected = selected or (cooks[-1] if cooks else None)
+        if selected:
+            payload = thermal_workspace_from_db(file_row, analysis, selected)
+            payload['available_targets'] = [
+                {'id': (row.get('cook') or {}).get('id'), 'source': 'db_matched', **(row.get('cook') or {})}
+                for row in cooks
+            ]
+            payload['internal_sessions'] = [
+                compact_internal_session(row) for row in (diagnostics or {}).get('internal_sessions') or []
+            ]
+            payload['package_lifecycle'] = package_lifecycle
+            payload['data_source_note'] = '优先复用云端结构化库；仅在缺少结构化结果时回退日志包解析。'
+            return payload
+    except HTTPException as exc:
+        if exc.status_code not in (404, 422):
+            raise
+
+    if not diagnostics:
+        diagnostics = build_log_package_diagnostics(file_row)
+        save_cached_log_package_diagnostics(file_row['id'], diagnostics)
+        diagnostics['cache'] = {'hit': False}
+    else:
+        diagnostics.setdefault('cache', {'hit': True})
+    sessions = diagnostics.get('internal_sessions') or []
+    selected_session = next(
+        (row for row in sessions if row.get('session_id') == internal_session_id),
+        None,
+    )
+    selected_session = selected_session or next(
+        (row for row in sessions if row.get('session_type') == 'cooking'),
+        None,
+    ) or (sessions[0] if sessions else None)
+    if not selected_session:
+        raise HTTPException(status_code=422, detail={
+            'failure_reason': diagnostics.get('diagnosis_code') or 'no_internal_session',
+            'message': diagnostics.get('diagnosis_message') or '当前日志包没有可用作业片段。',
+            'suggested_next_action': diagnostics.get('suggested_action') or '选择相邻日志包并先执行日志包诊断。',
+        })
+    payload = thermal_workspace_from_internal(file_row, diagnostics, selected_session)
+    payload['available_targets'] = [compact_internal_session(row) for row in sessions]
+    payload['internal_sessions'] = payload['available_targets']
+    payload['package_lifecycle'] = package_lifecycle
+    payload['data_source_note'] = '当前作业来自日志内部片段，DB 未匹配不代表没有生产。'
+    return payload
+
+def build_device_risk_overview(sn):
+    report = get_cached_report(sn)
+    real_sn = (report.get('stats') or {}).get('sn') or sn
+    logs = report.get('logs') or []
+    now = datetime.now()
+    def in_days(row, days):
+        ts = to_mysql_dt(row.get('create_time'))
+        return bool(ts and ts >= now - timedelta(days=days))
+    recent_7 = [row for row in logs if in_days(row, 7)]
+    recent_30 = [row for row in logs if in_days(row, 30)]
+    exceptions = [row for row in recent_30 if row.get('is_behavior_exception')]
+    packages = report.get('device_logs') or []
+    package_counts = {}
+    cached_risks = []
+    for row in packages:
+        cached = read_cached_log_package_diagnostics(row.get('id'))
+        status = (cached or {}).get('diagnosis_code') or row.get('analytics_status') or 'not_diagnosed'
+        package_counts[status] = package_counts.get(status, 0) + 1
+        if cached and ((cached.get('max_temperature') or 0) >= 250 or (cached.get('max_power_w') or 0) >= 12000):
+            cached_risks.append({
+                'file_id': row.get('id'),
+                'file_name': row.get('file_name'),
+                'time': cached.get('log_time_start') or row.get('create_time'),
+                'max_temperature': cached.get('max_temperature'),
+                'max_power_w': cached.get('max_power_w'),
+                'internal_session_count': cached.get('internal_session_count') or 0,
+                'diagnosis_message': cached.get('diagnosis_message'),
+            })
+    structured = device_structured_summary(real_sn)
+    risk_summary = {
+        'max_temperature': None,
+        'avg_high_temperature': None,
+        'high_250_jobs': 0,
+        'high_300_jobs': 0,
+        'high_350_jobs': 0,
+        'high_power_jobs': 0,
+        'high_energy_jobs': 0,
+        'alert_jobs': 0,
+        'latest_job_time': None,
+    }
+    coverage = {'last_7_days': 0, 'last_30_days': 0}
+    if structured.get('enabled'):
+        risk_row = fetch_one(
+            """
+            SELECT MAX(max_pot_temp) AS max_temperature,
+                   AVG(CASE WHEN max_pot_temp >= 250 THEN max_pot_temp END) AS avg_high_temperature,
+                   SUM(max_pot_temp >= 250) AS high_250_jobs,
+                   SUM(max_pot_temp >= 300) AS high_300_jobs,
+                   SUM(max_pot_temp >= 350) AS high_350_jobs,
+                   MAX(cook_start_time) AS latest_job_time,
+                   COUNT(DISTINCT CASE WHEN cook_start_time >= NOW() - INTERVAL 7 DAY THEN DATE(cook_start_time) END) AS covered_days_7,
+                   COUNT(DISTINCT CASE WHEN cook_start_time >= NOW() - INTERVAL 30 DAY THEN DATE(cook_start_time) END) AS covered_days_30
+            FROM cook_jobs
+            WHERE sn=%s
+            """,
+            (real_sn,),
+        ) or {}
+        power_row = fetch_one(
+            """
+            SELECT COUNT(DISTINCT pe.cook_job_id) AS high_power_jobs
+            FROM cook_power_events pe
+            JOIN cook_jobs cj ON cj.id=pe.cook_job_id
+            WHERE cj.sn=%s AND pe.actual_power_kw >= 15
+            """,
+            (real_sn,),
+        ) or {}
+        alert_row = fetch_one(
+            """
+            SELECT COUNT(DISTINCT cook_job_id) AS alert_jobs,
+                   COUNT(DISTINCT CASE WHEN actual_energy_kwh >= 0.8 THEN cook_job_id END) AS high_energy_jobs
+            FROM safety_scan_alerts
+            WHERE sn=%s AND dismissed=0
+            """,
+            (real_sn,),
+        ) or {}
+        risk_summary.update({
+            'max_temperature': float(risk_row['max_temperature']) if risk_row.get('max_temperature') is not None else None,
+            'avg_high_temperature': round(float(risk_row['avg_high_temperature']), 1) if risk_row.get('avg_high_temperature') is not None else None,
+            'high_250_jobs': int(risk_row.get('high_250_jobs') or 0),
+            'high_300_jobs': int(risk_row.get('high_300_jobs') or 0),
+            'high_350_jobs': int(risk_row.get('high_350_jobs') or 0),
+            'high_power_jobs': int(power_row.get('high_power_jobs') or 0),
+            'high_energy_jobs': int(alert_row.get('high_energy_jobs') or 0),
+            'alert_jobs': int(alert_row.get('alert_jobs') or 0),
+            'latest_job_time': risk_row.get('latest_job_time'),
+        })
+        coverage = {
+            'last_7_days': round(min(7, int(risk_row.get('covered_days_7') or 0)) * 100 / 7, 1),
+            'last_30_days': round(min(30, int(risk_row.get('covered_days_30') or 0)) * 100 / 30, 1),
+        }
+    unmatched_count = sum(
+        count for key, count in package_counts.items()
+        if key in ('internal_work_found', 'DB 未匹配，日志内有作业片段', 'DB 未匹配，待检查日志证据')
+    )
+    if risk_summary['high_350_jobs'] or risk_summary['alert_jobs']:
+        risk_level = 'high'
+    elif risk_summary['high_300_jobs'] or cached_risks:
+        risk_level = 'medium'
+    elif structured.get('stored_packages'):
+        risk_level = 'normal'
+    else:
+        risk_level = 'unknown'
+    next_actions = []
+    if structured.get('completion_rate', 0) < 80:
+        next_actions.append({'id': 'watch', 'label': '补齐最近日志', 'reason': '结构化入库覆盖尚未完成'})
+    if structured.get('failed_packages'):
+        next_actions.append({'id': 'logs_failed', 'label': '查看失败日志包', 'reason': f"{structured.get('failed_packages')} 个包待处理"})
+    if risk_summary['high_300_jobs']:
+        next_actions.append({'id': 'jobs_high_temp', 'label': '查看高温作业', 'reason': f"{risk_summary['high_300_jobs']} 次超过 300℃"})
+    if risk_summary['alert_jobs']:
+        next_actions.append({'id': 'alerts', 'label': '查看告警明细', 'reason': f"{risk_summary['alert_jobs']} 个作业命中规则"})
+    if unmatched_count:
+        next_actions.append({'id': 'logs_internal', 'label': '查看日志内作业', 'reason': 'DB 未匹配不代表没有作业'})
+    if not next_actions:
+        next_actions.append({'id': 'intervals', 'label': '查看作业列表', 'reason': '当前没有优先故障项'})
+    return {
+        'generated_at': datetime.now().isoformat(sep=' ', timespec='seconds'),
+        'sn': real_sn,
+        'data_source': 'structured_db' if structured.get('stored_packages') else ('server_cache' if (report.get('cache') or {}).get('hit') else 'source_db'),
+        'risk_level': risk_level,
+        'device': {
+            'customer': (report.get('customer') or {}).get('common_name') or (report.get('customer') or {}).get('company_name'),
+            'region': (report.get('customer') or {}).get('country_code'),
+            'upper_computer_version': (report.get('software') or {}).get('upper_computer_version'),
+            'last_online_time': (report.get('info') or {}).get('last_online_time'),
+        },
+        'production': {
+            'total': (report.get('stats') or {}).get('total_logs') or 0,
+            'last_7_days': len(recent_7),
+            'last_30_days': len(recent_30),
+            'behavior_exceptions_30d': len(exceptions),
+        },
+        'evidence': {
+            'package_total': len(packages),
+            'status_counts': package_counts,
+            'diagnosed_package_count': sum(1 for row in packages if read_cached_log_package_diagnostics(row.get('id'))),
+            'db_unmatched_with_internal_work': unmatched_count,
+            'high_temperature_package_count': sum(1 for row in cached_risks if (row.get('max_temperature') or 0) >= 250),
+        },
+        'structured': structured,
+        'coverage': coverage,
+        'risk_summary': risk_summary,
+        'candidate_risks': sorted(cached_risks, key=lambda row: row.get('time') or '', reverse=True)[:20],
+        'risk_disclaimer': '本页为排查入口；候选风险来自已解析日志，不代表事故结论。',
+        'next_actions': next_actions,
     }
 
 def build_device_report(sn: str):
@@ -6729,6 +9070,41 @@ def cook_temperature_structured(sn: str, request: Request, day: str = Query(None
     )
     return result
 
+@app.get("/api/device-jobs/{sn}")
+def device_jobs(
+    sn: str,
+    request: Request,
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    keyword: str = Query(None),
+    limit: int = Query(300),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    mark_device_watched(real_sn, username=username, priority=20)
+    result = structured_device_jobs(
+        real_sn,
+        start_date=start_date,
+        end_date=end_date,
+        keyword=keyword,
+        limit=limit,
+    )
+    log_event(
+        username,
+        'device_jobs_structured',
+        request,
+        sn=real_sn,
+        detail={
+            'start_date': result.get('start_date'),
+            'end_date': result.get('end_date'),
+            'keyword': keyword,
+            'count': len(result.get('items') or []),
+            'source': result.get('source'),
+        },
+    )
+    return result
+
 @app.post("/api/structured/watch/{sn}")
 def watch_structured_device(sn: str, request: Request, authorization: str = Header(None)):
     username = require_auth(authorization=authorization)
@@ -6741,6 +9117,210 @@ def watch_structured_device(sn: str, request: Request, authorization: str = Head
     summary = device_structured_summary(real_sn)
     log_event(username, 'structured_watch', request, sn=real_sn, detail={'queued': queued, 'log_count': len(logs)})
     return {'sn': real_sn, 'queued': queued, 'summary': summary}
+
+@app.get("/api/devices/{sn}/log-lifecycle")
+def device_log_lifecycle(
+    sn: str,
+    request: Request,
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    status: str = Query(''),
+    refresh_index: int = Query(1),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    end_text = end_date or datetime.now().strftime('%Y-%m-%d')
+    start_text = start_date or (datetime.now() - timedelta(days=89)).strftime('%Y-%m-%d')
+    start, end = parse_date_range(start_text, end_text, max_days=LOG_LIFECYCLE_MAX_DAYS)
+    mark_device_watched(real_sn, username=username, priority=12)
+    indexed = 0
+    if refresh_index:
+        source_rows = get_device_log_files_in_range(real_sn, start, end, limit=2000)
+        indexed = len(source_rows)
+    payload = lifecycle_summary_payload(real_sn, start, end, status=status, limit=1000)
+    payload['indexed_from_source'] = indexed
+    log_event(
+        username,
+        'device_log_lifecycle',
+        request,
+        sn=real_sn,
+        detail={'start_date': start_text, 'end_date': end_text, 'status': status, 'indexed': indexed},
+    )
+    return payload
+
+@app.post("/api/devices/{sn}/log-backfill")
+def device_log_backfill(
+    sn: str,
+    payload: LogBackfillRequest,
+    request: Request,
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    end_text = payload.end_date or datetime.now().strftime('%Y-%m-%d')
+    start_text = payload.start_date or (datetime.now() - timedelta(days=89)).strftime('%Y-%m-%d')
+    start, end = parse_date_range(start_text, end_text, max_days=LOG_LIFECYCLE_MAX_DAYS)
+    mode = payload.mode if payload.mode in ('missing_only', 'force_reparse', 'force_redownload') else 'missing_only'
+    if mode != 'missing_only' and not is_admin(username):
+        raise HTTPException(status_code=403, detail='Only admin can force reparse or redownload')
+    max_packages = max(1, min(int(payload.max_packages or LOG_LIFECYCLE_MAX_PACKAGES), LOG_LIFECYCLE_MAX_PACKAGES))
+    mark_device_watched(real_sn, username=username, priority=5)
+    source_rows = get_device_log_files_in_range(real_sn, start, end, limit=2000)
+    task, created = create_log_lifecycle_task(real_sn, start, end, mode, max_packages, username)
+    log_event(
+        username,
+        'device_log_backfill',
+        request,
+        sn=real_sn,
+        detail={
+            'task_id': task.get('task_id'), 'created': created, 'mode': mode,
+            'start_date': start_text, 'end_date': end_text, 'indexed': len(source_rows),
+            'max_packages': max_packages,
+        },
+    )
+    return {'created': created, 'task': task}
+
+@app.get("/api/log-parse-tasks/{task_id}")
+def log_parse_task(task_id: str, request: Request, authorization: str = Header(None)):
+    username = require_auth(authorization=authorization)
+    payload = lifecycle_task_payload(task_id)
+    log_event(username, 'log_parse_task_view', request, sn=payload.get('sn'), detail={'task_id': task_id})
+    return payload
+
+@app.post("/api/log-packages/{file_id}/retry")
+def retry_log_package(
+    file_id: int,
+    payload: LogPackageRetryRequest,
+    request: Request,
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    package = fetch_one("SELECT * FROM device_log_packages WHERE source_file_id=%s LIMIT 1", (file_id,))
+    if not package:
+        raise HTTPException(status_code=404, detail='本地日志包索引不存在，请先刷新设备日志。')
+    stage = payload.stage if payload.stage in ('auto', 'download', 'unzip', 'parse', 'store') else 'auto'
+    force = bool(payload.force)
+    if force and not is_admin(username):
+        raise HTTPException(status_code=403, detail='Only admin can force retry')
+    if not force and int(package.get('retry_count') or 0) >= LOG_PACKAGE_RETRY_LIMIT:
+        raise HTTPException(
+            status_code=409,
+            detail=f'该日志包已失败 {package.get("retry_count")} 次，达到自动重试上限；请由管理员核查后强制重试。',
+        )
+    mode = 'force_redownload' if stage == 'download' else ('force_reparse' if force or stage in ('unzip', 'parse') else 'missing_only')
+    package_time = to_mysql_dt(package.get('log_time_hint')) or to_mysql_dt(package.get('remote_create_time')) or datetime.now()
+    start = package_time.replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + timedelta(days=1)
+    if force:
+        execute_local(
+            """
+            UPDATE device_log_packages SET retry_count=0, next_retry_at=NULL, error_stage=NULL,
+                error_code=NULL, error_message=NULL, suggested_action=NULL, updated_at=%s
+            WHERE sn=%s AND source_file_id=%s
+            """,
+            (datetime.now().replace(microsecond=0), package.get('sn'), file_id),
+        )
+    task_id = str(uuid.uuid4())
+    now = datetime.now().replace(microsecond=0)
+    execute_local(
+        """
+        INSERT INTO log_parse_tasks(
+            task_id, sn, start_date, end_date, mode, status, total_count, queued_count,
+            created_by, created_at, updated_at
+        ) VALUES (%s,%s,%s,%s,%s,'queued',1,1,%s,%s,%s)
+        """,
+        (task_id, package.get('sn'), start.date(), start.date(), mode, username, now, now),
+    )
+    execute_local(
+        """
+        INSERT INTO log_parse_task_items(
+            task_id, sn, source_file_id, item_order, status, current_stage, updated_at
+        ) VALUES (%s,%s,%s,1,'queued','等待重试',%s)
+        """,
+        (task_id, package.get('sn'), file_id, now),
+    )
+    set_log_package_lifecycle(package.get('sn'), file_id, parse_status='queued')
+    kick_log_lifecycle_task(task_id)
+    log_event(username, 'log_package_retry', request, sn=package.get('sn'), detail={'file_id': file_id, 'stage': stage, 'force': force, 'task_id': task_id})
+    return lifecycle_task_payload(task_id)
+
+@app.post("/api/log-packages/{file_id}/clear-cache")
+def clear_log_package_cache(file_id: int, request: Request, authorization: str = Header(None)):
+    username = require_admin(authorization=authorization)
+    package = fetch_one("SELECT * FROM device_log_packages WHERE source_file_id=%s LIMIT 1", (file_id,))
+    if not package:
+        raise HTTPException(status_code=404, detail='本地日志包索引不存在。')
+    zip_path, unzip_dir = package_cache_paths(package.get('sn'), file_id)
+    removed = []
+    if zip_path.exists():
+        zip_path.unlink()
+        removed.append('downloaded_zip')
+    if unzip_dir.exists():
+        import shutil
+        shutil.rmtree(unzip_dir, ignore_errors=True)
+        removed.append('unzipped_files')
+    parsed_path = cook_temperature_cache_path(package.get('sn'), file_id)
+    if parsed_path.exists():
+        parsed_path.unlink()
+        removed.append('parsed_json')
+    set_log_package_lifecycle(
+        package.get('sn'), file_id,
+        download_status='not_started', unzip_status='not_started',
+        parse_status='parsed' if package.get('storage_status') == 'stored' else 'not_started',
+        storage_status=package.get('storage_status'),
+        extra={'downloaded_path': None, 'unzipped_path': None, 'parsed_cache_path': None},
+    )
+    log_event(username, 'log_package_clear_cache', request, sn=package.get('sn'), detail={'file_id': file_id, 'removed': removed})
+    return {'ok': True, 'file_id': file_id, 'removed': removed, 'structured_data_preserved': True}
+
+@app.get("/api/log-packages/{file_id}/lineage")
+def log_package_lineage(file_id: int, request: Request, authorization: str = Header(None)):
+    username = require_auth(authorization=authorization)
+    package = fetch_one("SELECT * FROM device_log_packages WHERE source_file_id=%s LIMIT 1", (file_id,))
+    if not package:
+        raise HTTPException(status_code=404, detail='本地日志包索引不存在。')
+    jobs = fetch_one(
+        "SELECT COUNT(*) AS count, MIN(cook_start_time) AS first_time, MAX(cook_end_time) AS last_time FROM cook_jobs WHERE sn=%s AND source_file_id=%s",
+        (package.get('sn'), file_id),
+    ) or {}
+    temps = fetch_one(
+        "SELECT COUNT(*) AS count, MAX(pot_temp) AS max_temp FROM cook_temperature_samples WHERE sn=%s AND source_file_id=%s",
+        (package.get('sn'), file_id),
+    ) or {}
+    actions = fetch_one(
+        "SELECT COUNT(*) AS count FROM cook_action_events WHERE sn=%s AND source_file_id=%s",
+        (package.get('sn'), file_id),
+    ) or {}
+    tasks = fetch_all(
+        """
+        SELECT i.task_id, i.status, i.current_stage, i.reused_from, i.error_stage, i.error_code,
+               i.error_message, i.started_at, i.finished_at, t.mode, t.created_by, t.created_at
+        FROM log_parse_task_items i JOIN log_parse_tasks t ON t.task_id=i.task_id
+        WHERE i.sn=%s AND i.source_file_id=%s ORDER BY t.created_at DESC LIMIT 20
+        """,
+        (package.get('sn'), file_id),
+    )
+    payload = {
+        'package': {key: value for key, value in package.items() if key not in ('remote_url_hash', 'source_content_hash', 'downloaded_path', 'unzipped_path', 'parsed_cache_path')},
+        'structured': {
+            'job_count': int(jobs.get('count') or 0),
+            'temperature_sample_count': int(temps.get('count') or 0),
+            'action_count': int(actions.get('count') or 0),
+            'max_pot_temp': temps.get('max_temp'),
+            'first_time': jobs.get('first_time'),
+            'last_time': jobs.get('last_time'),
+        },
+        'tasks': tasks,
+        'consumers': [
+            {'page': '作业列表', 'available': int(jobs.get('count') or 0) > 0},
+            {'page': '作业热安全分析', 'available': int(temps.get('count') or 0) > 0},
+            {'page': '温度校正', 'available': True},
+            {'page': '日志包体诊断', 'available': True},
+        ],
+    }
+    log_event(username, 'log_package_lineage', request, sn=package.get('sn'), detail={'file_id': file_id})
+    return payload
 
 @app.get("/api/temperature-calibrations/{sn}")
 def temperature_calibrations(
@@ -6812,6 +9392,167 @@ def sync_temperature_calibrations(
         },
     )
     return result
+
+@app.get("/api/logs/detail")
+def log_evidence_detail(
+    request: Request,
+    sn: str = Query(...),
+    date: str = Query(''),
+    source_file_id: int = Query(None),
+    source_zip: str = Query(''),
+    source_file: str = Query(...),
+    timestamp: str = Query(''),
+    line_hash: str = Query(''),
+    line_no: int = Query(None),
+    context_before: int = Query(20),
+    context_after: int = Query(20),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, robot = resolve_sn(sn)
+    package, actual_source_file, lines = load_log_evidence_file(
+        real_sn,
+        source_file_id=source_file_id,
+        source_zip=source_zip,
+        source_file=source_file,
+    )
+    event = None
+    if line_hash:
+        event = fetch_one(
+            """
+            SELECT id, event_type, event_label, event_time, matched_keyword, source_log_name,
+                   line_no, line_hash, raw_log_excerpt, evidence_level, event_hash
+            FROM device_log_events
+            WHERE sn=%s AND source_file_id=%s AND (line_hash=%s OR event_hash=%s)
+            ORDER BY id DESC LIMIT 1
+            """,
+            (real_sn, int(package['id']), line_hash, line_hash),
+        )
+    effective_line_no = line_no or ((event or {}).get('line_no'))
+    effective_timestamp = timestamp or str((event or {}).get('event_time') or '')
+    raw_line = (event or {}).get('raw_log_excerpt') or ''
+    target_idx = locate_log_target_line(
+        real_sn,
+        int(package['id']),
+        actual_source_file,
+        lines,
+        line_hash=line_hash,
+        line_no=effective_line_no,
+        timestamp=effective_timestamp,
+        raw_line=raw_line,
+    )
+    if target_idx is None:
+        raise HTTPException(
+            status_code=404,
+            detail="日志文件已找到，但未能定位目标原始行；请重新扫描日志包后再试",
+        )
+    before = max(0, min(int(context_before or 20), 200))
+    after = max(0, min(int(context_after or 20), 200))
+    start_idx = max(0, target_idx - before)
+    end_idx = min(len(lines), target_idx + after + 1)
+    context_lines = []
+    for idx in range(start_idx, end_idx):
+        raw = lines[idx]
+        context_lines.append({
+            'line_no': idx + 1,
+            'timestamp': parse_log_ts(raw),
+            'line_hash': build_log_line_hash(real_sn, package['id'], actual_source_file, idx + 1, raw),
+            'raw_line': raw,
+            'is_target': idx == target_idx,
+        })
+    target_line = context_lines[target_idx - start_idx]
+    device_meta = get_log_evidence_device_meta(real_sn, robot=robot)
+    event_type = (event or {}).get('event_type') or 'log_evidence'
+    matched_keyword = (event or {}).get('matched_keyword') or ''
+    matched_job_id = find_matched_job_id(real_sn, package['id'], effective_timestamp)
+    payload = {
+        'meta': {
+            'sn': real_sn,
+            'customer': device_meta['customer'],
+            'region': device_meta['region'],
+            'date': date or str(effective_timestamp)[:10] or None,
+            'timestamp': effective_timestamp or target_line.get('timestamp'),
+            'source_zip': package.get('file_name'),
+            'source_file_id': package.get('id'),
+            'source_file': actual_source_file,
+            'event_type': event_type,
+            'event_label': (event or {}).get('event_label') or '原始日志证据',
+            'matched_job_id': matched_job_id,
+            'matched_job': bool(matched_job_id),
+        },
+        'target_line': {
+            **target_line,
+            'event_type': event_type,
+            'matched_keyword': matched_keyword,
+            'evidence_level': (event or {}).get('evidence_level') or ('高' if effective_line_no else '中'),
+        },
+        'context_lines': context_lines,
+        'source_status': 'available',
+        'matched_keyword': matched_keyword,
+        'event_type': event_type,
+        'evidence_level': (event or {}).get('evidence_level') or ('高' if effective_line_no else '中'),
+    }
+    log_event(
+        username,
+        'log_evidence_detail',
+        request,
+        sn=real_sn,
+        detail={'source_file_id': package.get('id'), 'source_file': actual_source_file, 'line_no': target_idx + 1},
+    )
+    return payload
+
+@app.get("/api/logs/search-in-file")
+def search_log_evidence_file(
+    request: Request,
+    sn: str = Query(...),
+    source_file_id: int = Query(None),
+    source_zip: str = Query(''),
+    source_file: str = Query(...),
+    keyword: str = Query(...),
+    limit: int = Query(200),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    real_sn, _ = resolve_sn(sn)
+    clean_keyword = str(keyword or '').strip()
+    if not clean_keyword:
+        raise HTTPException(status_code=400, detail="请输入当前日志文件内的搜索关键词")
+    package, actual_source_file, lines = load_log_evidence_file(
+        real_sn,
+        source_file_id=source_file_id,
+        source_zip=source_zip,
+        source_file=source_file,
+    )
+    safe_limit = max(1, min(int(limit or 200), 500))
+    needle = clean_keyword.lower()
+    matched_lines = []
+    total = 0
+    for idx, raw in enumerate(lines):
+        if needle not in raw.lower():
+            continue
+        total += 1
+        if len(matched_lines) < safe_limit:
+            matched_lines.append({
+                'line_no': idx + 1,
+                'timestamp': parse_log_ts(raw),
+                'line_hash': build_log_line_hash(real_sn, package['id'], actual_source_file, idx + 1, raw),
+                'raw_line': raw,
+            })
+    log_event(
+        username,
+        'log_evidence_search',
+        request,
+        sn=real_sn,
+        detail={'source_file_id': package.get('id'), 'source_file': actual_source_file, 'keyword': clean_keyword, 'count': total},
+    )
+    return {
+        'matched_lines': matched_lines,
+        'count': total,
+        'returned_count': len(matched_lines),
+        'source_status': 'available',
+        'source_zip': package.get('file_name'),
+        'source_file': actual_source_file,
+    }
 
 @app.get("/api/thermal-knowledge")
 def thermal_knowledge(
@@ -7459,6 +10200,138 @@ def log_analysis(file_id: int, request: Request, refresh: int = Query(0), author
         action='log_analysis_view',
     )
 
+@app.get("/api/log-package-diagnostics/{file_id}")
+def log_package_diagnostics(
+    file_id: int,
+    request: Request,
+    refresh: int = Query(0),
+    target_job_time: str = Query(None),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    if refresh and not is_admin(username):
+        raise HTTPException(status_code=403, detail="Only admin can refresh log package diagnostics")
+    row = fetch_one(
+        "SELECT id, sn, file_name, file_length, pic AS url, type, create_time, update_time, cos_deleted "
+        "FROM machine_ftp WHERE id=%s LIMIT 1",
+        (file_id,),
+        source=True,
+        database='btyc',
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail={
+            'failure_reason': 'machine_ftp_missing',
+            'message': 'machine_ftp 中未找到日志包索引。',
+            'suggested_next_action': '重新查询设备日志列表，确认 file_id 是否仍然有效。',
+        })
+    cached = None if refresh or target_job_time else read_cached_log_package_diagnostics(file_id)
+    if cached:
+        log_event(username, 'log_package_diagnostics', request, sn=row.get('sn'), detail={'file_id': file_id, 'cache_hit': True})
+        return cached
+    try:
+        payload = build_log_package_diagnostics(row, target_job_time=target_job_time)
+    except Exception as exc:
+        payload = {
+            'diagnostics_version': LOG_PACKAGE_DIAGNOSTICS_VERSION,
+            'file_id': file_id,
+            'sn': row.get('sn'),
+            'file_name': row.get('file_name'),
+            'diagnosis_level': 'error',
+            'diagnosis_code': 'parser_error',
+            'diagnosis_message': f'日志包诊断异常：{str(exc)[:300]}',
+            'suggested_action': '保留该包并提交解析器排查，不要据此判断设备没有生产。',
+            'internal_sessions': [],
+        }
+    if not target_job_time:
+        save_cached_log_package_diagnostics(file_id, payload)
+    payload['cache'] = {'hit': False}
+    log_event(
+        username,
+        'log_package_diagnostics',
+        request,
+        sn=row.get('sn'),
+        detail={
+            'file_id': file_id,
+            'cache_hit': False,
+            'diagnosis_code': payload.get('diagnosis_code'),
+            'internal_session_count': len(payload.get('internal_sessions') or []),
+        },
+    )
+    return payload
+
+@app.get("/api/device-risk-overview/{sn}")
+def device_risk_overview(sn: str, request: Request, authorization: str = Header(None)):
+    username = require_auth(authorization=authorization)
+    payload = build_device_risk_overview(sn)
+    log_event(
+        username,
+        'device_risk_overview',
+        request,
+        sn=payload.get('sn'),
+        detail={
+            'candidate_risk_count': len(payload.get('candidate_risks') or []),
+            'diagnosed_package_count': (payload.get('evidence') or {}).get('diagnosed_package_count'),
+        },
+    )
+    return payload
+
+@app.get("/api/thermal-safety-workspace/{sn}")
+def thermal_safety_workspace(
+    sn: str,
+    request: Request,
+    file_id: int = Query(None),
+    job_id: str = Query(None),
+    internal_session_id: str = Query(None),
+    refresh: int = Query(0),
+    authorization: str = Header(None),
+):
+    username = require_auth(authorization=authorization)
+    if refresh and not is_admin(username):
+        raise HTTPException(status_code=403, detail='Only admin can force refresh thermal safety workspace')
+    payload = build_thermal_safety_workspace(
+        sn,
+        file_id=file_id,
+        job_id=job_id,
+        internal_session_id=internal_session_id,
+        refresh=bool(refresh),
+    )
+    log_event(
+        username,
+        'thermal_safety_workspace',
+        request,
+        sn=sn,
+        detail={
+            'file_id': file_id,
+            'job_id': job_id,
+            'internal_session_id': internal_session_id,
+            'source': payload.get('source'),
+            'risk_tags': payload.get('risk_tags') or [],
+        },
+    )
+    return payload
+
+@app.post("/api/log-package-diagnostics/{file_id}/clear")
+def clear_log_package_diagnostics(file_id: int, request: Request, authorization: str = Header(None)):
+    username = require_admin(authorization=authorization)
+    removed = []
+    path = log_package_diagnostics_cache_path(file_id)
+    if path.exists():
+        path.unlink()
+        removed.append(str(path.name))
+    row = fetch_one(
+        "SELECT sn FROM machine_ftp WHERE id=%s LIMIT 1",
+        (file_id,),
+        source=True,
+        database='btyc',
+    )
+    if row and row.get('sn'):
+        cache_file = cook_temperature_cache_path(row['sn'], file_id)
+        if cache_file.exists():
+            cache_file.unlink()
+            removed.append(str(cache_file.name))
+    log_event(username, 'clear_log_package_diagnostics', request, detail={'file_id': file_id, 'removed': removed})
+    return {'ok': True, 'file_id': file_id, 'removed': removed}
+
 @app.get("/api/admin/log-analysis/{file_id}")
 def admin_log_analysis(file_id: int, request: Request, refresh: int = Query(0), authorization: str = Header(None)):
     username = require_admin(authorization=authorization)
@@ -7506,7 +10379,8 @@ def auto_parse_cycle():
         JOIN watched_devices w ON w.sn = p.sn AND w.status = 'active'
         WHERE p.parse_status = 'queued'
           AND p.storage_status != 'stored'
-          AND p.download_status = 'remote_available'
+          AND p.remote_status = 'available'
+          AND p.download_status IN ('not_started','remote_available','queued','downloaded','download_failed')
           AND COALESCE(p.file_size_mb, 0) > 0
           AND COALESCE(p.file_size_mb, 0) <= 50
         ORDER BY w.priority ASC, w.last_seen_at DESC, COALESCE(p.remote_create_time, p.log_time_hint) DESC
@@ -7519,15 +10393,16 @@ def auto_parse_cycle():
         sn = row.get('sn')
         file_id = int(row.get('source_file_id'))
         try:
-            mark_log_package_status(sn, file_id, parse_status='parsing')
-            build_cook_temperature_analysis(sn, file_id=file_id, force_refresh=False)
+            with package_stage_lock(file_id):
+                mark_log_package_status(sn, file_id, parse_status='parsing')
+                build_cook_temperature_analysis(sn, file_id=file_id, force_refresh=False)
             execute_local(
                 "UPDATE watched_devices SET last_parse_at=%s, last_error=NULL, updated_at=%s WHERE sn=%s",
                 (datetime.now().replace(microsecond=0), datetime.now().replace(microsecond=0), sn),
             )
         except HTTPException as exc:
             reason = str(exc.detail)
-            parse_status = 'no_production_match' if exc.status_code == 404 and '没有匹配到生产记录' in reason else 'parse_failed'
+            parse_status = 'no_production_match' if exc.status_code == 404 and ('没有匹配到生产记录' in reason or 'DB 未匹配到生产记录' in reason) else 'parse_failed'
             mark_log_package_status(sn, file_id, parse_status=parse_status, error_message=reason)
             execute_local(
                 "UPDATE watched_devices SET last_error=%s, updated_at=%s WHERE sn=%s",
@@ -7567,6 +10442,10 @@ def kick_auto_parse_once():
 def startup_tasks():
     global AUTO_PARSE_WORKER_STARTED
     ensure_analytics_db()
+    try:
+        cleanup_log_package_stage_cache()
+    except Exception as exc:
+        print(f"log lifecycle cache cleanup failed: {exc}")
     if AUTO_PARSE_ENABLED:
         with AUTO_PARSE_WORKER_LOCK:
             if not AUTO_PARSE_WORKER_STARTED:
