@@ -2075,20 +2075,73 @@
 	        <section v-if="data" v-show="activeTab === 'logs'">
         <!-- Device Log Files -->
         <div class="card">
-	            <div class="card-header bg-dark text-white">日志包</div>
+	            <div class="card-header bg-dark text-white d-flex justify-content-between align-items-center">
+                    <span>设备日志生命周期中心</span>
+                    <span class="small opacity-75">结构化结果长期复用，原包与解压文件按保留策略清理</span>
+                </div>
             <div class="card-body border-bottom">
-                <div class="row g-2 align-items-center">
-                    <div class="col-md-3">
-                        <input type="date" class="form-control form-control-sm" v-model="filters.logDate">
+                <div class="d-flex flex-wrap gap-2 align-items-end">
+                    <div>
+                        <label class="form-label small mb-1">开始日期</label>
+                        <input type="date" class="form-control form-control-sm" v-model="logLifecycle.startDate">
                     </div>
-                    <div class="col-md-9 text-muted small">可按日期过滤日志包；不选日期时展示该设备最近 300 条日志记录。</div>
+                    <div>
+                        <label class="form-label small mb-1">结束日期</label>
+                        <input type="date" class="form-control form-control-sm" v-model="logLifecycle.endDate">
+                    </div>
+                    <div>
+                        <label class="form-label small mb-1">生命周期状态</label>
+                        <select class="form-select form-select-sm" v-model="logLifecycle.status">
+                            <option value="">全部状态</option>
+                            <option value="remote_available">远端可用</option>
+                            <option value="downloaded">已下载</option>
+                            <option value="unzipped">已解压</option>
+                            <option value="parsed">已解析</option>
+                            <option value="stored">已入库</option>
+                            <option value="partial_success">部分成功</option>
+                            <option value="parse_failed">解析失败</option>
+                        </select>
+                    </div>
+                    <div class="btn-group btn-group-sm">
+                        <button v-for="days in [7,30,90,180]" :key="days" class="btn" :class="logLifecycle.quickDays === days ? 'btn-primary' : 'btn-outline-secondary'" @click="setLogLifecycleRange(days)">{{ days }} 天</button>
+                    </div>
+                    <button class="btn btn-sm btn-outline-primary" @click="loadLogLifecycle(true)" :disabled="logLifecycle.loading">{{ logLifecycle.loading ? '读取中' : '读取生命周期' }}</button>
+                    <button class="btn btn-sm btn-primary" @click="startLogBackfill('missing_only')" :disabled="logLifecycle.starting">补齐缺失阶段</button>
+                    <button v-if="isAdmin" class="btn btn-sm btn-outline-danger" @click="startLogBackfill('force_reparse')" :disabled="logLifecycle.starting">强制重解析</button>
+                </div>
+                <div class="history-meta mt-2">默认 90 天，单次最多 50 包。同设备同时间段任务自动去重，失败包按退避策略重试。</div>
+            </div>
+            <div v-if="logLifecycle.error" class="alert alert-danger m-2 mb-0">{{ logLifecycle.error }}</div>
+            <div v-if="logLifecycle.result" class="card-body border-bottom">
+                <div class="row g-2">
+                    <div class="col-xl-2 col-md-4 col-6"><div class="detail-card"><strong>{{ logLifecycle.result.summary.total_packages }}</strong><div>范围内日志包</div></div></div>
+                    <div class="col-xl-2 col-md-4 col-6"><div class="detail-card"><strong>{{ logLifecycle.result.summary.downloaded }}</strong><div>已下载</div></div></div>
+                    <div class="col-xl-2 col-md-4 col-6"><div class="detail-card"><strong>{{ logLifecycle.result.summary.unzipped }}</strong><div>已解压</div></div></div>
+                    <div class="col-xl-2 col-md-4 col-6"><div class="detail-card"><strong>{{ logLifecycle.result.summary.parsed }}</strong><div>已解析</div></div></div>
+                    <div class="col-xl-2 col-md-4 col-6"><div class="detail-card"><strong>{{ logLifecycle.result.summary.stored }}</strong><div>已入库</div></div></div>
+                    <div class="col-xl-2 col-md-4 col-6"><div class="detail-card"><strong>{{ logLifecycle.result.summary.completion_rate }}%</strong><div>入库完成度</div></div></div>
+                </div>
+                <div v-if="logLifecycle.result.failure_groups.length" class="mt-2 d-flex flex-wrap gap-2 align-items-center">
+                    <span class="history-meta">失败聚合</span>
+                    <span v-for="item in logLifecycle.result.failure_groups" :key="item.code" class="badge bg-warning text-dark">{{ item.code }} {{ item.count }}</span>
+                </div>
+                <div v-if="logLifecycle.task" class="alert alert-info mt-2 mb-0 py-2">
+                    <strong>当前任务 {{ logLifecycle.task.status }}</strong>
+                    · {{ logLifecycle.task.progress_percent || 0 }}%
+                    · 完成 {{ logLifecycle.task.completed_count || 0 }}
+                    · 部分成功 {{ logLifecycle.task.partial_count || 0 }}
+                    · 失败 {{ logLifecycle.task.failed_count || 0 }}
+                    · {{ logLifecycle.task.current_stage || '等待处理' }}
+                </div>
+                <div v-else-if="logLifecycle.result.tasks.length" class="history-meta mt-2">
+                    最近任务：{{ logLifecycle.result.tasks[0].status }} · {{ logLifecycle.result.tasks[0].created_at }}
                 </div>
             </div>
             <div class="log-batch-bar">
-                <strong>批量证据处理</strong>
+                <strong>人工选择</strong>
                 <span class="selection-summary">已选 {{ selectedEvidenceLogs.length }} 包 · {{ selectedEvidenceSizeLabel }}</span>
                 <button class="btn btn-sm btn-outline-primary" @click="batchDiagnoseEvidenceLogs" :disabled="batchEvidence.loading || !selectedEvidenceLogs.length">批量诊断</button>
-                <button class="btn btn-sm btn-primary" @click="batchParseEvidenceLogs" :disabled="batchEvidence.loading || !selectedEvidenceLogs.length">批量解析入库</button>
+                <button class="btn btn-sm btn-primary" @click="batchParseEvidenceLogs" :disabled="batchEvidence.loading || !selectedEvidenceLogs.length">温度分析</button>
                 <button class="btn btn-sm btn-outline-secondary" @click="selectedEvidenceLogIds=[]">清空选择</button>
                 <span v-if="batchEvidence.loading" class="history-meta">处理中 {{ batchEvidence.processed }}/{{ batchEvidence.total }}，失败包会跳过继续</span>
                 <span v-else-if="batchEvidence.total" class="history-meta">本次成功 {{ batchEvidence.succeeded }}，跳过 {{ batchEvidence.failed }}</span>
@@ -2098,38 +2151,41 @@
             </div>
             <div class="card-body p-0">
                 <table class="table table-sm table-striped mb-0">
-                    <thead><tr><th style="width:34px"><input type="checkbox" @change="toggleAllEvidenceLogs($event)" :checked="selectedEvidenceLogs.length && selectedEvidenceLogs.length === filteredDeviceLogs.length"></th><th>设备序列号</th><th>日志时间</th><th>文件名</th><th>大小</th><th>上传时间</th><th>状态</th><th>操作</th></tr></thead>
+                    <thead class="sticky-top"><tr><th style="width:34px"><input type="checkbox" @change="toggleAllEvidenceLogs($event)" :checked="selectedEvidenceLogs.length && selectedEvidenceLogs.length === filteredDeviceLogs.length"></th><th>日志时间 / 文件</th><th>大小</th><th>远端</th><th>下载</th><th>解压</th><th>解析</th><th>入库</th><th>结果摘要</th><th>操作</th></tr></thead>
                     <tbody>
                         <template v-for="log in filteredDeviceLogs" :key="log.id">
                         <tr>
                             <td><input type="checkbox" :value="String(log.id)" v-model="selectedEvidenceLogIds"></td>
-                            <td>{{ log.sn }}</td>
-                            <td>{{ log.log_time_hint || log.create_time || '-' }}</td>
-                            <td>{{ log.file_name }}</td>
+                            <td>{{ log.log_time_hint || log.remote_create_time || log.create_time || '-' }}<div class="history-meta text-break">{{ log.file_name }}</div></td>
                             <td>{{ formatLogSize(log) }}</td>
-                            <td>{{ log.create_time }}</td>
+                            <td><span class="badge" :class="lifecycleStageClass(log.remote_status)">{{ lifecycleStageLabel('remote', log.remote_status) }}</span></td>
+                            <td><span class="badge" :class="lifecycleStageClass(log.download_status)">{{ lifecycleStageLabel('download', log.download_status) }}</span></td>
+                            <td><span class="badge" :class="lifecycleStageClass(log.unzip_status)">{{ lifecycleStageLabel('unzip', log.unzip_status) }}</span></td>
+                            <td><span class="badge" :class="lifecycleStageClass(log.parse_status)">{{ lifecycleStageLabel('parse', log.parse_status) }}</span></td>
+                            <td><span class="badge" :class="lifecycleStageClass(log.storage_status)">{{ lifecycleStageLabel('storage', log.storage_status) }}</span></td>
                             <td>
                                 <span class="badge" :class="structuredStatusClass(log.analytics_status)">{{ log.analytics_status || (log.downloadable ? '可下载' : '不可下载') }}</span>
-                                <div v-if="log.structured_cook_count" class="history-meta">{{ log.structured_cook_count }} 道菜 · {{ log.structured_sample_count || 0 }} 点</div>
+                                <div v-if="log.job_count || log.structured_cook_count" class="history-meta">{{ log.job_count || log.structured_cook_count }} 道菜 · {{ log.sample_count || log.structured_sample_count || 0 }} 点</div>
+                                <div v-if="log.error_code" class="history-meta text-danger">{{ log.error_stage }} / {{ log.error_code }}</div>
                                 <div v-if="log.diagnostics_status && log.diagnostics_status !== log.analytics_status" class="history-meta text-break">{{ log.diagnostics_status }}</div>
                                 <div v-if="log.structured_error && !log.diagnostics_status" class="history-meta text-warning text-break">{{ log.structured_error }}</div>
                             </td>
                             <td>
-                                <template v-if="log.downloadable">
-                                    <div class="action-stack">
-                                    <a class="btn btn-sm btn-outline-success" :href="`/api/device-log-download/${log.id}?token=${encodeURIComponent(auth.token)}`" target="_blank">下载原包</a>
+                                <div class="action-stack">
+                                    <a v-if="log.downloadable" class="btn btn-sm btn-outline-success" :href="`/api/device-log-download/${log.id}?token=${encodeURIComponent(auth.token)}`" target="_blank">下载原包</a>
                                     <button class="btn btn-sm btn-outline-primary" @click="openLogAnalysis(log)">查看日志结论</button>
-                                    <button class="btn btn-sm btn-outline-secondary" @click="diagnoseLogPackage(log)">
+                                    <button v-if="log.downloadable || log.download_status === 'downloaded'" class="btn btn-sm btn-outline-secondary" @click="diagnoseLogPackage(log)">
                                         {{ logPackageDiagnostics.loadingId === String(log.id) ? '诊断中' : '查看包体诊断' }}
                                     </button>
+                                    <button class="btn btn-sm btn-outline-primary" @click="retryLifecyclePackage(log)">从失败阶段重试</button>
+                                    <button class="btn btn-sm btn-outline-secondary" @click="loadLogLineage(log)">查看血缘</button>
+                                    <button v-if="isAdmin" class="btn btn-sm btn-outline-danger" @click="clearLifecycleCache(log)">清缓存</button>
                                     <button class="btn btn-sm btn-outline-danger" @click="openThermalSafety(log)">进入热安全分析</button>
-                                    </div>
-                                </template>
-                                <span v-else class="text-muted">-</span>
+                                </div>
                             </td>
                         </tr>
                         <tr v-if="logPackageDiagnostics.openId === String(log.id)">
-                            <td colspan="8" class="p-3 bg-light">
+                            <td colspan="10" class="p-3 bg-light">
                                 <div v-if="logPackageDiagnostics.loadingId === String(log.id)" class="alert alert-info mb-0">正在下载并体检当前日志包，仅处理这一个包...</div>
                                 <div v-else-if="logPackageDiagnostics.error" class="alert alert-danger mb-0">{{ logPackageDiagnostics.error }}</div>
                                 <template v-else-if="logPackageDiagnostics.result">
@@ -2213,6 +2269,36 @@
                         </template>
                     </tbody>
                 </table>
+            </div>
+        </div>
+
+        <div v-if="logLifecycle.lineage" class="card border-primary">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <strong>日志包数据血缘 · {{ logLifecycle.lineage.package.file_name }}</strong>
+                <button class="btn btn-sm btn-outline-secondary" @click="logLifecycle.lineage=null">关闭</button>
+            </div>
+            <div class="card-body">
+                <div class="row g-2 mb-3">
+                    <div class="col-md-3"><div class="detail-card"><strong>{{ logLifecycle.lineage.structured.job_count }}</strong><div>结构化作业</div></div></div>
+                    <div class="col-md-3"><div class="detail-card"><strong>{{ logLifecycle.lineage.structured.temperature_sample_count }}</strong><div>温度采样</div></div></div>
+                    <div class="col-md-3"><div class="detail-card"><strong>{{ logLifecycle.lineage.structured.action_count }}</strong><div>动作事件</div></div></div>
+                    <div class="col-md-3"><div class="detail-card"><strong>{{ logLifecycle.lineage.structured.max_pot_temp ?? '-' }}℃</strong><div>最高锅温</div></div></div>
+                </div>
+                <div class="d-flex flex-wrap gap-2 mb-3">
+                    <span v-for="consumer in logLifecycle.lineage.consumers" :key="consumer.page" class="badge" :class="consumer.available ? 'bg-success' : 'bg-secondary'">{{ consumer.page }} · {{ consumer.available ? '可复用' : '暂无数据' }}</span>
+                </div>
+                <div class="table-responsive">
+                    <table class="table table-sm table-bordered mb-0">
+                        <thead><tr><th>任务时间</th><th>模式</th><th>状态</th><th>复用来源</th><th>失败阶段</th><th>说明</th></tr></thead>
+                        <tbody>
+                            <tr v-for="task in logLifecycle.lineage.tasks" :key="`${task.task_id}-${task.created_at}`">
+                                <td>{{ task.created_at }}</td><td>{{ task.mode }}</td><td>{{ task.status }}</td>
+                                <td>{{ task.reused_from || '-' }}</td><td>{{ task.error_stage || '-' }} / {{ task.error_code || '-' }}</td>
+                                <td>{{ task.error_message || '-' }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
             </div>
         </div>
 
@@ -3816,6 +3902,21 @@
                     error: '',
                     expandedSessionId: '',
                 },
+                logLifecycle: {
+                    startDate: '',
+                    endDate: '',
+                    quickDays: 90,
+                    status: '',
+                    loading: false,
+                    starting: false,
+                    error: '',
+                    result: null,
+                    activeTaskId: '',
+                    task: null,
+                    pollTimer: null,
+                    lineage: null,
+                    lineageFileId: '',
+                },
                 deviceRisk: {
                     loading: false,
                     error: '',
@@ -3878,7 +3979,7 @@
 		                monthLoading: '',
 		                monthDetails: {},
 				                activeTab: 'home',
-		                appVersion: '2026.06.14-system-ux-linkage1',
+		                appVersion: '2026.06.14-log-lifecycle1',
 		                navGroups: [
 		                    { title: '工作台', tabs: [
 		                        { id: 'home', label: '工作台总览', icon: '0', desc: '任务、风险、入口' },
@@ -3887,7 +3988,7 @@
 		                        { id: 'overview', label: '设备风险总览', icon: '1', desc: '概况、风险、入口' },
 		                        { id: 'intervals', label: '作业列表', icon: '2', desc: '结构化作业、异常' },
 		                        { id: 'thermalSafety', label: '作业热安全分析', icon: '3', desc: '温度、功率、动作' },
-		                        { id: 'logs', label: '日志证据中心', icon: '4', desc: '包体、诊断、证据' },
+		                        { id: 'logs', label: '日志生命周期', icon: '4', desc: '发现、下载、解析、入库' },
 		                        { id: 'recipes', label: '菜谱与资源', icon: '5', desc: '步骤、配料、资源' },
 		                    ]},
 		                    { title: '全局检索', tabs: [
@@ -4006,6 +4107,7 @@
 	            this.initStructuredTemperatureDate();
                 this.initTemperatureCalibrationDates();
                 this.initGlobalContextDates();
+                this.initLogLifecycleDates();
                 this.restoreEvidenceRoute();
 	        },
 	        computed: {
@@ -4015,7 +4117,7 @@
 		                    overview: '设备风险总览',
 		                    intervals: '作业列表',
 		                    recipes: '菜谱与资源',
-		                    logs: '日志证据中心',
+		                    logs: '日志生命周期中心',
                             thermalSafety: '作业热安全分析',
 		                    recipeSearch: '菜谱检索',
 		                    versionStats: '版本治理',
@@ -4096,11 +4198,15 @@
             selectedEvidenceLogs() {
                 if (!this.data) return [];
                 const selected = new Set((this.selectedEvidenceLogIds || []).map(String));
-                return (this.data.device_logs || []).filter(log => selected.has(String(log.id)));
+                return this.lifecyclePackages.filter(log => selected.has(String(log.id)));
             },
             selectedEvidenceSizeLabel() {
                 const mb = this.selectedEvidenceLogs.reduce((sum, log) => sum + this.logSizeMb(log), 0);
                 return `${mb.toFixed(1)}MB`;
+            },
+            lifecyclePackages() {
+                if (this.logLifecycle.result?.packages) return this.logLifecycle.result.packages;
+                return this.data?.device_logs || [];
             },
             workspaceTempLine() {
                 const rows = (this.thermalSafety.result?.temperature_points || [])
@@ -4393,7 +4499,7 @@
 		                return `${this.recipeTop.job.stage || '处理中'}，请稍等。`;
 		            },
 		            isBusy() {
-		                return this.searchLoading || this.deviceLookup.loading || this.versionStats.loading || this.recipeSearch.loading || this.recipeAnalysis.loading || this.recipeTop.loading || this.logAnalysisLoading || this.cookTemperatureLoading || this.deviceJobs.loading || this.batchEvidence.loading || this.emergencyLoading || this.oilThermalLoading || this.adminLoading || !!this.monthLoading;
+		                return this.searchLoading || this.deviceLookup.loading || this.versionStats.loading || this.recipeSearch.loading || this.recipeAnalysis.loading || this.recipeTop.loading || this.logAnalysisLoading || this.cookTemperatureLoading || this.deviceJobs.loading || this.batchEvidence.loading || this.logLifecycle.loading || this.logLifecycle.starting || this.emergencyLoading || this.oilThermalLoading || this.adminLoading || !!this.monthLoading;
 		            },
 		            cookTemperatureCooks() {
 		                if (!this.cookTemperature) return [];
@@ -4745,7 +4851,7 @@
             filteredDeviceLogs() {
                 if (!this.data) return [];
                 const keyword = this.filters.keyword.trim().toLowerCase();
-                return (this.data.device_logs || []).filter(log => {
+                return this.lifecyclePackages.filter(log => {
                     const day = String(log.log_time_hint || log.create_time || '').slice(0, 10);
                     if (this.globalContext.startDate && day && day < this.globalContext.startDate) return false;
                     if (this.globalContext.endDate && day && day > this.globalContext.endDate) return false;
@@ -4976,6 +5082,13 @@
                     const start = new Date(end.getTime() - 29 * 24 * 3600 * 1000);
                     this.globalContext.startDate = this.formatDateInput(start);
                     this.globalContext.endDate = this.formatDateInput(end);
+                },
+                initLogLifecycleDates() {
+                    const end = new Date();
+                    const start = new Date(end.getTime() - 89 * 24 * 3600 * 1000);
+                    this.logLifecycle.startDate = this.formatDateInput(start);
+                    this.logLifecycle.endDate = this.formatDateInput(end);
+                    this.logLifecycle.quickDays = 90;
                 },
                 onGlobalDateChange() {
                     this.deviceJobs.result = null;
@@ -5217,6 +5330,147 @@
                         this.temperatureCalibration.error = '日志补齐任务提交失败，请稍后重试。';
                     } finally {
                         this.temperatureCalibration.syncing = false;
+                    }
+                },
+                lifecycleStageLabel(stage, value) {
+                    const labels = {
+                        remote: { available: '可用', missing: '缺失', deleted: '已删除', url_missing: '无地址', unknown: '未知' },
+                        download: { not_started: '未下载', remote_available: '未下载', queued: '排队', downloading: '下载中', downloaded: '已下载', download_failed: '失败', download_timeout: '超时', file_too_large: '超限', skipped: '跳过' },
+                        unzip: { not_started: '未解压', queued: '排队', unzipping: '解压中', unzipped: '已解压', not_zip: '非 ZIP', zip_corrupted: 'ZIP 损坏', unzip_failed: '失败', skipped: '跳过' },
+                        parse: { not_started: '未解析', queued: '排队', parsing: '解析中', parsed: '已解析', partial_success: '部分成功', parse_failed: '失败', key_log_missing: '缺关键日志', no_time_range: '无时间范围', no_internal_session: '无作业片段', no_production_match: 'DB 未匹配', no_temperature_data: '缺温度', skipped: '跳过' },
+                        storage: { not_stored: '未入库', storing: '入库中', stored: '已入库', partial_stored: '部分入库', store_failed: '失败', superseded: '已替代' },
+                    };
+                    return labels[stage]?.[value] || value || '-';
+                },
+                lifecycleStageClass(value) {
+                    if (['available', 'downloaded', 'unzipped', 'parsed', 'stored'].includes(value)) return 'bg-success';
+                    if (['queued', 'downloading', 'unzipping', 'parsing', 'storing'].includes(value)) return 'bg-info text-dark';
+                    if (['partial_success', 'partial_stored', 'no_production_match'].includes(value)) return 'bg-warning text-dark';
+                    if (['not_started', 'remote_available', 'not_stored', 'unknown', 'skipped'].includes(value)) return 'bg-light text-dark border';
+                    return 'bg-danger';
+                },
+                setLogLifecycleRange(days) {
+                    const end = new Date();
+                    const start = new Date(end.getTime() - (Number(days) - 1) * 24 * 3600 * 1000);
+                    this.logLifecycle.quickDays = Number(days);
+                    this.logLifecycle.startDate = this.formatDateInput(start);
+                    this.logLifecycle.endDate = this.formatDateInput(end);
+                    this.loadLogLifecycle(true);
+                },
+                async loadLogLifecycle(refreshIndex = true) {
+                    if (!this.data) return;
+                    this.logLifecycle.loading = true;
+                    this.logLifecycle.error = '';
+                    try {
+                        const params = new URLSearchParams({
+                            start_date: this.logLifecycle.startDate,
+                            end_date: this.logLifecycle.endDate,
+                            status: this.logLifecycle.status || '',
+                            refresh_index: refreshIndex ? '1' : '0',
+                        });
+                        const res = await fetch(`/api/devices/${encodeURIComponent(this.data.stats.sn)}/log-lifecycle?${params.toString()}`, { headers: this.authHeaders() });
+                        if (res.status === 401) {
+                            this.logout();
+                            return;
+                        }
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error(typeof payload.detail === 'string' ? payload.detail : (payload.detail?.message || '生命周期读取失败'));
+                        this.logLifecycle.result = payload;
+                        if (payload.tasks?.length && ['queued', 'running'].includes(payload.tasks[0].status)) {
+                            this.logLifecycle.activeTaskId = payload.tasks[0].task_id;
+                            this.pollLogLifecycleTask(payload.tasks[0].task_id);
+                        }
+                    } catch (e) {
+                        this.logLifecycle.error = e.message || '生命周期读取失败，请稍后重试。';
+                    } finally {
+                        this.logLifecycle.loading = false;
+                    }
+                },
+                async startLogBackfill(mode = 'missing_only') {
+                    if (!this.data) return;
+                    this.logLifecycle.starting = true;
+                    this.logLifecycle.error = '';
+                    try {
+                        const res = await fetch(`/api/devices/${encodeURIComponent(this.data.stats.sn)}/log-backfill`, {
+                            method: 'POST',
+                            headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                start_date: this.logLifecycle.startDate,
+                                end_date: this.logLifecycle.endDate,
+                                mode,
+                                max_packages: 50,
+                            }),
+                        });
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error(typeof payload.detail === 'string' ? payload.detail : (payload.detail?.message || '任务提交失败'));
+                        this.logLifecycle.task = payload.task;
+                        this.logLifecycle.activeTaskId = payload.task?.task_id || '';
+                        if (this.logLifecycle.activeTaskId) this.pollLogLifecycleTask(this.logLifecycle.activeTaskId);
+                        await this.loadLogLifecycle(false);
+                    } catch (e) {
+                        this.logLifecycle.error = e.message || '任务提交失败。';
+                    } finally {
+                        this.logLifecycle.starting = false;
+                    }
+                },
+                async pollLogLifecycleTask(taskId) {
+                    if (!taskId) return;
+                    if (this.logLifecycle.pollTimer) clearTimeout(this.logLifecycle.pollTimer);
+                    try {
+                        const res = await fetch(`/api/log-parse-tasks/${encodeURIComponent(taskId)}`, { headers: this.authHeaders() });
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error(payload.detail || '任务状态读取失败');
+                        this.logLifecycle.task = payload;
+                        if (['queued', 'running'].includes(payload.status)) {
+                            this.logLifecycle.pollTimer = setTimeout(() => this.pollLogLifecycleTask(taskId), 2500);
+                        } else {
+                            this.logLifecycle.activeTaskId = '';
+                            await this.loadLogLifecycle(false);
+                        }
+                    } catch (e) {
+                        this.logLifecycle.error = e.message || '任务状态读取失败。';
+                    }
+                },
+                async retryLifecyclePackage(log) {
+                    if (!log?.id) return;
+                    this.logLifecycle.error = '';
+                    try {
+                        const res = await fetch(`/api/log-packages/${encodeURIComponent(log.id)}/retry`, {
+                            method: 'POST',
+                            headers: { ...this.authHeaders(), 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ stage: log.error_stage || 'auto', force: false }),
+                        });
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error(typeof payload.detail === 'string' ? payload.detail : '重试提交失败');
+                        this.logLifecycle.task = payload;
+                        this.logLifecycle.activeTaskId = payload.task_id;
+                        this.pollLogLifecycleTask(payload.task_id);
+                    } catch (e) {
+                        this.logLifecycle.error = e.message || '重试提交失败。';
+                    }
+                },
+                async clearLifecycleCache(log) {
+                    if (!log?.id || !window.confirm('只清理该包的下载、解压和解析文件缓存；已入库结构化数据会保留。继续吗？')) return;
+                    try {
+                        const res = await fetch(`/api/log-packages/${encodeURIComponent(log.id)}/clear-cache`, { method: 'POST', headers: this.authHeaders() });
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error(payload.detail || '清理失败');
+                        await this.loadLogLifecycle(false);
+                    } catch (e) {
+                        this.logLifecycle.error = e.message || '清理失败。';
+                    }
+                },
+                async loadLogLineage(log) {
+                    if (!log?.id) return;
+                    this.logLifecycle.lineageFileId = String(log.id);
+                    try {
+                        const res = await fetch(`/api/log-packages/${encodeURIComponent(log.id)}/lineage`, { headers: this.authHeaders() });
+                        const payload = await res.json().catch(() => ({}));
+                        if (!res.ok) throw new Error(payload.detail || '数据血缘读取失败');
+                        this.logLifecycle.lineage = payload;
+                        this.$nextTick(() => window.scrollBy({ top: 240, behavior: 'smooth' }));
+                    } catch (e) {
+                        this.logLifecycle.error = e.message || '数据血缘读取失败。';
                     }
                 },
 	            structuredStatusClass(status) {
@@ -5821,6 +6075,7 @@
                 if (tabId === 'safetyAlerts') this.loadSafetyAlerts();
                 if (tabId === 'logAnalysis') this.prepareLogAnalysis();
                 if (tabId === 'temperatureCalibration' && this.data) this.loadTemperatureCalibrations(true);
+                if (tabId === 'logs' && this.data) this.loadLogLifecycle(true);
                 if (tabId === 'logEvidence' && this.data) this.loadLogEvidenceDetail();
                 if (tabId === 'thermalSafety' && this.data && !this.thermalSafety.fileId && this.logAnalysisOptions.length) {
                     this.thermalSafety.fileId = String(this.logAnalysisOptions[0].id);
@@ -7439,6 +7694,12 @@
                 this.deviceRisk.error = '';
                 this.deviceJobs.result = null;
                 this.deviceJobs.error = '';
+                if (this.logLifecycle.pollTimer) clearTimeout(this.logLifecycle.pollTimer);
+                this.logLifecycle.result = null;
+                this.logLifecycle.task = null;
+                this.logLifecycle.activeTaskId = '';
+                this.logLifecycle.lineage = null;
+                this.logLifecycle.error = '';
                 this.selectedEvidenceLogIds = [];
                 this.batchEvidence = { loading: false, processed: 0, total: 0, succeeded: 0, failed: 0, notes: [] };
                 this.thermalSafety.result = null;
@@ -7462,6 +7723,7 @@
                     }
                 }
                 if (this.activeTab === 'temperatureCalibration') this.loadTemperatureCalibrations(true);
+                if (this.activeTab === 'logs') this.loadLogLifecycle(true);
                 if (this.activeTab === 'logEvidence') this.loadLogEvidenceDetail();
                 if (this.activeTab === 'overview') this.loadDeviceRisk(false);
                 if (this.activeTab === 'intervals') this.loadDeviceJobs(false);
